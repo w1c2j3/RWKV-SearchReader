@@ -129,7 +129,7 @@ class SearchReaderPipeline:
                     "source_count": len(chunks),
                     "sources": [
                         {
-                            "source_id": f"S{index}",
+                            "source_id": source.source_id or f"S{index}",
                             "title": source.title,
                             "url": source.url,
                             "score": source.score,

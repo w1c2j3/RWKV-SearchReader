@@ -25,6 +25,7 @@ def test_tavily_key_pool_fails_over_without_changing_query() -> None:
 def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
     assert _tavily_topic("宇树股价") == "general"
     assert _tavily_topic("今天有哪些 AI 新闻") == "news"
+    assert _tavily_topic("概括本周最重要的科技动态") == "news"
     assert _tavily_topic("Python 列表怎么排序") == "general"
     settings = replace(
         Settings(), tavily_api_key="", tavily_api_keys=("first-key", "second-key")

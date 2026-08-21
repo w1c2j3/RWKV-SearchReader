@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime, timedelta
 
 from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import DocumentChunk, Evidence
@@ -106,6 +107,22 @@ def test_summary_prompt_puts_material_before_question_and_requirements() -> None
     prompt = captured["user"]
     assert prompt.index("UNIQUE MATERIAL") < prompt.index("UNIQUE QUESTION")
     assert prompt.index("UNIQUE QUESTION") < prompt.index("只根据这一条材料")
+    assert "不要复述或改写用户问题" in prompt
+
+
+def test_source_and_final_rendering_remove_repeated_weekly_lead() -> None:
+    _, summary = _parse_source_summary(
+        "本周最重要的科技动态包括：量子计算取得新进展。"
+    )
+    answer = _format_bound_answer(
+        [
+            ("S1", "本周最重要的科技动态包括：量子计算取得新进展。"),
+            ("S2", "本周最重要的科技动态包括：新型电池完成测试。"),
+        ]
+    )
+
+    assert summary == "量子计算取得新进展。"
+    assert answer == "- 量子计算取得新进展。 [S1]\n- 新型电池完成测试。 [S2]"
 
 
 def test_stock_summary_prompt_requests_only_latest_price_and_time() -> None:
@@ -217,6 +234,18 @@ def test_source_relation_is_bound_and_official_request_filters_secondary() -> No
 
     assert relation == "official"
     assert summary == "first-party fact"
+    assert [row.source_id for row in eligible] == ["S1"]
+
+
+def test_weekly_question_keeps_only_sources_published_this_week() -> None:
+    rows = _evidence(3)
+    today = datetime.now().astimezone().date()
+    rows[0].published_date = today.isoformat()
+    rows[1].published_date = (today - timedelta(days=14)).isoformat()
+    rows[2].published_date = ""
+
+    eligible = _eligible_evidence("概括本周最重要的科技动态", rows)
+
     assert [row.source_id for row in eligible] == ["S1"]
 
 

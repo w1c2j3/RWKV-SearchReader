@@ -115,6 +115,7 @@ def test_provider_materials_do_not_reorder_by_local_score() -> None:
         SearchHit(
             title="First",
             url="https://example.com/1",
+            source_id="S8",
             content="A",
             score=0.1,
             published_date="2026-08-20",
@@ -125,6 +126,7 @@ def test_provider_materials_do_not_reorder_by_local_score() -> None:
     chunks = provider_materials(hits)
 
     assert [chunk.title for chunk in chunks] == ["First", "Second"]
+    assert [chunk.source_id for chunk in chunks] == ["S8", "S2"]
     assert chunks[0].published_date == "2026-08-20"
 
 

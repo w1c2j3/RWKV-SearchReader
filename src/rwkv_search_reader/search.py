@@ -99,7 +99,7 @@ def _tavily_topic(query: str) -> str:
     """Use Tavily news mode when publication timestamps are part of the evidence."""
 
     if re.search(
-        r"新闻|今日新闻|今天新闻|刚刚发生|本周新闻|本月新闻",
+        r"新闻|今日|今天|刚刚|本周|这周|近一周|最近一周|本月|这个月",
         str(query or ""),
         flags=re.IGNORECASE,
     ):

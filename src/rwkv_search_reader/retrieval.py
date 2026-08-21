@@ -290,7 +290,7 @@ def rank_chunks(
             )
             chunks.append(
                 DocumentChunk(
-                    source_id=f"S{source_index}",
+                    source_id=hit.source_id or f"S{source_index}",
                     title=hit.title,
                     url=hit.url,
                     text=text,
@@ -310,7 +310,7 @@ def provider_materials(hits: list[SearchHit]) -> list[DocumentChunk]:
 
     return [
         DocumentChunk(
-            source_id=f"S{source_index}",
+            source_id=hit.source_id or f"S{source_index}",
             title=hit.title,
             url=hit.url,
             text=hit.content.strip() or hit.snippet.strip(),
@@ -386,6 +386,8 @@ class Retriever:
         deduplicated = _balanced_hits(groups, self.settings.search_max_results)
         if not deduplicated:
             raise SearchReaderError("search", "search provider returned no usable results")
+        for index, hit in enumerate(deduplicated, start=1):
+            hit.source_id = f"S{index}"
 
         selected = deduplicated[: self.settings.fetch_pages]
         if self.provider.results_are_material:

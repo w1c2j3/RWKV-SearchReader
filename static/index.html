@@ -426,7 +426,7 @@
           link.rel = 'noreferrer';
           const number = document.createElement('span');
           number.className = 'source-number';
-          number.textContent = `S${index + 1}`;
+          number.textContent = source.source_id || `S${index + 1}`;
           const name = document.createElement('span');
           name.className = 'source-name';
           name.textContent = source.title || source.url;

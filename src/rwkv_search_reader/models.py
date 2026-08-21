@@ -8,6 +8,7 @@ from typing import Any
 class SearchHit:
     title: str
     url: str
+    source_id: str = ""
     snippet: str = ""
     content: str = ""
     provider: str = ""
