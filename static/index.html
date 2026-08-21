@@ -3,81 +3,517 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RWKV SearchReader</title>
+    <meta name="theme-color" content="#ffffff" />
+    <title>问答助手</title>
     <style>
-      :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-synthesis: none;
+        --page: #ffffff;
+        --sidebar: #171717;
+        --sidebar-hover: #2a2a2a;
+        --text: #1f2937;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --soft: #f4f4f4;
+        --accent: #111827;
+        --reader: #0f766e;
+      }
+
       * { box-sizing: border-box; }
-      body { margin: 0; background: #0b0d10; color: #e7e9ee; min-height: 100vh; }
-      main { width: min(920px, calc(100% - 32px)); margin: 0 auto; padding: 64px 0 96px; }
-      header { margin-bottom: 30px; }
-      h1 { font-size: clamp(30px, 5vw, 50px); margin: 0 0 10px; letter-spacing: -0.04em; }
-      header p { color: #9ca3af; margin: 0; line-height: 1.7; }
-      .badge { color: #7dd3fc; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
-      form { display: grid; gap: 12px; }
-      textarea { width: 100%; min-height: 132px; resize: vertical; border: 1px solid #2b3038; border-radius: 16px;
-        padding: 18px; background: #14171c; color: #fff; font: inherit; line-height: 1.6; outline: none; }
-      textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px #38bdf820; }
-      button { justify-self: start; border: 0; border-radius: 999px; padding: 11px 20px; font: inherit;
-        font-weight: 650; background: #e7e9ee; color: #0b0d10; cursor: pointer; }
-      button:disabled { opacity: .5; cursor: wait; }
-      #status { min-height: 24px; color: #7dd3fc; margin: 24px 0 8px; }
-      article { white-space: pre-wrap; line-height: 1.75; font-size: 17px; }
-      details { margin-top: 28px; border-top: 1px solid #252a31; padding-top: 18px; color: #c8cdd5; }
-      summary { cursor: pointer; color: #9ca3af; }
-      ol { padding-left: 24px; }
-      li { margin: 13px 0; overflow-wrap: anywhere; }
-      a { color: #7dd3fc; }
-      .meta { color: #717784; font-size: 13px; margin-top: 18px; }
+      html, body { height: 100%; }
+      body { margin: 0; background: var(--page); color: var(--text); }
+      button, textarea { font: inherit; }
+      button { cursor: pointer; }
+
+      .app-shell {
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        height: 100dvh;
+        overflow: hidden;
+      }
+
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        padding: 14px 12px;
+        background: var(--sidebar);
+        color: #f9fafb;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        min-height: 42px;
+        padding: 0 8px 13px;
+        font-size: 14px;
+        font-weight: 650;
+      }
+
+      .brand-mark, .assistant-avatar {
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        background: var(--reader);
+        color: white;
+        font-weight: 750;
+      }
+
+      .new-chat {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        min-height: 44px;
+        padding: 0 12px;
+        border: 1px solid #3a3a3a;
+        border-radius: 10px;
+        background: transparent;
+        color: #f9fafb;
+        text-align: left;
+      }
+
+      .new-chat:hover { background: var(--sidebar-hover); }
+      .plus { font-size: 22px; font-weight: 300; line-height: 1; }
+      .sidebar-label { margin: 22px 10px 8px; color: #9ca3af; font-size: 12px; }
+
+      .history-item {
+        width: 100%;
+        overflow: hidden;
+        padding: 10px 12px;
+        border: 0;
+        border-radius: 9px;
+        background: var(--sidebar-hover);
+        color: #f3f4f6;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .sidebar-footer {
+        margin-top: auto;
+        padding: 13px 10px 4px;
+        border-top: 1px solid #303030;
+        color: #9ca3af;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .chat-panel { display: flex; min-width: 0; flex-direction: column; background: var(--page); }
+
+      .topbar {
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 58px;
+        padding: 0 22px;
+        border-bottom: 1px solid var(--line);
+        background: rgb(255 255 255 / 92%);
+        backdrop-filter: blur(12px);
+      }
+
+      .topbar-title { font-size: 15px; font-weight: 650; }
+      .online { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+      .online-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+      .mobile-new { display: none; border: 0; background: transparent; color: var(--text); font-size: 22px; }
+
+      .messages {
+        flex: 1;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scroll-behavior: smooth;
+      }
+
+      .conversation {
+        width: min(820px, calc(100% - 32px));
+        min-height: 100%;
+        margin: 0 auto;
+        padding: 36px 0 190px;
+      }
+
+      .welcome {
+        display: grid;
+        min-height: calc(100dvh - 285px);
+        place-content: center;
+        text-align: center;
+      }
+
+      .welcome-mark {
+        display: grid;
+        place-items: center;
+        width: 50px;
+        height: 50px;
+        margin: 0 auto 18px;
+        border-radius: 15px;
+        background: var(--reader);
+        color: white;
+        font-size: 20px;
+        font-weight: 750;
+        box-shadow: 0 10px 30px rgb(15 118 110 / 18%);
+      }
+
+      .welcome h1 { margin: 0; color: #111827; font-size: clamp(25px, 4vw, 34px); letter-spacing: -.035em; }
+      .welcome p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
+
+      .suggestions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        width: min(570px, 100%);
+        margin: 28px auto 0;
+      }
+
+      .suggestion {
+        padding: 13px 15px;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: #fff;
+        color: #374151;
+        text-align: left;
+        line-height: 1.45;
+      }
+
+      .suggestion:hover { border-color: #c7cbd1; background: #fafafa; }
+
+      .message { display: flex; gap: 13px; margin: 0 0 30px; }
+      .message.user { justify-content: flex-end; }
+
+      .user-bubble {
+        max-width: min(74%, 640px);
+        padding: 11px 16px;
+        border-radius: 20px 20px 5px 20px;
+        background: var(--soft);
+        color: #202123;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .assistant-avatar { margin-top: 1px; width: 28px; height: 28px; border-radius: 8px; font-size: 12px; }
+      .assistant-body { min-width: 0; max-width: calc(100% - 41px); flex: 1; }
+
+      .assistant-answer {
+        color: #202123;
+        font-size: 15px;
+        line-height: 1.8;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .message-meta { margin-top: 10px; color: #9ca3af; font-size: 12px; }
+
+      .source-details { margin-top: 13px; }
+      .source-details summary { width: fit-content; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
+      .source-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+      .source-link {
+        max-width: 100%;
+        overflow: hidden;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: #4b5563;
+        font-size: 12px;
+        text-decoration: none;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .source-link:hover { background: #f9fafb; color: #111827; }
+
+      .typing { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; }
+      .typing span { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; animation: pulse 1.1s infinite ease-in-out; }
+      .typing span:nth-child(2) { animation-delay: .16s; }
+      .typing span:nth-child(3) { animation-delay: .32s; }
+      @keyframes pulse { 0%, 70%, 100% { opacity: .28; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-3px); } }
+
+      .composer-wrap {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        left: 260px;
+        z-index: 4;
+        padding: 28px 20px 15px;
+        background: linear-gradient(to bottom, rgb(255 255 255 / 0%), #fff 30%);
+      }
+
+      .composer {
+        position: relative;
+        width: min(820px, 100%);
+        margin: 0 auto;
+      }
+
+      .composer textarea {
+        display: block;
+        width: 100%;
+        min-height: 54px;
+        max-height: 190px;
+        resize: none;
+        overflow-y: auto;
+        padding: 15px 58px 15px 18px;
+        border: 1px solid #d8dadd;
+        border-radius: 18px;
+        outline: none;
+        background: #fff;
+        color: #111827;
+        line-height: 1.5;
+        box-shadow: 0 8px 28px rgb(0 0 0 / 8%);
+      }
+
+      .composer textarea:focus { border-color: #aeb4bc; box-shadow: 0 8px 32px rgb(0 0 0 / 11%); }
+      .composer textarea::placeholder { color: #9ca3af; }
+
+      .send {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border: 0;
+        border-radius: 11px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      .send:disabled { cursor: default; opacity: .35; }
+      .composer-hint { margin: 8px 0 0; color: #9ca3af; font-size: 11px; text-align: center; }
+
+      @media (max-width: 760px) {
+        .app-shell { grid-template-columns: 1fr; }
+        .sidebar { display: none; }
+        .composer-wrap { left: 0; padding-right: 12px; padding-left: 12px; }
+        .topbar { padding: 0 14px; }
+        .mobile-new { display: block; }
+        .online { display: none; }
+        .conversation { width: min(100% - 24px, 820px); padding-top: 24px; }
+        .welcome { min-height: calc(100dvh - 250px); }
+        .suggestions { grid-template-columns: 1fr; }
+        .suggestion:nth-child(n+3) { display: none; }
+        .user-bubble { max-width: 88%; }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <header>
-        <div class="badge">Tavily → parallel RWKV map → multi-order reduce</div>
-        <h1>RWKV SearchReader</h1>
-      </header>
-      <form id="form">
-        <textarea id="question" required maxlength="8000" placeholder="输入要检索的问题……"></textarea>
-        <button id="submit" type="submit">检索并回答</button>
-      </form>
-      <div id="status"></div>
-      <article id="answer"></article>
-      <details id="sources-box" hidden>
-        <summary>查看检索来源</summary>
-        <ol id="sources"></ol>
-      </details>
-      <div class="meta" id="meta"></div>
-    </main>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="会话侧边栏">
+        <div class="brand"><span class="brand-mark">问</span><span>问答助手</span></div>
+        <button class="new-chat" id="new-chat" type="button"><span class="plus">＋</span><span>新建会话</span></button>
+        <div class="sidebar-label">会话</div>
+        <button class="history-item" id="history-item" type="button">新的会话</button>
+        <div class="sidebar-footer">临时会话<br />刷新页面后记录将被清空</div>
+      </aside>
+
+      <section class="chat-panel">
+        <header class="topbar">
+          <button class="mobile-new" id="mobile-new" type="button" aria-label="新建会话">＋</button>
+          <div class="topbar-title">问答助手</div>
+          <div class="online"><span class="online-dot"></span><span>在线</span></div>
+        </header>
+
+        <main class="messages" id="messages" aria-live="polite">
+          <div class="conversation" id="conversation">
+            <section class="welcome" id="welcome">
+              <div class="welcome-mark">问</div>
+              <h1>今天想了解什么？</h1>
+              <p>输入问题，开始新的对话</p>
+              <div class="suggestions">
+                <button class="suggestion" type="button">今天有哪些值得关注的 AI 新闻？</button>
+                <button class="suggestion" type="button">Python 当前最新稳定版本是什么？</button>
+                <button class="suggestion" type="button">概括本周最重要的科技动态</button>
+                <button class="suggestion" type="button">当前热门游戏有哪些重要更新？</button>
+              </div>
+            </section>
+          </div>
+        </main>
+
+        <div class="composer-wrap">
+          <form class="composer" id="form">
+            <textarea id="question" required maxlength="8000" rows="1" aria-label="输入消息" placeholder="输入消息"></textarea>
+            <button class="send" id="submit" type="submit" aria-label="发送消息">↑</button>
+          </form>
+          <p class="composer-hint">Enter 发送 · Shift + Enter 换行</p>
+        </div>
+      </section>
+    </div>
+
     <script>
       const form = document.querySelector('#form');
+      const questionInput = document.querySelector('#question');
       const submit = document.querySelector('#submit');
-      const status = document.querySelector('#status');
-      const answer = document.querySelector('#answer');
-      const sourcesBox = document.querySelector('#sources-box');
-      const sources = document.querySelector('#sources');
-      const meta = document.querySelector('#meta');
+      const messages = document.querySelector('#messages');
+      const conversation = document.querySelector('#conversation');
+      const welcome = document.querySelector('#welcome');
+      const historyItem = document.querySelector('#history-item');
+      const newChatButtons = [document.querySelector('#new-chat'), document.querySelector('#mobile-new')];
+      let pending = false;
+      let messageCount = 0;
+
+      const scrollToBottom = () => requestAnimationFrame(() => {
+        messages.scrollTop = messages.scrollHeight;
+      });
+
+      const resizeComposer = () => {
+        questionInput.style.height = 'auto';
+        questionInput.style.height = `${Math.min(questionInput.scrollHeight, 190)}px`;
+      };
+
+      const assistantShell = () => {
+        const row = document.createElement('section');
+        row.className = 'message assistant';
+        const avatar = document.createElement('div');
+        avatar.className = 'assistant-avatar';
+        avatar.textContent = '答';
+        const body = document.createElement('div');
+        body.className = 'assistant-body';
+        row.append(avatar, body);
+        return { row, body };
+      };
+
+      const appendUser = (text) => {
+        const row = document.createElement('section');
+        row.className = 'message user';
+        const bubble = document.createElement('div');
+        bubble.className = 'user-bubble';
+        bubble.textContent = text;
+        row.appendChild(bubble);
+        conversation.appendChild(row);
+      };
+
+      const appendLoading = () => {
+        const { row, body } = assistantShell();
+        const typing = document.createElement('div');
+        typing.className = 'typing';
+        typing.setAttribute('aria-label', '正在生成回答');
+        typing.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
+        body.appendChild(typing);
+        conversation.appendChild(row);
+        return row;
+      };
+
+      const appendAssistant = (data) => {
+        const { row, body } = assistantShell();
+        const answer = document.createElement('div');
+        answer.className = 'assistant-answer';
+        answer.textContent = data.answer;
+        body.appendChild(answer);
+
+        if (data.sources?.length) {
+          const details = document.createElement('details');
+          details.className = 'source-details';
+          const summary = document.createElement('summary');
+          summary.textContent = `${data.sources.length} 个参考来源`;
+          const list = document.createElement('div');
+          list.className = 'source-list';
+          data.sources.forEach((source, index) => {
+            const link = document.createElement('a');
+            link.className = 'source-link';
+            link.href = source.url;
+            link.target = '_blank';
+            link.rel = 'noreferrer';
+            link.textContent = `${index + 1}. ${source.title || source.url}`;
+            list.appendChild(link);
+          });
+          details.append(summary, list);
+          body.appendChild(details);
+        }
+
+        const meta = document.createElement('div');
+        meta.className = 'message-meta';
+        const seconds = Number(data.timings_ms?.total || 0) / 1000;
+        meta.textContent = `${seconds.toFixed(1)} 秒${data.degraded ? ' · 部分任务已降级' : ''}`;
+        body.appendChild(meta);
+        conversation.appendChild(row);
+      };
+
+      const appendError = (message) => {
+        const { row, body } = assistantShell();
+        const answer = document.createElement('div');
+        answer.className = 'assistant-answer';
+        answer.textContent = `暂时无法回答：${message}`;
+        body.appendChild(answer);
+        conversation.appendChild(row);
+      };
+
+      const resetChat = () => {
+        pending = false;
+        messageCount = 0;
+        submit.disabled = false;
+        questionInput.disabled = false;
+        questionInput.value = '';
+        resizeComposer();
+        conversation.querySelectorAll('.message').forEach((node) => node.remove());
+        welcome.hidden = false;
+        historyItem.textContent = '新的会话';
+        questionInput.focus();
+      };
+
+      newChatButtons.forEach((button) => button.addEventListener('click', resetChat));
+      historyItem.addEventListener('click', scrollToBottom);
+      document.querySelectorAll('.suggestion').forEach((button) => {
+        button.addEventListener('click', () => {
+          questionInput.value = button.textContent.trim();
+          resizeComposer();
+          form.requestSubmit();
+        });
+      });
+
+      questionInput.addEventListener('input', resizeComposer);
+      questionInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+      });
+
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
-        const question = document.querySelector('#question').value.trim();
-        if (!question) return;
-        submit.disabled = true; answer.textContent = ''; sources.innerHTML = ''; meta.textContent = '';
-        sourcesBox.hidden = true; status.textContent = '正在执行 Tavily 检索、RWKV 并发摘要和多顺序汇总…';
+        const question = questionInput.value.trim();
+        if (!question || pending) return;
+
+        pending = true;
+        submit.disabled = true;
+        questionInput.disabled = true;
+        welcome.hidden = true;
+        appendUser(question);
+        if (messageCount === 0) historyItem.textContent = question.slice(0, 24);
+        messageCount += 1;
+        questionInput.value = '';
+        resizeComposer();
+        const loading = appendLoading();
+        scrollToBottom();
+
         try {
-          const response = await fetch('/v1/answer', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question}) });
+          const response = await fetch('/v1/answer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question }),
+          });
           const data = await response.json();
-          if (!response.ok) throw new Error(data.detail?.message || JSON.stringify(data.detail || data));
-          answer.textContent = data.answer;
-          for (const source of data.sources) {
-            const li = document.createElement('li');
-            const link = document.createElement('a'); link.href = source.url; link.target = '_blank'; link.rel = 'noreferrer';
-            link.textContent = source.title || source.url; li.appendChild(link); sources.appendChild(li);
-          }
-          sourcesBox.hidden = !data.sources.length;
-          meta.textContent = `${data.search_provider} · ${data.reader_mode} · ${(data.timings_ms.total / 1000).toFixed(1)} 秒`;
-          status.textContent = data.degraded ? '已完成（部分并发阅读任务发生降级）' : '已完成';
-        } catch (error) { status.textContent = `失败：${error.message}`; }
-        finally { submit.disabled = false; }
+          if (!response.ok) throw new Error(data.detail?.message || '请求失败');
+          loading.remove();
+          appendAssistant(data);
+        } catch (error) {
+          loading.remove();
+          appendError(error.message || '未知错误');
+        } finally {
+          pending = false;
+          submit.disabled = false;
+          questionInput.disabled = false;
+          questionInput.focus();
+          scrollToBottom();
+        }
       });
+
+      resizeComposer();
     </script>
   </body>
 </html>
