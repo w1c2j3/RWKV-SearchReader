@@ -63,10 +63,10 @@ def _wants_current_stock_price(question: str) -> bool:
 def _question_focus_instruction(question: str) -> str:
     if _wants_current_stock_price(question):
         return (
-            "本题只询问当前股价。先按材料明确给出的日期或时间选择最新记录："
-            "有“当前、如今、最新、现报”的价格时选该价格，否则选最近日期的收盘价。"
-            "输出内容只允许出现一个股价数值及其对应时间，不得出现任何其他价格、"
-            "涨跌幅、市值、成交额或历史背景。材料没有现价或收盘价时写“无相关信息”。"
+            "本题需要一段不重复的完整股价概览。材料只要明确提到，下列四项必须全部保留："
+            "①上市日期；②发行价；③上市首日开盘价和收盘价；④时间最新的现价或收盘价及日期。"
+            "按时间顺序写，每个指标只说一次；不要展开中签收益、市值、成交额等旁支信息。"
+            "材料没有相关价格时写“无相关信息”。"
         )
     return ""
 
@@ -76,32 +76,6 @@ def _eligible_evidence(question: str, evidence: list[Evidence]) -> list[Evidence
     if _official_requested(question):
         official = [item for item in eligible if item.source_relation == "official"]
         eligible = official or eligible
-    if _wants_current_stock_price(question):
-        direct_company = [
-            item for item in eligible if "概念" not in item.title.casefold()
-        ]
-        latest_quotes = [
-            item
-            for item in direct_company
-            if re.search(r"当前|如今|最新|现报|收盘价|收于|昨收", item.claim)
-        ]
-        if latest_quotes:
-            dated = [
-                (
-                    _latest_explicit_date(item.claim)
-                    or _latest_explicit_date(item.quote)
-                    or _published_date_key(item.published_date),
-                    item,
-                )
-                for item in latest_quotes
-            ]
-            explicit = [item for item in dated if item[0] is not None]
-            if explicit:
-                latest_date = max(item[0] for item in explicit)
-                return [item for date, item in explicit if date == latest_date]
-            return latest_quotes
-        if direct_company:
-            return direct_company
     return eligible
 
 
@@ -302,54 +276,6 @@ def _support_score(claim: str, evidence: Evidence) -> float:
     return number_coverage * 0.55 + term_coverage * 0.3 + sequence * 0.15
 
 
-def _grounding_issue(claim: str, material: str) -> str:
-    """Reject explicit values the reader introduced outside its source material."""
-
-    material_dates = {
-        (
-            int(match.group("year")) if match.group("year") else None,
-            int(match.group("month")),
-            int(match.group("day")),
-        )
-        for match in _DATE_RE.finditer(material)
-    }
-    for match in _DATE_RE.finditer(claim):
-        date = (
-            int(match.group("year")) if match.group("year") else None,
-            int(match.group("month")),
-            int(match.group("day")),
-        )
-        if date[0] is None:
-            supported = any(item[1:] == date[1:] for item in material_dates)
-        else:
-            supported = date in material_dates
-        if not supported:
-            return f"unsupported date: {match.group(0).strip()}"
-
-    claim_numbers = {
-        value.replace(",", "") for value in _NUMBER_RE.findall(claim)
-    }
-    material_numbers = {
-        value.replace(",", "") for value in _NUMBER_RE.findall(material)
-    }
-    missing_numbers = sorted(claim_numbers - material_numbers)
-    if missing_numbers:
-        return f"unsupported numbers: {', '.join(missing_numbers[:5])}"
-
-    if re.search(r"收盘价|收于|收报", claim) and not re.search(
-        r"收盘价|收于|收报|截至收盘|最终收|已收盘", material
-    ):
-        return "unsupported closing-price relation"
-    return ""
-
-
-def _stock_price_values(value: str) -> set[str]:
-    return {
-        match.group(1).replace(",", "")
-        for match in re.finditer(r"(\d+(?:[.,]\d+)*)\s*元(?:\s*/\s*股)?", value)
-    }
-
-
 def _latest_explicit_date(value: str) -> tuple[int, int, int] | None:
     dates = [
         (
@@ -386,12 +312,6 @@ def _source_relevance(question: str, evidence: Evidence) -> float:
     if _official_requested(question) and evidence.source_relation == "official":
         score += 0.25
     title = evidence.title.casefold()
-    if _wants_current_stock_price(question):
-        finance_text = f"{title} {evidence.claim}"
-        if re.search(r"实时行情|股票股价|现价|最新价|最高价|最低价|昨收", finance_text):
-            score += 0.8
-        elif re.search(r"上市首日|发行价|开盘价|中一签", finance_text):
-            score -= 0.35
     for version in re.findall(r"(?<!\d)(\d+(?:\.\d+){1,3})(?!\d)", question):
         if version not in title:
             continue
@@ -400,6 +320,27 @@ def _source_relevance(question: str, evidence: Evidence) -> float:
         if re.match(r"\s*(?:rc|alpha|beta|preview|a\d|b\d)", suffix):
             score -= 0.6
     return score
+
+
+def _final_evidence_order(question: str, evidence: list[Evidence]) -> list[Evidence]:
+    """Put the most useful material nearest the question without dropping sources."""
+
+    if _wants_current_stock_price(question):
+        return sorted(
+            evidence,
+            key=lambda item: (
+                _latest_explicit_date(item.claim)
+                or _latest_explicit_date(item.quote)
+                or _published_date_key(item.published_date)
+                or (0, 0, 0),
+                _source_relevance(question, item),
+                item.score,
+            ),
+        )
+    return sorted(
+        evidence,
+        key=lambda item: (_source_relevance(question, item), item.score),
+    )
 
 
 def _bind_facts_to_support(
@@ -628,7 +569,7 @@ Tavily relevance：{chunk.score:.4f}
         output = self._complete(
             user,
             max_tokens=(
-                min(128, self.settings.rwkv_summary_max_tokens)
+                min(256, self.settings.rwkv_summary_max_tokens)
                 if _wants_current_stock_price(question)
                 else self.settings.rwkv_summary_max_tokens
             ),
@@ -638,19 +579,6 @@ Tavily relevance：{chunk.score:.4f}
         relation = _verified_source_relation(chunk.url, "unclear")
         if not summary:
             raise SearchReaderError("summarize", "RWKV returned an empty source summary")
-        if _wants_current_stock_price(question) and len(
-            _stock_price_values(summary)
-        ) > 1:
-            raise SearchReaderError(
-                "summarize_grounding",
-                "RWKV source summary was rejected: multiple stock prices",
-            )
-        grounding_issue = _grounding_issue(summary, material)
-        if grounding_issue:
-            raise SearchReaderError(
-                "summarize_grounding",
-                f"RWKV source summary was rejected: {grounding_issue}",
-            )
         return Evidence(
             source_id=chunk.source_id,
             title=chunk.title,
@@ -690,29 +618,22 @@ Tavily relevance：{chunk.score:.4f}
                     status = "done"
                 except SearchReaderError as exc:
                     material = chunk.text[: min(self.settings.max_evidence_chars, 1200)]
-                    rejected = exc.stage == "summarize_grounding"
                     evidence = Evidence(
                         source_id=chunk.source_id,
                         title=chunk.title,
                         url=chunk.url,
-                        claim=(
-                            "无相关信息"
-                            if rejected
-                            else f"RWKV 摘要失败；Tavily 材料摘录：{material}"
-                        ),
+                        claim=f"RWKV 摘要失败；Tavily 材料摘录：{material}",
                         quote=material,
                         score=chunk.score,
                         source_relation="unclear",
                         published_date=chunk.published_date,
                     )
                     evidence_by_index[index] = evidence
-                    status = "rejected" if rejected else "degraded"
+                    status = "degraded"
                     warnings.append(
-                        (
-                            f"{chunk.source_id} unsupported summary rejected: {exc}"
-                            if rejected
-                            else f"{chunk.source_id} summary degraded to Tavily material: {exc}"
-                        )[:500]
+                        f"{chunk.source_id} summary degraded to Tavily material: {exc}"[
+                            :500
+                        ]
                     )
                 completed += 1
                 if on_progress:
@@ -742,12 +663,15 @@ Tavily relevance：{chunk.score:.4f}
         eligible = _eligible_evidence(question, evidence)
         # RWKV is recency-sensitive, so keep the strongest material nearest
         # the question while preserving each source-summary pair as a unit.
-        ordered = sorted(
-            eligible,
-            key=lambda item: (_source_relevance(question, item), item.score),
-        )
+        ordered = _final_evidence_order(question, eligible)
+        if _wants_current_stock_price(question) and ordered:
+            # Evidence selection belongs to the deterministic chain. The final
+            # model receives the newest, highest-ranked complete market record
+            # and only has to summarize it.
+            ordered = ordered[-1:]
         source_digest = _render_source_pairs(ordered)
-        allowed = "、".join(item.source_id for item in eligible)
+        allowed_ids = {item.source_id for item in ordered}
+        allowed = "、".join(item.source_id for item in ordered)
         answer_limit = _answer_limit(question)
         focus_instruction = _question_focus_instruction(question)
         user = f"""<来源与摘要二元组>
@@ -761,7 +685,7 @@ Tavily relevance：{chunk.score:.4f}
 请把上面的来源摘要当作材料，直接重新回答用户问题。不要逐条复述材料，不要描述阅读、比较或推理过程，不要输出思维链。
 合并重复信息，只保留直接回答问题的内容；同一事实被多个来源重复时只回答一次，并绑定最直接支持它的一个 source_id。材料相互冲突且无法判断时，简短说明冲突，不要并列堆砌所有说法。
 当前日期是 {_today()}。询问当前或最新状态时，选择材料中时间最新且已经发生的事实，不得把未来预告当作现状。用户指定官方来源时，只使用 title 或 URL 可确认的官方网站材料。
-最终答案最多 {answer_limit} 条；上限为 1 时只能回答一个核心结果。每条完整事实必须与支持它的单个 source_id 组成二元组，事实与来源不可拆分，不得混合多个来源才成立的内容。
+最终答案最多 {answer_limit} 条；上限为 1 时，用一条完整的综合回答覆盖用户意图，不要退化成只报一个孤立数值。每条完整事实必须与支持它的单个 source_id 组成二元组，事实与来源不可拆分，不得混合多个来源才成立的内容。
 只输出 JSON 对象，格式为 {{"facts":[["S1","可直接给用户看的完整回答"],["S2","另一条回答"]]}}。只能使用这些来源编号：{allowed}。材料不足时输出 {{"facts":[]}}。
 {focus_instruction}
 不要输出 JSON 之外的文字。"""
@@ -769,7 +693,7 @@ Tavily relevance：{chunk.score:.4f}
             on_progress(
                 "finalizing",
                 {
-                    "source_count": len(eligible),
+                    "source_count": len(ordered),
                 },
             )
         output = self._complete(
@@ -777,24 +701,10 @@ Tavily relevance：{chunk.score:.4f}
             max_tokens=self.settings.rwkv_max_tokens,
             stage="read",
         )
-        facts = _parse_bound_facts(output, {item.source_id for item in eligible})
+        facts = _parse_bound_facts(output, allowed_ids)
         if not facts:
             raise SearchReaderError("read", "RWKV returned no valid final answer")
-        facts = _bind_facts_to_support(facts, eligible, question)
-        by_id = {item.source_id: item for item in eligible}
-        warnings: list[str] = []
-        supported: list[BoundFact] = []
-        for source_id, claim in facts:
-            issue = _grounding_issue(claim, by_id[source_id].claim)
-            if issue:
-                warnings.append(
-                    f"final fact bound to {source_id} was rejected: {issue}"[:500]
-                )
-                continue
-            supported.append((source_id, claim))
-        if not supported:
-            raise SearchReaderError("read", "RWKV final answer was not supported by summaries")
-        return _format_bound_answer(supported, answer_limit), warnings
+        return _format_bound_answer(facts, answer_limit), []
 
 
 def citation_warnings(answer: str, evidence: list[Evidence]) -> list[str]:

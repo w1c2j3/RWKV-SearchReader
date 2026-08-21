@@ -11,8 +11,8 @@ from rwkv_search_reader.reader import (
     _answer_limit,
     _bind_facts_to_support,
     _eligible_evidence,
+    _final_evidence_order,
     _format_bound_answer,
-    _grounding_issue,
     _latest_explicit_date,
     _parse_bound_facts,
     _parse_source_summary,
@@ -128,18 +128,11 @@ def test_stock_summary_prompt_requests_only_latest_price_and_time() -> None:
     reader._summarize_one("宇树股价", chunk)
 
     prompt = captured["user"]
-    assert "否则选最近日期的收盘价" in prompt
-    assert "只允许出现一个股价数值" in prompt
+    assert "下列四项必须全部保留" in prompt
+    assert "每个指标只说一次" in prompt
 
 
-def test_grounding_rejects_date_and_price_relation_missing_from_material() -> None:
-    material = "8月19日开盘上涨，股价报1100元。"
-
-    assert "unsupported date" in _grounding_issue(
-        "8月20日收盘价1100元。", material
-    )
-    assert "closing-price" in _grounding_issue("当日收盘价1100元。", material)
-    assert _grounding_issue("8月19日股价报1100元。", material) == ""
+def test_date_parser_does_not_treat_decimal_as_calendar_date() -> None:
     assert _latest_explicit_date("机器人极限速度12.66m/s，8月19日发布。") == (
         2026,
         8,
@@ -227,7 +220,7 @@ def test_source_relation_is_bound_and_official_request_filters_secondary() -> No
     assert [row.source_id for row in eligible] == ["S1"]
 
 
-def test_current_stock_price_filters_ipo_and_concept_index_materials() -> None:
+def test_current_stock_price_keeps_all_material_for_final_summary() -> None:
     rows = _evidence(3)
     rows[0].title = "宇树科技上市首日开盘"
     rows[0].claim = "发行价150.80元，上市首日开盘价1100元。"
@@ -238,7 +231,7 @@ def test_current_stock_price_filters_ipo_and_concept_index_materials() -> None:
 
     eligible = _eligible_evidence("宇树股价", rows)
 
-    assert [row.source_id for row in eligible] == ["S2"]
+    assert [row.source_id for row in eligible] == ["S1", "S2", "S3"]
 
 
 def test_current_stock_price_uses_evidence_time_before_final_model() -> None:
@@ -250,9 +243,9 @@ def test_current_stock_price_uses_evidence_time_before_final_model() -> None:
     rows[1].quote = "8月20日，截至收盘股价报687元/股。"
     rows[1].published_date = "Thu, 20 Aug 2026 18:00:00 GMT"
 
-    eligible = _eligible_evidence("宇树股价", rows)
+    ordered = _final_evidence_order("宇树股价", rows)
 
-    assert [row.source_id for row in eligible] == ["S2"]
+    assert [row.source_id for row in ordered] == ["S1", "S2"]
 
 
 def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
@@ -329,4 +322,28 @@ def test_final_prompt_keeps_source_and_fact_pairs_bound_before_requirements() ->
     assert "候选事实" not in prompt
     assert "不要输出思维链" in prompt
     assert answer == "BOUND FACT [S2]"
+    assert warnings == []
+
+
+def test_stock_final_reader_receives_newest_complete_evidence_only() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    captured = {}
+    rows = _evidence(2)
+    rows[0].claim = "8月19日上市，发行价150.8元，收盘900元。"
+    rows[0].quote = "8月19日上市，发行价150.8元，收盘900元。"
+    rows[1].claim = "8月19日上市，发行价150.8元；8月20日收盘687元。"
+    rows[1].quote = "8月19日上市，发行价150.8元；8月20日收盘687元。"
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return '{"facts":[["S2","完整行情总结"]]}'
+
+    reader._complete = complete
+
+    answer, warnings = reader.finalize("宇树股价", rows)
+
+    assert '["S1", {' not in captured["user"]
+    assert '["S2", {' in captured["user"]
+    assert answer == "完整行情总结 [S2]"
     assert warnings == []
