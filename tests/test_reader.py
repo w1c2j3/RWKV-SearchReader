@@ -125,6 +125,23 @@ def test_source_and_final_rendering_remove_repeated_weekly_lead() -> None:
     assert answer == "- 量子计算取得新进展。 [S1]\n- 新型电池完成测试。 [S2]"
 
 
+def test_final_prompt_treats_importance_as_selection_not_a_quota() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    captured: dict[str, str] = {}
+
+    def complete(user: str, **kwargs: object) -> str:
+        del kwargs
+        captured["user"] = user
+        return '{"facts":[["S1","量子计算取得突破。"]]}'
+
+    reader = RWKVReader(settings)
+    reader._complete = complete
+    reader.finalize("概括本周最重要的科技动态", _evidence(2))
+
+    assert "不要把例行会议" in captured["user"]
+    assert "不要为了凑数填满上限" in captured["user"]
+
+
 def test_stock_summary_prompt_requests_only_latest_price_and_time() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
@@ -247,6 +264,20 @@ def test_weekly_question_keeps_only_sources_published_this_week() -> None:
     eligible = _eligible_evidence("概括本周最重要的科技动态", rows)
 
     assert [row.source_id for row in eligible] == ["S1"]
+
+
+def test_important_news_excludes_routine_updates_before_final_reading() -> None:
+    rows = _evidence(3)
+    today = datetime.now().astimezone().date().isoformat()
+    for row in rows:
+        row.published_date = today
+    rows[0].title = "某地召开科技政策宣传解读会议"
+    rows[1].title = "某区新增47家创新型中小企业_部门动态"
+    rows[2].title = "科研人员发现大脑全新神经调控环路"
+
+    eligible = _eligible_evidence("概括本周最重要的科技动态", rows)
+
+    assert [row.source_id for row in eligible] == ["S3"]
 
 
 def test_current_stock_price_keeps_all_material_for_final_summary() -> None:

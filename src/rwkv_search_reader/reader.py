@@ -22,6 +22,10 @@ _SUMMARY_LEAD_RE = re.compile(
     r"(?:最重要的)?(?:科技)?动态(?:包括|是|有)?\s*[:：]?\s*)",
     flags=re.IGNORECASE,
 )
+_ROUTINE_UPDATE_RE = re.compile(
+    r"工作动态|部门动态|动态速递|会议|培训班|宣传解读|名单公布|"
+    r"公布.{0,12}名单|总目录|年度目录|举办.{0,12}活动"
+)
 
 
 def _today() -> str:
@@ -42,6 +46,10 @@ def _strip_summary_lead(value: str) -> str:
 
 def _weekly_requested(question: str) -> bool:
     return bool(re.search(r"本周|这周|近一周|最近一周", question))
+
+
+def _importance_requested(question: str) -> bool:
+    return bool(re.search(r"最重要|重大|最值得关注", question))
 
 
 def _parse_source_summary(value: str) -> tuple[str, str]:
@@ -104,6 +112,12 @@ def _eligible_evidence(question: str, evidence: list[Evidence]) -> list[Evidence
         ]
         if recent:
             eligible = recent
+    if _importance_requested(question):
+        substantive = [
+            item for item in eligible if not _ROUTINE_UPDATE_RE.search(item.title)
+        ]
+        if substantive:
+            eligible = substantive
     return eligible
 
 
@@ -715,6 +729,7 @@ Tavily relevance：{chunk.score:.4f}
 
 请把上面的来源摘要当作材料，直接重新回答用户问题。不要逐条复述材料，不要描述阅读、比较或推理过程，不要输出思维链。
 合并重复信息，只保留直接回答问题的内容；同一事实被多个来源重复时只回答一次，并绑定最直接支持它的一个 source_id。每个 facts 元素只写一个具体事件，不要在一个元素中堆砌整页新闻清单。不要重复用户问题，也不要让多条事实都以“本周最重要的科技动态包括”等相同前缀开头。材料相互冲突且无法判断时，简短说明冲突，不要并列堆砌所有说法。
+如果用户询问“最重要”或“重大”动态，按科学突破、产业影响、社会影响和事件规模筛选；不要把例行会议、普通名单公布、地方工作动态或企业宣传当作重大科技新闻。材料中够不上“重要”的事件可以不选，不要为了凑数填满上限。
 当前日期是 {_today()}。询问当前或最新状态时，选择材料中时间最新且已经发生的事实，不得把未来预告当作现状。用户指定官方来源时，只使用 title 或 URL 可确认的官方网站材料。
 最终答案最多 {answer_limit} 条；上限为 1 时，用一条完整的综合回答覆盖用户意图，不要退化成只报一个孤立数值。每条完整事实必须与支持它的单个 source_id 组成二元组，事实与来源不可拆分，不得混合多个来源才成立的内容。
 只输出 JSON 对象，格式为 {{"facts":[["S1","可直接给用户看的完整回答"],["S2","另一条回答"]]}}。只能使用这些来源编号：{allowed}。材料不足时输出 {{"facts":[]}}。
