@@ -69,7 +69,6 @@ class SearchReaderPipeline:
             "model": self.settings.rwkv_model,
             "protocol": self.settings.rwkv_protocol,
             "summary_workers": self.settings.rwkv_summary_workers,
-            "reduce_orders": self.settings.rwkv_reduce_orders,
             "summary_max_tokens": self.settings.rwkv_summary_max_tokens,
             "max_tokens": self.settings.rwkv_max_tokens,
             "temperature": self.settings.rwkv_temperature,
@@ -134,6 +133,7 @@ class SearchReaderPipeline:
                             "title": source.title,
                             "url": source.url,
                             "score": source.score,
+                            "published_date": source.published_date,
                         }
                         for index, source in enumerate(sources[: len(chunks)], start=1)
                     ],
@@ -148,25 +148,18 @@ class SearchReaderPipeline:
             )
             timings["summarize"] = round((time.perf_counter() - stage) * 1000, 1)
 
-            emit(
-                "organizing",
-                {
-                    "source_count": len(evidence),
-                    "order_count": self.settings.rwkv_reduce_orders,
-                },
-            )
             stage = time.perf_counter()
-            answer, reduce_warnings = self.reader.finalize(
+            answer, final_warnings = self.reader.finalize(
                 normalized, evidence, on_progress=emit
             )
-            timings["reduce"] = round((time.perf_counter() - stage) * 1000, 1)
+            timings["finalize"] = round((time.perf_counter() - stage) * 1000, 1)
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)
             emit("completed", {"duration_ms": timings["total"]})
 
             warnings = [
                 *retrieval_warnings,
                 *summary_warnings,
-                *reduce_warnings,
+                *final_warnings,
                 *citation_warnings(answer, evidence),
             ]
             result = PipelineResult(
@@ -178,7 +171,7 @@ class SearchReaderPipeline:
                 sources=sources,
                 evidence=evidence,
                 search_provider=self.provider.name,
-                reader_mode="rwkv-parallel-map-reduce",
+                reader_mode="rwkv-parallel-read-final-summary",
                 degraded=bool(warnings),
                 warnings=warnings,
                 timings_ms=timings,

@@ -107,7 +107,6 @@ class Settings:
     rwkv_model: str = ""
     rwkv_protocol: str = "completions"
     rwkv_summary_workers: int = 10
-    rwkv_reduce_orders: int = 5
     rwkv_summary_max_tokens: int = 384
     rwkv_max_tokens: int = 1536
     rwkv_temperature: float = 0.1
@@ -136,9 +135,8 @@ class Settings:
             "retrieval_mode": "questions-only",
             "search_provider": self.search_provider,
             "search_configured": provider_ready,
-            "reader_mode": "rwkv-parallel-map-reduce",
+            "reader_mode": "rwkv-parallel-read-final-summary",
             "summary_workers": self.rwkv_summary_workers,
-            "reduce_orders": self.rwkv_reduce_orders,
             "rwkv_configured": self.rwkv_configured,
         }
 
@@ -170,7 +168,6 @@ def get_settings() -> Settings:
         rwkv_summary_workers=_integer(
             "SEARCH_READER_RWKV_SUMMARY_WORKERS", 10, 1, 32
         ),
-        rwkv_reduce_orders=_integer("SEARCH_READER_RWKV_REDUCE_ORDERS", 5, 1, 10),
         rwkv_summary_max_tokens=_integer(
             "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 384, 96, 2048
         ),

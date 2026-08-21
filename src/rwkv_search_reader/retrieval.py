@@ -296,6 +296,7 @@ def rank_chunks(
                     text=text,
                     score=round(score, 4),
                     chunk_index=chunk_index,
+                    published_date=hit.published_date,
                 )
             )
     chunks.sort(
@@ -315,6 +316,7 @@ def provider_materials(hits: list[SearchHit]) -> list[DocumentChunk]:
             text=hit.content.strip() or hit.snippet.strip(),
             score=float(hit.score or 0.0),
             chunk_index=0,
+            published_date=hit.published_date,
         )
         for source_index, hit in enumerate(hits, start=1)
         if hit.content.strip() or hit.snippet.strip()

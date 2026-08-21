@@ -95,6 +95,18 @@ def _explicit_domains(query: str) -> list[str]:
     )[:5]
 
 
+def _tavily_topic(query: str) -> str:
+    """Use Tavily news mode when publication timestamps are part of the evidence."""
+
+    if re.search(
+        r"新闻|今日新闻|今天新闻|刚刚发生|本周新闻|本月新闻",
+        str(query or ""),
+        flags=re.IGNORECASE,
+    ):
+        return "news"
+    return "general"
+
+
 def _json_object(response: requests.Response, stage: str) -> dict[str, Any]:
     if response.status_code >= 400:
         detail = response.text[:500].replace("\n", " ")
@@ -190,7 +202,7 @@ class TavilyProvider(SearchProvider):
             "include_answer": False,
             "include_raw_content": False,
             "include_images": False,
-            "topic": "general",
+            "topic": _tavily_topic(query),
         }
         domains = _explicit_domains(query)
         if domains:
@@ -217,7 +229,9 @@ class TavilyProvider(SearchProvider):
                     content=material,
                     provider=self.name,
                     score=float(item.get("score") or 0.0),
-                    published_date=_clean(item.get("published_date"), 80),
+                    published_date=_clean(
+                        item.get("published_date") or item.get("publishedDate"), 80
+                    ),
                 )
             )
         return hits

@@ -174,7 +174,7 @@ def build_summary(
             "temperature": settings.rwkv_temperature,
         },
         "search_provider": settings.search_provider,
-        "reader_mode_configured": "rwkv-parallel-map-reduce",
+        "reader_mode_configured": "rwkv-parallel-read-final-summary",
         "counts": {
             "dataset": len(cases),
             "recorded": len(ordered),

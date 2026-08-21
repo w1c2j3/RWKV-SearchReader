@@ -11,8 +11,7 @@ RWKV SearchReader 是一个刻意保持简单的“先检索、后阅读”系�
   → Tavily Advanced Search
   → 保持 results[].content 的来源边界和相关度顺序
   → 一个网页对应一个独立 RWKV 请求，最多 10 路并发摘要
-  → 最多 5 种材料顺序并发生成候选答案
-  → 最后一次 RWKV 消除顺序偏差并输出带 [S1] 引用的答案
+  → 最后一个 RWKV 只阅读各网页摘要，直接重新回答并附带 [S1] 引用
 ```
 
 这里的联网是后端行为，不是模型行为：
@@ -31,12 +30,13 @@ RWKV SearchReader 是一个刻意保持简单的“先检索、后阅读”系�
 - Tavily 直接采用 Advanced Search 已按查询整理的 `results[].content`；普通单问调用一次，明确的多问题按子问题分别调用；
 - wigolo / SearXNG 仍保留正文抓取、分块和排序作为兼容路径；
 - 基础 SSRF 防护、正文大小与超时限制；
-- 10 路 RWKV 来源摘要并发和 5 路不同材料顺序的候选答案并发；
+- 最多 10 路 RWKV 来源阅读并发，且每次调用只负责一个网页；
 - 每个来源阅读调用只接收一个网页的 Tavily 材料，网页之间在摘要阶段完全隔离；
 - 摘要异步完成后按 Tavily 原始来源编号归位；
-- 每条摘要在代码层固定为 `(source_id, {title, url, score, source_relation, summary})` 二元组，所有排序只移动整个二元组；
-- 候选事实和最终事实继续使用 `(source_id, claim)` 二元组，代码校验编号并统一渲染 `[S#]`；
-- 最终措辞必须重新落回某个来源绑定的候选事实；无法落回时使用多顺序草稿共识，避免跨来源拼接；
+- 每条摘要在代码层固定为 `(source_id, {title, url, score, published_date, evidence_date, source_relation, summary})` 二元组，所有排序只移动整个二元组；
+- Tavily 的 `published_date` 有返回时贯穿整条证据链；该字段缺失时，代码从来源材料提取与事实相关的日期，且不会把文章发布时间直接冒充行情时间；
+- 最后一次 RWKV 调用把全部网页摘要作为阅读材料，直接重新回答用户，不生成候选答案或思维链；
+- 最终事实使用 `(source_id, claim)` 二元组，代码校验编号并统一渲染 `[S#]`；
 - 用户指定官方来源时，已知百科、媒体、论坛与商店域名不能进入第一方事实归并；
 - 所有 RWKV 用户提示均采用“材料在前、问题和要求在后”；
 - OpenAI 兼容 RWKV `/completions` 或 `/chat/completions`；
@@ -68,10 +68,9 @@ SEARCH_READER_RWKV_API_KEY=local
 SEARCH_READER_RWKV_MODEL=rwkv7-g1i-13.3b-20260805-ctx16384
 SEARCH_READER_RWKV_PROTOCOL=completions
 SEARCH_READER_RWKV_SUMMARY_WORKERS=10
-SEARCH_READER_RWKV_REDUCE_ORDERS=5
 ```
 
-`SUMMARY_WORKERS` 控制逐来源摘要并发，`REDUCE_ORDERS` 控制并行尝试的材料排列数。默认会读取 Tavily 前 10 条结果。
+`SUMMARY_WORKERS` 控制逐来源阅读并发。默认会读取 Tavily 前 10 条结果，完成后只调用一次 RWKV 汇总回答。
 
 在当前机器上，如果新项目自己的 `.env.local` 没有 Tavily 凭证，程序会只读取相邻 `RWKV-ECRA/.env.local` 中的 `TAVILY_API_KEY` / `TAVILY_API_KEYS`，不会读取或复制其中的其他配置和密钥。密钥池会按顺序故障转移。
 
@@ -170,7 +169,7 @@ uv run rwkv-search-reader-eval \
 src/rwkv_search_reader/
   search.py          搜索 API 适配器
   retrieval.py       Tavily 材料保序与其他后端兼容抓取
-  reader.py          RWKV 并发摘要、多顺序归并和最终输出
+  reader.py          RWKV 逐网页并发阅读和最终汇总输出
   pipeline.py        固定执行的主流水线
   api.py             FastAPI 与兼容接口
   cli.py             命令行入口

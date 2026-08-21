@@ -24,6 +24,7 @@ class DocumentChunk:
     text: str
     score: float = 0.0
     chunk_index: int = 0
+    published_date: str = ""
 
 
 @dataclass(slots=True)
@@ -35,6 +36,7 @@ class Evidence:
     quote: str
     score: float = 0.0
     source_relation: str = "unclear"
+    published_date: str = ""
 
 
 @dataclass(slots=True)

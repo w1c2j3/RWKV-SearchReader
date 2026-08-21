@@ -46,13 +46,9 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
         return [evidence], []
 
     def finalize(question, rows, on_progress=None):
-        calls.append("reduce")
+        calls.append("finalize")
         if on_progress:
-            on_progress(
-                "draft_complete",
-                {"order": 1, "completed": 1, "total": 1},
-            )
-            on_progress("finalizing", {"candidate_groups": 1})
+            on_progress("finalizing", {"source_count": 1})
         return "Answer [S1]", []
 
     pipeline.retriever.run = retrieve
@@ -66,9 +62,9 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
         session_id="session-test",
     )
 
-    assert calls == ["retrieve", "summarize", "reduce"]
+    assert calls == ["retrieve", "summarize", "finalize"]
     assert result.retrieval_mode == "forced"
-    assert result.reader_mode == "rwkv-parallel-map-reduce"
+    assert result.reader_mode == "rwkv-parallel-read-final-summary"
     assert result.session_id == "session-test"
     assert result.queries == ["Question"]
     assert result.answer == "Answer [S1]"
@@ -78,8 +74,6 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
         "sources_found",
         "reading",
         "source_read",
-        "organizing",
-        "draft_complete",
         "finalizing",
         "completed",
     ]
@@ -88,6 +82,7 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
         "title": "Source",
         "url": "https://example.com",
         "score": 0.0,
+        "published_date": "",
     }
     assert result.trace[-1]["stage"] == "completed"
 

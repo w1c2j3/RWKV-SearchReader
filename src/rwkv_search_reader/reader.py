@@ -8,6 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 from .config import Settings
@@ -41,18 +42,76 @@ def _parse_source_summary(value: str) -> tuple[str, str]:
     if match:
         text = (text[: match.start()] + text[match.end() :]).strip()
     text = re.sub(r"^\s*summary\s*[:：]\s*", "", text, flags=re.IGNORECASE)
-    return relation, text.strip()
+    sentences = re.split(r"(?<=[。！？!?])\s*", text.strip())
+    unique: list[str] = []
+    seen: set[str] = set()
+    for sentence in sentences:
+        normalized = _normalized_claim(sentence)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(sentence.strip())
+    return relation, "".join(unique).strip()
+
+
+def _wants_current_stock_price(question: str) -> bool:
+    return "股价" in question and not re.search(
+        r"上市|发行|开盘|首日|历史|当时", question
+    )
+
+
+def _question_focus_instruction(question: str) -> str:
+    if _wants_current_stock_price(question):
+        return (
+            "本题只询问当前股价。先按材料明确给出的日期或时间选择最新记录："
+            "有“当前、如今、最新、现报”的价格时选该价格，否则选最近日期的收盘价。"
+            "输出内容只允许出现一个股价数值及其对应时间，不得出现任何其他价格、"
+            "涨跌幅、市值、成交额或历史背景。材料没有现价或收盘价时写“无相关信息”。"
+        )
+    return ""
 
 
 def _eligible_evidence(question: str, evidence: list[Evidence]) -> list[Evidence]:
-    if not _official_requested(question):
-        return evidence
-    official = [item for item in evidence if item.source_relation == "official"]
-    return official or evidence
+    eligible = evidence
+    if _official_requested(question):
+        official = [item for item in eligible if item.source_relation == "official"]
+        eligible = official or eligible
+    if _wants_current_stock_price(question):
+        direct_company = [
+            item for item in eligible if "概念" not in item.title.casefold()
+        ]
+        latest_quotes = [
+            item
+            for item in direct_company
+            if re.search(r"当前|如今|最新|现报|收盘价|收于|昨收", item.claim)
+        ]
+        if latest_quotes:
+            dated = [
+                (
+                    _latest_explicit_date(item.claim)
+                    or _latest_explicit_date(item.quote)
+                    or _published_date_key(item.published_date),
+                    item,
+                )
+                for item in latest_quotes
+            ]
+            explicit = [item for item in dated if item[0] is not None]
+            if explicit:
+                latest_date = max(item[0] for item in explicit)
+                return [item for date, item in explicit if date == latest_date]
+            return latest_quotes
+        if direct_company:
+            return direct_company
+    return eligible
 
 
 BoundFact = tuple[str, str]
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_DATE_RE = re.compile(
+    r"(?<!\d)(?:(?P<year>(?:19|20)\d{2})\s*(?:年|[-/.]))?\s*"
+    r"(?P<month>1[0-2]|0?[1-9])\s*(?:月|[-/.])\s*"
+    r"(?P<day>3[01]|[12]\d|0?[1-9])\s*日?(?!\d)"
+)
 _KNOWN_SECONDARY_HOSTS = (
     "wikipedia.org",
     "reddit.com",
@@ -77,6 +136,19 @@ def _render_source_pairs(evidence: list[Evidence]) -> str:
                     "url": item.url,
                     "tavily_score": round(item.score, 4),
                     "source_relation": item.source_relation,
+                    "published_date": item.published_date or "unknown",
+                    "evidence_date": (
+                        "-".join(
+                            str(part)
+                            for part in (
+                                _latest_explicit_date(item.claim)
+                                or _latest_explicit_date(item.quote)
+                                or _published_date_key(item.published_date)
+                                or ()
+                            )
+                        )
+                        or "unknown"
+                    ),
                     "rwkv_summary": item.claim,
                 },
             ],
@@ -178,13 +250,19 @@ def _answer_limit(question: str) -> int:
         question,
     ):
         return 1
+    compact = re.sub(r"[\s,，。.!！?？:：;；]+", "", question)
+    if len(compact) <= 18 and re.search(
+        r"(?:股价|价格|售价|票价|汇率|天气|时间|日期|版本|主题|比分)$",
+        compact,
+    ):
+        return 1
     atomic_questions = re.findall(
         r"是什么|是谁|是多少|何时|什么时候|是否|哪一天|哪一个|哪位",
         question,
     )
     if atomic_questions:
         return min(5, len(atomic_questions))
-    return 5
+    return 3
 
 
 def _normalized_claim(value: str, *, replace_numbers: bool = False) -> str:
@@ -224,6 +302,82 @@ def _support_score(claim: str, evidence: Evidence) -> float:
     return number_coverage * 0.55 + term_coverage * 0.3 + sequence * 0.15
 
 
+def _grounding_issue(claim: str, material: str) -> str:
+    """Reject explicit values the reader introduced outside its source material."""
+
+    material_dates = {
+        (
+            int(match.group("year")) if match.group("year") else None,
+            int(match.group("month")),
+            int(match.group("day")),
+        )
+        for match in _DATE_RE.finditer(material)
+    }
+    for match in _DATE_RE.finditer(claim):
+        date = (
+            int(match.group("year")) if match.group("year") else None,
+            int(match.group("month")),
+            int(match.group("day")),
+        )
+        if date[0] is None:
+            supported = any(item[1:] == date[1:] for item in material_dates)
+        else:
+            supported = date in material_dates
+        if not supported:
+            return f"unsupported date: {match.group(0).strip()}"
+
+    claim_numbers = {
+        value.replace(",", "") for value in _NUMBER_RE.findall(claim)
+    }
+    material_numbers = {
+        value.replace(",", "") for value in _NUMBER_RE.findall(material)
+    }
+    missing_numbers = sorted(claim_numbers - material_numbers)
+    if missing_numbers:
+        return f"unsupported numbers: {', '.join(missing_numbers[:5])}"
+
+    if re.search(r"收盘价|收于|收报", claim) and not re.search(
+        r"收盘价|收于|收报|截至收盘|最终收|已收盘", material
+    ):
+        return "unsupported closing-price relation"
+    return ""
+
+
+def _stock_price_values(value: str) -> set[str]:
+    return {
+        match.group(1).replace(",", "")
+        for match in re.finditer(r"(\d+(?:[.,]\d+)*)\s*元(?:\s*/\s*股)?", value)
+    }
+
+
+def _latest_explicit_date(value: str) -> tuple[int, int, int] | None:
+    dates = [
+        (
+            int(match.group("year"))
+            if match.group("year")
+            else datetime.now().astimezone().year,
+            int(match.group("month")),
+            int(match.group("day")),
+        )
+        for match in _DATE_RE.finditer(value)
+    ]
+    return max(dates, default=None)
+
+
+def _published_date_key(value: str) -> tuple[int, int, int] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    explicit = _latest_explicit_date(text)
+    if explicit:
+        return explicit
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed.year, parsed.month, parsed.day
+
+
 def _source_relevance(question: str, evidence: Evidence) -> float:
     question_terms = _claim_terms(question)
     source_terms = _claim_terms(f"{evidence.title} {evidence.claim}")
@@ -232,6 +386,12 @@ def _source_relevance(question: str, evidence: Evidence) -> float:
     if _official_requested(question) and evidence.source_relation == "official":
         score += 0.25
     title = evidence.title.casefold()
+    if _wants_current_stock_price(question):
+        finance_text = f"{title} {evidence.claim}"
+        if re.search(r"实时行情|股票股价|现价|最新价|最高价|最低价|昨收", finance_text):
+            score += 0.8
+        elif re.search(r"上市首日|发行价|开盘价|中一签", finance_text):
+            score -= 0.35
     for version in re.findall(r"(?<!\d)(\d+(?:\.\d+){1,3})(?!\d)", question):
         if version not in title:
             continue
@@ -300,83 +460,6 @@ def _bind_facts_to_support(
     return rebound
 
 
-def _claims_agree(left: str, right: str) -> bool:
-    left_numbers = {
-        value.replace(",", "") for value in _NUMBER_RE.findall(left)
-    }
-    right_numbers = {
-        value.replace(",", "") for value in _NUMBER_RE.findall(right)
-    }
-    if left_numbers and right_numbers and left_numbers != right_numbers:
-        return False
-    return (
-        SequenceMatcher(
-            None, _normalized_claim(left), _normalized_claim(right)
-        ).ratio()
-        >= 0.82
-    )
-
-
-def _rank_final_facts(
-    question: str,
-    facts: list[BoundFact],
-    evidence: list[Evidence],
-    drafts: list[list[BoundFact]],
-) -> list[BoundFact]:
-    by_id = {item.source_id: item for item in evidence}
-    indexed = list(enumerate(facts))
-
-    def priority(item: tuple[int, BoundFact]) -> tuple[float, int]:
-        index, (source_id, claim) = item
-        votes = sum(
-            any(_claims_agree(claim, candidate[1]) for candidate in draft)
-            for draft in drafts
-        )
-        source = by_id.get(source_id)
-        quality = (
-            _support_score(claim, source) + _source_relevance(question, source)
-            if source
-            else 0.0
-        )
-        return votes * 2.0 + quality, -index
-
-    indexed.sort(key=priority, reverse=True)
-    return [fact for _, fact in indexed]
-
-
-def _ground_final_facts(
-    facts: list[BoundFact], drafts: list[list[BoundFact]]
-) -> list[BoundFact]:
-    """Map generated final wording back to immutable source-bound draft facts."""
-
-    candidates = list(dict.fromkeys(fact for draft in drafts for fact in draft))
-    grounded: list[BoundFact] = []
-    for source_id, claim in facts:
-        claim_numbers = {
-            value.replace(",", "") for value in _NUMBER_RE.findall(claim)
-        }
-        matches: list[tuple[float, BoundFact]] = []
-        for candidate in candidates:
-            candidate_numbers = {
-                value.replace(",", "")
-                for value in _NUMBER_RE.findall(candidate[1])
-            }
-            if claim_numbers and candidate_numbers and claim_numbers != candidate_numbers:
-                continue
-            similarity = SequenceMatcher(
-                None, _normalized_claim(claim), _normalized_claim(candidate[1])
-            ).ratio()
-            if candidate[0] == source_id:
-                similarity += 0.03
-            matches.append((similarity, candidate))
-        if not matches:
-            continue
-        similarity, candidate = max(matches, key=lambda item: item[0])
-        if similarity >= 0.75:
-            grounded.append(candidate)
-    return grounded
-
-
 def _is_empty_fact(claim: str) -> bool:
     compact = re.sub(r"[\s。.!！?？:：;；、-]+", "", claim)
     return bool(
@@ -384,48 +467,6 @@ def _is_empty_fact(claim: str) -> bool:
             r"(?:摘要|主题|主推角色|答案)?(?:无相关信息|未提及|没有提及|材料中未找到相关信息|该来源明确支持的一个事实|另一个事实)",
             compact,
         )
-    )
-
-
-def _fallback_consensus(
-    drafts: list[list[BoundFact]], evidence: list[Evidence], limit: int
-) -> list[BoundFact]:
-    """Choose recurring draft facts instead of dumping one positional draft."""
-
-    clusters: list[dict[str, object]] = []
-    for draft_index, draft in enumerate(drafts):
-        for fact in draft:
-            match = next(
-                (
-                    cluster
-                    for cluster in clusters
-                    if _claims_agree(fact[1], str(cluster["claim"]))
-                ),
-                None,
-            )
-            if match is None:
-                clusters.append(
-                    {
-                        "fact": fact,
-                        "claim": fact[1],
-                        "drafts": {draft_index},
-                        "position": len(clusters),
-                    }
-                )
-            else:
-                matching_drafts = match["drafts"]
-                if isinstance(matching_drafts, set):
-                    matching_drafts.add(draft_index)
-    def cluster_rank(item: dict[str, object]) -> tuple[int, int]:
-        drafts_value = item["drafts"]
-        draft_count = len(drafts_value) if isinstance(drafts_value, set) else 0
-        position = item["position"]
-        return -draft_count, position if isinstance(position, int) else 0
-
-    clusters.sort(key=cluster_rank)
-    selected = [item["fact"] for item in clusters[:limit]]
-    return _bind_facts_to_support(
-        [fact for fact in selected if isinstance(fact, tuple)], evidence
     )
 
 
@@ -468,31 +509,8 @@ def _format_bound_answer(facts: list[BoundFact], limit: int = 10) -> str:
     return "\n".join(f"- {claim} [{source_id}]" for source_id, claim in unique)
 
 
-def _material_orders(
-    evidence: list[Evidence], max_orders: int = 5
-) -> list[list[Evidence]]:
-    """Move several rank bands near the prompt tail to counter recency bias."""
-
-    if not evidence:
-        return []
-    candidates = [list(evidence), list(reversed(evidence))]
-    for fraction in (0.25, 0.5, 0.75):
-        anchor = min(len(evidence) - 1, round((len(evidence) - 1) * fraction))
-        candidates.append(list(evidence[anchor + 1 :]) + list(evidence[: anchor + 1]))
-    unique: list[list[Evidence]] = []
-    identities: set[tuple[str, ...]] = set()
-    for order in candidates:
-        identity = tuple(item.source_id for item in order)
-        if identity not in identities:
-            identities.add(identity)
-            unique.append(order)
-        if len(unique) >= max_orders:
-            break
-    return unique
-
-
 class RWKVReader:
-    """RWKV map-reduce reader: parallel source summaries, ordered drafts, final answer."""
+    """RWKV reader: parallel per-source reading followed by one direct synthesis."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -591,9 +609,11 @@ class RWKVReader:
 
     def _summarize_one(self, question: str, chunk: DocumentChunk) -> Evidence:
         material = chunk.text[: self.settings.max_evidence_chars].strip()
+        focus_instruction = _question_focus_instruction(question)
         user = f"""<来源材料 id=\"{chunk.source_id}\">
 标题：{chunk.title}
 URL：{chunk.url}
+检索器返回的发布时间：{chunk.published_date or "unknown"}
 Tavily relevance：{chunk.score:.4f}
 正文：
 {material}
@@ -603,17 +623,34 @@ Tavily relevance：{chunk.score:.4f}
 {question}
 </用户问题>
 
-请只阅读上面的这一条来源材料，并为回答“用户问题”提取最有用的事实。保留材料中的准确名称、版本号、日期、状态（已上线/预告/测试）和限定条件；材料无关时摘要只写“无相关信息”。不要引用其他知识，不要回答完整问题，不要复述标题和 URL。用户包含多个子问题时逐项核对；不得把页面中一个游戏、版本、角色、联动或事件的日期与属性移给另一个对象，材料没有明确说出的关系不要推断。
-输出首行必须是 `source_relation: official`、`source_relation: secondary` 或 `source_relation: unclear`；只有 URL 或标题能确认该来源属于问题对象的开发商、发行商、政府、论文作者等第一方时才是 official，百科、媒体、论坛和商店均为 secondary。第二行起输出简洁摘要。"""
+只根据这一条材料，提取能回答用户问题的事实，写成简短摘要。不得补充材料外的知识；材料无关就只写“无相关信息”。只输出摘要，不要标题、URL、来源分类、分析过程或其他说明。
+{focus_instruction}"""
         output = self._complete(
             user,
-            max_tokens=self.settings.rwkv_summary_max_tokens,
+            max_tokens=(
+                min(128, self.settings.rwkv_summary_max_tokens)
+                if _wants_current_stock_price(question)
+                else self.settings.rwkv_summary_max_tokens
+            ),
             stage="summarize",
         )
-        relation, summary = _parse_source_summary(output)
-        relation = _verified_source_relation(chunk.url, relation)
+        _, summary = _parse_source_summary(output)
+        relation = _verified_source_relation(chunk.url, "unclear")
         if not summary:
             raise SearchReaderError("summarize", "RWKV returned an empty source summary")
+        if _wants_current_stock_price(question) and len(
+            _stock_price_values(summary)
+        ) > 1:
+            raise SearchReaderError(
+                "summarize_grounding",
+                "RWKV source summary was rejected: multiple stock prices",
+            )
+        grounding_issue = _grounding_issue(summary, material)
+        if grounding_issue:
+            raise SearchReaderError(
+                "summarize_grounding",
+                f"RWKV source summary was rejected: {grounding_issue}",
+            )
         return Evidence(
             source_id=chunk.source_id,
             title=chunk.title,
@@ -622,6 +659,7 @@ Tavily relevance：{chunk.score:.4f}
             quote=material,
             score=chunk.score,
             source_relation=relation,
+            published_date=chunk.published_date,
         )
 
     def summarize(
@@ -652,19 +690,29 @@ Tavily relevance：{chunk.score:.4f}
                     status = "done"
                 except SearchReaderError as exc:
                     material = chunk.text[: min(self.settings.max_evidence_chars, 1200)]
+                    rejected = exc.stage == "summarize_grounding"
                     evidence = Evidence(
                         source_id=chunk.source_id,
                         title=chunk.title,
                         url=chunk.url,
-                        claim=f"RWKV 摘要失败；Tavily 材料摘录：{material}",
+                        claim=(
+                            "无相关信息"
+                            if rejected
+                            else f"RWKV 摘要失败；Tavily 材料摘录：{material}"
+                        ),
                         quote=material,
                         score=chunk.score,
                         source_relation="unclear",
+                        published_date=chunk.published_date,
                     )
                     evidence_by_index[index] = evidence
-                    status = "degraded"
+                    status = "rejected" if rejected else "degraded"
                     warnings.append(
-                        f"{chunk.source_id} summary degraded to Tavily material: {exc}"[:500]
+                        (
+                            f"{chunk.source_id} unsupported summary rejected: {exc}"
+                            if rejected
+                            else f"{chunk.source_id} summary degraded to Tavily material: {exc}"
+                        )[:500]
                     )
                 completed += 1
                 if on_progress:
@@ -683,74 +731,6 @@ Tavily relevance：{chunk.score:.4f}
                     )
         return [evidence_by_index[index] for index in range(len(chunks))], warnings
 
-    def _draft(self, question: str, ordered: list[Evidence]) -> list[BoundFact]:
-        user = f"""<来源与摘要二元组>
-{_render_source_pairs(ordered)}
-</来源与摘要二元组>
-
-<用户问题>
-{question}
-</用户问题>
-
-请从上面的二元组中选择能回答问题的事实。每条事实必须和支持它的单个 source_id 组成二元组，source_id 与事实不可拆分。
-只输出 JSON 对象，格式为 {{"facts":[["S1","该来源明确支持的一个事实"],["S2","另一个事实"]]}}。不得把多个 source_id 合并在一个元素中，不得输出二元组之外的文字；材料不足时输出 {{"facts":[]}}。
-当前日期是 {_today()}。如果用户指定官方来源，只选择 title 或 URL 可确认的官方网站二元组；如果询问“当前/最新”，不要选择当前日期之后才会生效的预告，也不要用旧赛季覆盖较新的已上线赛季。
-忽略“无相关信息”、网页标题、导航文字和与问题对象相似但不同的游戏、版本、联动或事件。不得把页面发布日期、版本上线日期或其他活动日期移作用户所问事件的日期。相同结论只保留一次；同一问题出现冲突数值或日期时，不要并列冲突答案。"""
-        output = self._complete(
-            user,
-            max_tokens=self.settings.rwkv_max_tokens,
-            stage="draft",
-        )
-        facts = _parse_bound_facts(output, {item.source_id for item in ordered})
-        if not facts:
-            raise SearchReaderError("draft", "RWKV returned no valid bound facts")
-        return facts
-
-    def _drafts(
-        self,
-        question: str,
-        evidence: list[Evidence],
-        on_progress: Callable[[str, dict[str, object]], None] | None = None,
-    ) -> tuple[list[list[BoundFact]], list[str]]:
-        eligible = _eligible_evidence(question, evidence)
-        orders = _material_orders(eligible, self.settings.rwkv_reduce_orders)
-        drafts_by_index: dict[int, list[BoundFact]] = {}
-        failures: list[str] = []
-        workers = min(self.settings.rwkv_summary_workers, len(orders))
-        completed = 0
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(self._draft, question, order): index
-                for index, order in enumerate(orders)
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                try:
-                    facts = future.result()
-                    drafts_by_index[index] = facts
-                    status = "done"
-                except SearchReaderError as exc:
-                    facts = []
-                    status = "failed"
-                    failures.append(f"ordered draft {index + 1} failed: {exc}"[:500])
-                completed += 1
-                if on_progress:
-                    on_progress(
-                        "draft_complete",
-                        {
-                            "order": index + 1,
-                            "completed": completed,
-                            "total": len(orders),
-                            "fact_count": len(facts),
-                            "status": status,
-                        },
-                    )
-        drafts = [drafts_by_index[index] for index in sorted(drafts_by_index)]
-        if not drafts:
-            raise SearchReaderError("draft", "all ordered RWKV drafts failed")
-        warnings = failures if len(drafts) < (len(orders) + 1) // 2 else []
-        return drafts, warnings
-
     def finalize(
         self,
         question: str,
@@ -760,30 +740,17 @@ Tavily relevance：{chunk.score:.4f}
         if not evidence:
             raise SearchReaderError("read", "there are no source summaries to combine")
         eligible = _eligible_evidence(question, evidence)
-        if on_progress:
-            drafts, warnings = self._drafts(
-                question, eligible, on_progress=on_progress
-            )
-        else:
-            drafts, warnings = self._drafts(question, eligible)
-        # Put the relevance-order draft nearest the question because RWKV is
-        # recency-sensitive. Other orderings remain available as counterchecks.
-        rendered_drafts = "\n\n".join(
-            f"<候选事实组 {index}>\n"
-            + "\n".join(
-                json.dumps(list(fact), ensure_ascii=False) for fact in facts
-            )
-            + f"\n</候选事实组 {index}>"
-            for index, facts in enumerate(reversed(drafts), start=1)
+        # RWKV is recency-sensitive, so keep the strongest material nearest
+        # the question while preserving each source-summary pair as a unit.
+        ordered = sorted(
+            eligible,
+            key=lambda item: (_source_relevance(question, item), item.score),
         )
-        source_digest = _render_source_pairs(eligible)
+        source_digest = _render_source_pairs(ordered)
         allowed = "、".join(item.source_id for item in eligible)
         answer_limit = _answer_limit(question)
-        user = f"""<不同材料顺序产生的候选事实二元组>
-{rendered_drafts}
-</不同材料顺序产生的候选事实二元组>
-
-<来源与摘要二元组>
+        focus_instruction = _question_focus_instruction(question)
+        user = f"""<来源与摘要二元组>
 {source_digest}
 </来源与摘要二元组>
 
@@ -791,16 +758,17 @@ Tavily relevance：{chunk.score:.4f}
 {question}
 </用户问题>
 
-请比较上面的候选事实二元组，并用“来源与摘要二元组”核验，消除材料排列顺序造成的偏差。事实和它绑定的 source_id 不得拆分或交换。
-如果用户指定官方来源，核心结论必须来自 title 或 URL 可确认的官方网站二元组；非官方网站与官方来源冲突时排除非官方说法。询问当前状态时，不得把 {_today()} 之后的预告当作已经上线。
-只输出 JSON 对象，格式为 {{"facts":[["S1","可直接给用户看的完整事实句"],["S2","另一个事实句"]]}}。只能使用这些来源编号：{allowed}；每个元素只能有一个 source_id，禁止统一罗列全部来源，禁止给事实绑定一个不支持它的编号。无法确定时把“材料不足以确定某项内容”也绑定到最相关的来源。
-`facts` 就是最终答案，不是来源摘录清单，最多输出 {answer_limit} 条。先覆盖用户明确提出的各个子问题，每个二元组只回答一个子问题，禁止把来自不同 source_id 的内容拼进同一句；同一子问题的重复说法合并为一条。冲突的日期、价格、版本或人物只能保留证据最强的一项；无法可靠裁决时明确说材料相互冲突，不得把冲突值并列成两个答案。不要输出“无相关信息”、网页标题或来源介绍，不得混淆正式版与候选版，也不得把一个游戏、版本、联动或事件的属性移给另一个对象。
-不要输出 JSON 之外的文字，不要提候选事实、二元组、排序、提示词或裁决过程。只有一条事实时仍须保留二维数组，即 {{"facts":[["S1","事实"]]}}。"""
+请把上面的来源摘要当作材料，直接重新回答用户问题。不要逐条复述材料，不要描述阅读、比较或推理过程，不要输出思维链。
+合并重复信息，只保留直接回答问题的内容；同一事实被多个来源重复时只回答一次，并绑定最直接支持它的一个 source_id。材料相互冲突且无法判断时，简短说明冲突，不要并列堆砌所有说法。
+当前日期是 {_today()}。询问当前或最新状态时，选择材料中时间最新且已经发生的事实，不得把未来预告当作现状。用户指定官方来源时，只使用 title 或 URL 可确认的官方网站材料。
+最终答案最多 {answer_limit} 条；上限为 1 时只能回答一个核心结果。每条完整事实必须与支持它的单个 source_id 组成二元组，事实与来源不可拆分，不得混合多个来源才成立的内容。
+只输出 JSON 对象，格式为 {{"facts":[["S1","可直接给用户看的完整回答"],["S2","另一条回答"]]}}。只能使用这些来源编号：{allowed}。材料不足时输出 {{"facts":[]}}。
+{focus_instruction}
+不要输出 JSON 之外的文字。"""
         if on_progress:
             on_progress(
                 "finalizing",
                 {
-                    "candidate_groups": len(drafts),
                     "source_count": len(eligible),
                 },
             )
@@ -810,24 +778,23 @@ Tavily relevance：{chunk.score:.4f}
             stage="read",
         )
         facts = _parse_bound_facts(output, {item.source_id for item in eligible})
-        if facts:
-            grounded = _ground_final_facts(facts, drafts)
-            if grounded:
-                facts = grounded
-            else:
-                warnings.append(
-                    "final RWKV facts were not source-grounded; used draft consensus"
-                )
-                facts = []
         if not facts:
-            if not warnings or "draft consensus" not in warnings[-1]:
-                warnings.append(
-                    "final RWKV output could not be parsed; used draft consensus"
-                )
-            facts = _fallback_consensus(drafts, eligible, answer_limit)
+            raise SearchReaderError("read", "RWKV returned no valid final answer")
         facts = _bind_facts_to_support(facts, eligible, question)
-        facts = _rank_final_facts(question, facts, eligible, drafts)
-        return _format_bound_answer(facts, answer_limit), warnings
+        by_id = {item.source_id: item for item in eligible}
+        warnings: list[str] = []
+        supported: list[BoundFact] = []
+        for source_id, claim in facts:
+            issue = _grounding_issue(claim, by_id[source_id].claim)
+            if issue:
+                warnings.append(
+                    f"final fact bound to {source_id} was rejected: {issue}"[:500]
+                )
+                continue
+            supported.append((source_id, claim))
+        if not supported:
+            raise SearchReaderError("read", "RWKV final answer was not supported by summaries")
+        return _format_bound_answer(supported, answer_limit), warnings
 
 
 def citation_warnings(answer: str, evidence: list[Evidence]) -> list[str]:

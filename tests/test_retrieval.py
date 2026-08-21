@@ -112,13 +112,20 @@ def test_reader_ready_results_keep_provider_order_without_extracting() -> None:
 
 def test_provider_materials_do_not_reorder_by_local_score() -> None:
     hits = [
-        SearchHit(title="First", url="https://example.com/1", content="A", score=0.1),
+        SearchHit(
+            title="First",
+            url="https://example.com/1",
+            content="A",
+            score=0.1,
+            published_date="2026-08-20",
+        ),
         SearchHit(title="Second", url="https://example.com/2", content="B", score=0.9),
     ]
 
     chunks = provider_materials(hits)
 
     assert [chunk.title for chunk in chunks] == ["First", "Second"]
+    assert chunks[0].published_date == "2026-08-20"
 
 
 def test_chunk_text_respects_size_and_overlap() -> None:
