@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+from rwkv_search_reader.config import Settings
+from rwkv_search_reader.models import SearchHit
+from rwkv_search_reader.retrieval import Retriever, chunk_text, rank_chunks
+from rwkv_search_reader.search import SearchProvider
+
+
+class StubProvider(SearchProvider):
+    name = "stub"
+
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        self.received: list[str] = []
+
+    def search(self, query: str, max_results: int) -> list[SearchHit]:
+        self.received.append(query)
+        text = "Python 3.13.0 was released on October 7, 2024."
+        return [
+            SearchHit(
+                title="Python 3.13 release",
+                url="https://example.com/python-313",
+                snippet=text,
+                content=text,
+                provider=self.name,
+            )
+        ][:max_results]
+
+
+def test_retriever_uses_complete_user_question_as_single_query() -> None:
+    settings = replace(Settings(), fetch_pages=1)
+    provider = StubProvider(settings)
+    retriever = Retriever(settings, provider)
+    question = "Python 3.13.0 的正式发布日期是什么？"
+
+    queries, sources, chunks, warnings = retriever.run(question)
+
+    assert provider.received == [question]
+    assert queries == [question]
+    assert len(sources) == 1
+    assert chunks
+    assert warnings == []
+
+
+def test_chunk_text_respects_size_and_overlap() -> None:
+    chunks = chunk_text("A" * 1700, size=700, overlap=100)
+    assert len(chunks) == 3
+    assert all(len(item) <= 700 for item in chunks)
+    assert chunks[0][-100:] == chunks[1][:100]
+
+
+def test_chinese_terms_affect_ranking() -> None:
+    settings = replace(Settings(), chunk_chars=800, chunk_overlap_chars=80)
+    hits = [
+        SearchHit(
+            title="无关页面",
+            url="https://example.com/1",
+            content="天气和旅行信息。" * 20,
+        ),
+        SearchHit(
+            title="RWKV 推理速度",
+            url="https://example.com/2",
+            content="RWKV 推理速度和显存占用测试。" * 20,
+        ),
+    ]
+    chunks = rank_chunks("RWKV 推理速度怎么样", hits, settings)
+    assert chunks[0].source_id == "S2"

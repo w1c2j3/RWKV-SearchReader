@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RWKV SearchReader</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #0b0d10; color: #e7e9ee; min-height: 100vh; }
+      main { width: min(920px, calc(100% - 32px)); margin: 0 auto; padding: 64px 0 96px; }
+      header { margin-bottom: 30px; }
+      h1 { font-size: clamp(30px, 5vw, 50px); margin: 0 0 10px; letter-spacing: -0.04em; }
+      header p { color: #9ca3af; margin: 0; line-height: 1.7; }
+      .badge { color: #7dd3fc; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+      form { display: grid; gap: 12px; }
+      textarea { width: 100%; min-height: 132px; resize: vertical; border: 1px solid #2b3038; border-radius: 16px;
+        padding: 18px; background: #14171c; color: #fff; font: inherit; line-height: 1.6; outline: none; }
+      textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px #38bdf820; }
+      button { justify-self: start; border: 0; border-radius: 999px; padding: 11px 20px; font: inherit;
+        font-weight: 650; background: #e7e9ee; color: #0b0d10; cursor: pointer; }
+      button:disabled { opacity: .5; cursor: wait; }
+      #status { min-height: 24px; color: #7dd3fc; margin: 24px 0 8px; }
+      article { white-space: pre-wrap; line-height: 1.75; font-size: 17px; }
+      details { margin-top: 28px; border-top: 1px solid #252a31; padding-top: 18px; color: #c8cdd5; }
+      summary { cursor: pointer; color: #9ca3af; }
+      ol { padding-left: 24px; }
+      li { margin: 13px 0; overflow-wrap: anywhere; }
+      a { color: #7dd3fc; }
+      .meta { color: #717784; font-size: 13px; margin-top: 18px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="badge">Forced retrieve → compress → read</div>
+        <h1>RWKV SearchReader</h1>
+        <p>每个问题都会先联网检索。RWKV 不选择工具，只阅读后端准备好的证据。</p>
+      </header>
+      <form id="form">
+        <textarea id="question" required maxlength="8000" placeholder="输入要检索的问题……"></textarea>
+        <button id="submit" type="submit">检索并回答</button>
+      </form>
+      <div id="status"></div>
+      <article id="answer"></article>
+      <details id="sources-box" hidden>
+        <summary>查看检索来源</summary>
+        <ol id="sources"></ol>
+      </details>
+      <div class="meta" id="meta"></div>
+    </main>
+    <script>
+      const form = document.querySelector('#form');
+      const submit = document.querySelector('#submit');
+      const status = document.querySelector('#status');
+      const answer = document.querySelector('#answer');
+      const sourcesBox = document.querySelector('#sources-box');
+      const sources = document.querySelector('#sources');
+      const meta = document.querySelector('#meta');
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const question = document.querySelector('#question').value.trim();
+        if (!question) return;
+        submit.disabled = true; answer.textContent = ''; sources.innerHTML = ''; meta.textContent = '';
+        sourcesBox.hidden = true; status.textContent = '正在固定执行联网检索、材料压缩和 RWKV 阅读…';
+        try {
+          const response = await fetch('/v1/answer', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question}) });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail?.message || JSON.stringify(data.detail || data));
+          answer.textContent = data.answer;
+          for (const source of data.sources) {
+            const li = document.createElement('li');
+            const link = document.createElement('a'); link.href = source.url; link.target = '_blank'; link.rel = 'noreferrer';
+            link.textContent = source.title || source.url; li.appendChild(link); sources.appendChild(li);
+          }
+          sourcesBox.hidden = !data.sources.length;
+          meta.textContent = `${data.search_provider} · ${data.compression_mode} · ${(data.timings_ms.total / 1000).toFixed(1)} 秒`;
+          status.textContent = data.degraded ? '已完成（部分网页或压缩步骤发生降级）' : '已完成';
+        } catch (error) { status.textContent = `失败：${error.message}`; }
+        finally { submit.disabled = false; }
+      });
+    </script>
+  </body>
+</html>
