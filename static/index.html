@@ -3,356 +3,245 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#ffffff" />
-    <title>问答助手</title>
+    <meta name="theme-color" content="#f4f2ec" />
+    <title>寻答</title>
     <style>
       :root {
         color-scheme: light;
-        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-family: Inter, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
         font-synthesis: none;
-        --page: #ffffff;
-        --sidebar: #171717;
-        --sidebar-hover: #2a2a2a;
-        --text: #1f2937;
-        --muted: #6b7280;
-        --line: #e5e7eb;
-        --soft: #f4f4f4;
-        --accent: #111827;
-        --reader: #0f766e;
+        --ink: #18201f;
+        --muted: #697471;
+        --faint: #98a09e;
+        --paper: #f4f2ec;
+        --card: #fffefb;
+        --line: #deddd7;
+        --soft-line: #eae8e1;
+        --forest: #132321;
+        --forest-2: #1b312e;
+        --mint: #287d70;
+        --mint-soft: #e4f0ed;
+        --shadow: 0 18px 55px rgb(31 42 39 / 9%);
       }
 
       * { box-sizing: border-box; }
       [hidden] { display: none !important; }
       html, body { height: 100%; }
-      body { margin: 0; background: var(--page); color: var(--text); }
+      body { margin: 0; overflow: hidden; background: var(--paper); color: var(--ink); }
       button, textarea { font: inherit; }
       button { cursor: pointer; }
 
-      .app-shell {
-        display: grid;
-        grid-template-columns: 260px minmax(0, 1fr);
-        height: 100dvh;
-        overflow: hidden;
-      }
-
+      .app { display: grid; grid-template-columns: 286px minmax(0, 1fr); height: 100dvh; }
       .sidebar {
+        position: relative;
+        z-index: 20;
         display: flex;
-        flex-direction: column;
         min-width: 0;
-        padding: 14px 12px;
-        background: var(--sidebar);
-        color: #f9fafb;
+        flex-direction: column;
+        padding: 22px 16px 16px;
+        overflow: hidden;
+        background: radial-gradient(circle at 15% 0%, rgb(54 112 101 / 30%), transparent 30%), var(--forest);
+        color: #f6f5f1;
       }
-
-      .brand {
-        display: flex;
-        align-items: center;
-        gap: 11px;
-        min-height: 42px;
-        padding: 0 8px 13px;
-        font-size: 14px;
-        font-weight: 650;
-      }
-
+      .brand { display: flex; align-items: center; gap: 12px; padding: 0 8px 22px; }
       .brand-mark, .assistant-avatar {
         display: grid;
         place-items: center;
         flex: 0 0 auto;
-        width: 30px;
-        height: 30px;
-        border-radius: 9px;
-        background: var(--reader);
+        width: 38px;
+        height: 38px;
+        border-radius: 13px;
+        background: linear-gradient(145deg, #54a797, #26766a);
         color: white;
-        font-weight: 750;
+        font-family: Georgia, "Songti SC", serif;
+        font-size: 18px;
+        font-weight: 700;
+        box-shadow: inset 0 1px rgb(255 255 255 / 25%), 0 8px 20px rgb(0 0 0 / 18%);
       }
-
+      .brand-copy strong { display: block; font-size: 16px; letter-spacing: .08em; }
+      .brand-copy span { display: block; margin-top: 3px; color: #9cb4af; font-size: 10px; letter-spacing: .12em; }
       .new-chat {
         display: flex;
         align-items: center;
         gap: 10px;
         width: 100%;
-        min-height: 44px;
-        padding: 0 12px;
-        border: 1px solid #3a3a3a;
-        border-radius: 10px;
-        background: transparent;
-        color: #f9fafb;
+        min-height: 46px;
+        padding: 0 14px;
+        border: 1px solid rgb(255 255 255 / 13%);
+        border-radius: 14px;
+        background: rgb(255 255 255 / 7%);
+        color: white;
         text-align: left;
+        transition: .18s ease;
       }
-
-      .new-chat:hover { background: var(--sidebar-hover); }
-      .plus { font-size: 22px; font-weight: 300; line-height: 1; }
-      .sidebar-label { margin: 22px 10px 8px; color: #9ca3af; font-size: 12px; }
-
+      .new-chat:hover { transform: translateY(-1px); background: rgb(255 255 255 / 12%); }
+      .new-chat .plus { font-size: 22px; font-weight: 300; line-height: 1; }
+      .history-heading { display: flex; align-items: center; justify-content: space-between; margin: 24px 8px 10px; }
+      .history-heading span:first-child { color: #94aaa5; font-size: 11px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+      .history-heading span:last-child { color: #68817b; font-size: 10px; }
+      .history-list { min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #39514c transparent; }
+      .history-empty { padding: 14px 10px; color: #7f9691; font-size: 12px; line-height: 1.6; }
       .history-item {
+        display: block;
         width: 100%;
+        margin: 2px 0;
+        padding: 10px 11px;
         overflow: hidden;
-        padding: 10px 12px;
         border: 0;
-        border-radius: 9px;
-        background: var(--sidebar-hover);
-        color: #f3f4f6;
+        border-radius: 11px;
+        background: transparent;
+        color: #dfe8e5;
         text-align: left;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        transition: background .15s ease;
       }
+      .history-item:hover, .history-item.active { background: rgb(255 255 255 / 9%); }
+      .history-question { display: block; overflow: hidden; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+      .history-time { display: block; margin-top: 4px; color: #718a84; font-size: 10px; }
+      .storage-card { margin-top: auto; padding: 13px 12px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 13px; background: rgb(0 0 0 / 10%); }
+      .storage-title { display: flex; align-items: center; gap: 8px; color: #d8e4e1; font-size: 11px; }
+      .storage-dot { width: 7px; height: 7px; border-radius: 50%; background: #72c7a4; box-shadow: 0 0 0 4px rgb(114 199 164 / 10%); }
+      .storage-copy { margin: 7px 0 0 15px; color: #718a84; font-size: 10px; line-height: 1.5; }
+      .scrim { display: none; }
 
-      .sidebar-footer {
-        margin-top: auto;
-        padding: 13px 10px 4px;
-        border-top: 1px solid #303030;
-        color: #9ca3af;
-        font-size: 12px;
-        line-height: 1.5;
-      }
-
-      .chat-panel {
+      .chat {
         position: relative;
         display: flex;
         min-width: 0;
         height: 100dvh;
-        overflow: hidden;
         flex-direction: column;
-        background: var(--page);
-      }
-
-      .topbar {
-        z-index: 3;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        min-height: 58px;
-        padding: 0 22px;
-        border-bottom: 1px solid var(--line);
-        background: rgb(255 255 255 / 92%);
-        backdrop-filter: blur(12px);
-      }
-
-      .topbar-title { font-size: 15px; font-weight: 650; }
-      .online { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-      .online-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
-      .mobile-new { display: none; border: 0; background: transparent; color: var(--text); font-size: 22px; }
-
-      .messages {
-        flex: 1;
-        min-height: 0;
-        overflow-y: auto;
-        overscroll-behavior: contain;
-        scroll-behavior: smooth;
-      }
-
-      .conversation {
-        width: min(820px, calc(100% - 32px));
-        min-height: 100%;
-        margin: 0 auto;
-        padding: 36px 0 190px;
-      }
-
-      .welcome {
-        display: grid;
-        min-height: calc(100dvh - 285px);
-        place-content: center;
-        text-align: center;
-      }
-
-      .welcome-mark {
-        display: grid;
-        place-items: center;
-        width: 50px;
-        height: 50px;
-        margin: 0 auto 18px;
-        border-radius: 15px;
-        background: var(--reader);
-        color: white;
-        font-size: 20px;
-        font-weight: 750;
-        box-shadow: 0 10px 30px rgb(15 118 110 / 18%);
-      }
-
-      .welcome h1 { margin: 0; color: #111827; font-size: clamp(25px, 4vw, 34px); letter-spacing: -.035em; }
-      .welcome p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
-
-      .suggestions {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-        width: min(570px, 100%);
-        margin: 28px auto 0;
-      }
-
-      .suggestion {
-        padding: 13px 15px;
-        border: 1px solid var(--line);
-        border-radius: 13px;
-        background: #fff;
-        color: #374151;
-        text-align: left;
-        line-height: 1.45;
-      }
-
-      .suggestion:hover { border-color: #c7cbd1; background: #fafafa; }
-
-      .message { display: flex; gap: 13px; margin: 0 0 30px; }
-      .message.user { justify-content: flex-end; }
-
-      .user-bubble {
-        max-width: min(74%, 640px);
-        padding: 11px 16px;
-        border-radius: 20px 20px 5px 20px;
-        background: var(--soft);
-        color: #202123;
-        line-height: 1.6;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-      }
-
-      .assistant-avatar { margin-top: 1px; width: 28px; height: 28px; border-radius: 8px; font-size: 12px; }
-      .assistant-body { min-width: 0; max-width: calc(100% - 41px); flex: 1; }
-
-      .assistant-answer {
-        color: #202123;
-        font-size: 15px;
-        line-height: 1.8;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-      }
-
-      .message-meta { margin-top: 10px; color: #9ca3af; font-size: 12px; }
-
-      .source-details { margin-top: 13px; }
-      .source-details summary { width: fit-content; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
-      .source-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
-      .source-link {
-        max-width: 100%;
         overflow: hidden;
-        padding: 6px 10px;
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        color: #4b5563;
-        font-size: 12px;
-        text-decoration: none;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        background: radial-gradient(circle at 84% -10%, rgb(50 132 115 / 10%), transparent 30%), linear-gradient(180deg, #f8f7f3 0%, var(--paper) 100%);
       }
-      .source-link:hover { background: #f9fafb; color: #111827; }
+      .topbar { z-index: 5; display: flex; align-items: center; min-height: 68px; padding: 0 28px; border-bottom: 1px solid rgb(208 208 201 / 72%); background: rgb(248 247 243 / 82%); backdrop-filter: blur(18px); }
+      .menu-button { display: none; margin-right: 10px; border: 0; background: transparent; color: var(--ink); font-size: 22px; }
+      .topbar-copy { min-width: 0; }
+      .topbar-title { overflow: hidden; font-size: 14px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+      .topbar-subtitle { margin-top: 3px; color: var(--muted); font-size: 10px; }
+      .status-pill { display: flex; align-items: center; gap: 7px; margin-left: auto; padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; background: rgb(255 255 255 / 62%); color: var(--muted); font-size: 10px; }
+      .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #46a27f; }
+      .messages { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
+      .conversation { width: min(900px, calc(100% - 40px)); min-height: 100%; margin: 0 auto; padding: 34px 0 190px; }
 
-      .progress-card { width: min(460px, 100%); padding: 2px 0 4px; }
-      .progress-title { display: flex; align-items: center; gap: 9px; color: #374151; font-weight: 600; }
-      .progress-spinner {
-        width: 14px;
-        height: 14px;
-        border: 2px solid #d1d5db;
-        border-top-color: var(--reader);
-        border-radius: 50%;
-        animation: spin .8s linear infinite;
-      }
-      .progress-list { display: grid; gap: 7px; margin: 12px 0 0; padding: 0; list-style: none; }
-      .progress-step { display: flex; align-items: center; gap: 9px; color: #9ca3af; font-size: 13px; }
-      .progress-step.active { color: #374151; }
-      .progress-step.done { color: #6b7280; }
-      .step-icon { display: grid; place-items: center; width: 16px; height: 16px; color: #9ca3af; font-size: 11px; }
-      .progress-step.active .step-icon { border-radius: 50%; background: #ccfbf1; color: var(--reader); animation: breathe 1.2s ease-in-out infinite; }
-      .progress-step.done .step-icon { color: var(--reader); }
-      .progress-note { margin: 10px 0 0 25px; color: #9ca3af; font-size: 12px; }
+      .welcome { display: grid; min-height: calc(100dvh - 290px); place-content: center; text-align: center; }
+      .welcome-eyebrow { color: var(--mint); font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+      .welcome h1 { max-width: 680px; margin: 13px auto 0; font-family: Georgia, "Songti SC", serif; font-size: clamp(34px, 5vw, 54px); font-weight: 520; letter-spacing: -.045em; line-height: 1.12; }
+      .welcome p { margin: 14px 0 0; color: var(--muted); font-size: 14px; }
+      .suggestions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; width: min(650px, 100%); margin: 34px auto 0; }
+      .suggestion { position: relative; min-height: 72px; padding: 14px 42px 14px 16px; border: 1px solid var(--line); border-radius: 16px; background: rgb(255 254 251 / 76%); color: #34403e; text-align: left; line-height: 1.45; box-shadow: 0 8px 30px rgb(46 58 54 / 4%); transition: .18s ease; }
+      .suggestion::after { position: absolute; top: 50%; right: 16px; content: "↗"; color: #9aa4a1; transform: translateY(-50%); }
+      .suggestion:hover { transform: translateY(-2px); border-color: #bfcac6; background: var(--card); box-shadow: var(--shadow); }
+
+      .message { display: flex; gap: 14px; margin-bottom: 30px; animation: rise .26s ease both; }
+      @keyframes rise { from { opacity: 0; transform: translateY(7px); } }
+      .message.user { justify-content: flex-end; }
+      .user-bubble { max-width: min(76%, 680px); padding: 12px 17px; border-radius: 20px 20px 6px 20px; background: #213532; color: #f8faf8; font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 10px 24px rgb(21 44 40 / 10%); }
+      .assistant-avatar { width: 30px; height: 30px; margin-top: 2px; border-radius: 10px; font-size: 12px; box-shadow: none; }
+      .assistant-body { min-width: 0; max-width: calc(100% - 44px); flex: 1; }
+
+      .trace-card { margin-bottom: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: rgb(255 254 251 / 72%); box-shadow: 0 8px 26px rgb(38 52 48 / 4%); }
+      .trace-card summary { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 14px; list-style: none; cursor: pointer; user-select: none; }
+      .trace-card summary::-webkit-details-marker { display: none; }
+      .trace-state { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; background: var(--mint-soft); color: var(--mint); font-size: 11px; }
+      .trace-card.running .trace-state::before { width: 10px; height: 10px; border: 2px solid #9fc8c0; border-top-color: var(--mint); border-radius: 50%; content: ""; animation: spin .8s linear infinite; }
+      .trace-card.done .trace-state::before { content: "✓"; font-weight: 800; }
+      .trace-card.failed .trace-state { background: #f8e9e4; color: #ae5c46; }
+      .trace-card.failed .trace-state::before { content: "!"; font-weight: 800; }
       @keyframes spin { to { transform: rotate(360deg); } }
-      @keyframes breathe { 50% { opacity: .45; } }
+      .trace-heading { min-width: 0; flex: 1; }
+      .trace-title { display: block; color: #34413e; font-size: 12px; font-weight: 680; }
+      .trace-summary { display: block; margin-top: 2px; overflow: hidden; color: var(--faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+      .trace-chevron { color: #9ca6a3; font-size: 12px; transition: transform .18s ease; }
+      .trace-card[open] .trace-chevron { transform: rotate(180deg); }
+      .trace-body { padding: 4px 14px 14px 46px; border-top: 1px solid var(--soft-line); }
+      .trace-progress { height: 3px; margin: 9px 0 13px; overflow: hidden; border-radius: 999px; background: #e8e8e2; }
+      .trace-progress span { display: block; width: 4%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--mint), #65a597); transition: width .35s ease; }
+      .trace-list { max-height: 245px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+      .trace-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 7px 0 7px 17px; color: #5e6b68; font-size: 11px; line-height: 1.45; }
+      .trace-row::before { position: absolute; top: 12px; left: 1px; width: 6px; height: 6px; border-radius: 50%; background: #a9b9b5; content: ""; }
+      .trace-row.done::before { background: var(--mint); }
+      .trace-row.failed::before { background: #bf624d; }
+      .trace-row-title { display: block; color: #46524f; }
+      .trace-row-note { display: block; margin-top: 2px; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+      .trace-time { color: #a0a7a5; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .assistant-answer { color: #202826; font-size: 15px; line-height: 1.86; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .answer-label { margin-bottom: 7px; color: var(--mint); font-size: 10px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+      .source-details { margin-top: 16px; }
+      .source-details summary { width: fit-content; color: var(--muted); font-size: 11px; cursor: pointer; user-select: none; }
+      .source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
+      .source-link { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 9px 10px; border: 1px solid var(--soft-line); border-radius: 11px; background: rgb(255 255 255 / 55%); color: #596562; font-size: 10px; text-decoration: none; }
+      .source-link:hover { border-color: #c8d3cf; background: var(--card); color: var(--ink); }
+      .source-number { display: grid; place-items: center; flex: 0 0 auto; width: 21px; height: 21px; border-radius: 7px; background: var(--mint-soft); color: var(--mint); font-size: 9px; font-weight: 750; }
+      .source-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .message-meta { margin-top: 12px; color: var(--faint); font-size: 10px; }
 
-      .composer-wrap {
-        position: absolute;
-        right: 0;
-        bottom: 0;
-        left: 0;
-        z-index: 4;
-        padding: 28px 20px 15px;
-        background: linear-gradient(to bottom, rgb(255 255 255 / 0%), #fff 30%);
-      }
+      .composer-wrap { position: absolute; right: 0; bottom: 0; left: 0; z-index: 7; padding: 36px 22px 16px; background: linear-gradient(to bottom, rgb(244 242 236 / 0%), var(--paper) 32%); }
+      .composer { position: relative; width: min(900px, 100%); margin: 0 auto; }
+      .composer-box { position: relative; padding: 8px 8px 8px 18px; border: 1px solid #d4d4cd; border-radius: 21px; background: var(--card); box-shadow: 0 16px 48px rgb(42 53 50 / 11%); transition: .18s ease; }
+      .composer-box:focus-within { border-color: #aebfba; box-shadow: 0 18px 54px rgb(42 53 50 / 15%); }
+      .composer textarea { display: block; width: 100%; min-height: 44px; max-height: 180px; padding: 11px 52px 9px 0; resize: none; overflow-y: auto; border: 0; outline: 0; background: transparent; color: var(--ink); line-height: 1.55; }
+      .composer textarea::placeholder { color: #9ca4a2; }
+      .send { position: absolute; right: 8px; bottom: 8px; display: grid; place-items: center; width: 38px; height: 38px; border: 0; border-radius: 13px; background: var(--forest-2); color: white; font-size: 18px; transition: .18s ease; }
+      .send:hover:not(:disabled) { transform: translateY(-1px); background: var(--mint); }
+      .send:disabled { cursor: default; opacity: .34; }
+      .composer-hint { margin: 8px 0 0; color: #909996; font-size: 10px; text-align: center; }
 
-      .composer {
-        position: relative;
-        width: min(820px, 100%);
-        margin: 0 auto;
-      }
-
-      .composer textarea {
-        display: block;
-        width: 100%;
-        min-height: 54px;
-        max-height: 190px;
-        resize: none;
-        overflow-y: auto;
-        padding: 15px 58px 15px 18px;
-        border: 1px solid #d8dadd;
-        border-radius: 18px;
-        outline: none;
-        background: #fff;
-        color: #111827;
-        line-height: 1.5;
-        box-shadow: 0 8px 28px rgb(0 0 0 / 8%);
-      }
-
-      .composer textarea:focus { border-color: #aeb4bc; box-shadow: 0 8px 32px rgb(0 0 0 / 11%); }
-      .composer textarea::placeholder { color: #9ca3af; }
-
-      .send {
-        position: absolute;
-        right: 10px;
-        bottom: 10px;
-        display: grid;
-        place-items: center;
-        width: 34px;
-        height: 34px;
-        border: 0;
-        border-radius: 11px;
-        background: var(--accent);
-        color: #fff;
-        font-size: 18px;
-        line-height: 1;
-      }
-
-      .send:disabled { cursor: default; opacity: .35; }
-      .composer-hint { margin: 8px 0 0; color: #9ca3af; font-size: 11px; text-align: center; }
-
-      @media (max-width: 760px) {
-        .app-shell { grid-template-columns: 1fr; }
-        .sidebar { display: none; }
-        .composer-wrap { padding-right: 12px; padding-left: 12px; }
-        .topbar { padding: 0 14px; }
-        .mobile-new { display: block; }
-        .online { display: none; }
-        .conversation { width: min(100% - 24px, 820px); padding-top: 24px; }
-        .welcome { min-height: calc(100dvh - 250px); }
+      @media (max-width: 780px) {
+        .app { grid-template-columns: 1fr; }
+        .sidebar { position: fixed; top: 0; bottom: 0; left: 0; width: min(86vw, 310px); transform: translateX(-102%); transition: transform .22s ease; }
+        .sidebar.open { transform: translateX(0); }
+        .scrim { position: fixed; z-index: 15; display: block; inset: 0; border: 0; background: rgb(9 18 16 / 42%); opacity: 0; pointer-events: none; transition: opacity .22s ease; }
+        .scrim.open { opacity: 1; pointer-events: auto; }
+        .menu-button { display: block; }
+        .topbar { min-height: 60px; padding: 0 14px; }
+        .status-pill { display: none; }
+        .conversation { width: min(100% - 24px, 900px); padding-top: 24px; }
+        .welcome { min-height: calc(100dvh - 255px); }
+        .welcome h1 { font-size: 36px; }
         .suggestions { grid-template-columns: 1fr; }
-        .suggestion:nth-child(n+3) { display: none; }
-        .user-bubble { max-width: 88%; }
+        .suggestion:nth-child(n+4) { display: none; }
+        .user-bubble { max-width: 90%; }
+        .source-grid { grid-template-columns: 1fr; }
+        .trace-body { padding-left: 14px; }
+        .composer-wrap { padding-right: 12px; padding-left: 12px; }
       }
     </style>
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar" aria-label="会话侧边栏">
-        <div class="brand"><span class="brand-mark">问</span><span>问答助手</span></div>
-        <button class="new-chat" id="new-chat" type="button"><span class="plus">＋</span><span>新建会话</span></button>
-        <div class="sidebar-label">会话</div>
-        <button class="history-item" id="history-item" type="button">新的会话</button>
-        <div class="sidebar-footer">临时会话<br />刷新页面后记录将被清空</div>
+    <div class="app">
+      <aside class="sidebar" id="sidebar" aria-label="历史记录">
+        <div class="brand">
+          <span class="brand-mark">寻</span>
+          <div class="brand-copy"><strong>寻答</strong><span>SEARCH · READ · ANSWER</span></div>
+        </div>
+        <button class="new-chat" id="new-chat" type="button"><span class="plus">＋</span><span>开始新对话</span></button>
+        <div class="history-heading"><span>本地记录</span><span id="history-count">0</span></div>
+        <div class="history-list" id="history-list"><div class="history-empty">正在读取这台电脑上的历史记录…</div></div>
+        <div class="storage-card">
+          <div class="storage-title"><span class="storage-dot"></span><span>记录已保存到本机</span></div>
+          <p class="storage-copy">问题、回答、来源、逐步过程与耗时都会保留，便于之后分析。</p>
+        </div>
       </aside>
+      <button class="scrim" id="scrim" type="button" aria-label="关闭侧栏"></button>
 
-      <section class="chat-panel">
+      <section class="chat">
         <header class="topbar">
-          <button class="mobile-new" id="mobile-new" type="button" aria-label="新建会话">＋</button>
-          <div class="topbar-title">问答助手</div>
-          <div class="online"><span class="online-dot"></span><span>在线</span></div>
+          <button class="menu-button" id="menu" type="button" aria-label="打开历史记录">☰</button>
+          <div class="topbar-copy">
+            <div class="topbar-title" id="chat-title">新的对话</div>
+            <div class="topbar-subtitle">每个回答都附带可展开的查找与阅读过程</div>
+          </div>
+          <div class="status-pill"><span class="status-dot"></span><span>可以提问</span></div>
         </header>
 
         <main class="messages" id="messages" aria-live="polite">
           <div class="conversation" id="conversation">
             <section class="welcome" id="welcome">
-              <div class="welcome-mark">问</div>
-              <h1>今天想了解什么？</h1>
-              <p>输入问题，开始新的对话</p>
+              <div class="welcome-eyebrow">Evidence-led answers</div>
+              <h1>从资料里，找到更清楚的答案</h1>
+              <p>提出问题，查找、阅读和核对过程会实时显示。</p>
               <div class="suggestions">
                 <button class="suggestion" type="button">今天有哪些值得关注的 AI 新闻？</button>
-                <button class="suggestion" type="button">Python 当前最新稳定版本是什么？</button>
+                <button class="suggestion" type="button">Python 3.13.0 的正式发布日期是什么？</button>
                 <button class="suggestion" type="button">概括本周最重要的科技动态</button>
                 <button class="suggestion" type="button">当前热门游戏有哪些重要更新？</button>
               </div>
@@ -362,8 +251,10 @@
 
         <div class="composer-wrap">
           <form class="composer" id="form">
-            <textarea id="question" required maxlength="8000" rows="1" aria-label="输入消息" placeholder="输入消息"></textarea>
-            <button class="send" id="submit" type="submit" aria-label="发送消息">↑</button>
+            <div class="composer-box">
+              <textarea id="question" required maxlength="8000" rows="1" aria-label="输入问题" placeholder="问一个具体的问题…"></textarea>
+              <button class="send" id="submit" type="submit" aria-label="发送">↑</button>
+            </div>
           </form>
           <p class="composer-hint">Enter 发送 · Shift + Enter 换行</p>
         </div>
@@ -377,29 +268,37 @@
       const messages = document.querySelector('#messages');
       const conversation = document.querySelector('#conversation');
       const welcome = document.querySelector('#welcome');
-      const historyItem = document.querySelector('#history-item');
-      const newChatButtons = [document.querySelector('#new-chat'), document.querySelector('#mobile-new')];
+      const historyList = document.querySelector('#history-list');
+      const historyCount = document.querySelector('#history-count');
+      const chatTitle = document.querySelector('#chat-title');
+      const sidebar = document.querySelector('#sidebar');
+      const scrim = document.querySelector('#scrim');
       let pending = false;
-      let messageCount = 0;
+      let sessionId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      let historyRecords = [];
 
-      const scrollToBottom = () => requestAnimationFrame(() => {
-        messages.scrollTop = messages.scrollHeight;
-      });
-
+      const scrollToBottom = () => requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+      const formatTime = (value) => {
+        if (!value) return '';
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
+      };
       const resizeComposer = () => {
         questionInput.style.height = 'auto';
-        questionInput.style.height = `${Math.min(questionInput.scrollHeight, 190)}px`;
+        questionInput.style.height = `${Math.min(questionInput.scrollHeight, 180)}px`;
       };
+      const closeSidebar = () => { sidebar.classList.remove('open'); scrim.classList.remove('open'); };
 
       const assistantShell = () => {
         const row = document.createElement('section');
         row.className = 'message assistant';
         const avatar = document.createElement('div');
         avatar.className = 'assistant-avatar';
-        avatar.textContent = '答';
+        avatar.textContent = '寻';
         const body = document.createElement('div');
         body.className = 'assistant-body';
         row.append(avatar, body);
+        conversation.appendChild(row);
         return { row, body };
       };
 
@@ -413,71 +312,168 @@
         conversation.appendChild(row);
       };
 
-      const appendLoading = () => {
-        const { row, body } = assistantShell();
-        const card = document.createElement('div');
-        card.className = 'progress-card';
-        const heading = document.createElement('div');
-        heading.className = 'progress-title';
-        const spinner = document.createElement('span');
-        spinner.className = 'progress-spinner';
-        const headingText = document.createElement('span');
-        heading.append(spinner, headingText);
+      const eventCopy = (stage, detail = {}) => {
+        if (stage === 'searching') return ['开始查找相关资料', '正在理解问题并发起检索'];
+        if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, (detail.queries || []).join(' · ')];
+        if (stage === 'reading') return [`开始逐篇阅读 ${detail.source_count || 0} 个来源`, '每个来源独立阅读，互不混合'];
+        if (stage === 'source_read') return [`已读 ${detail.completed || 0}/${detail.total || 0} · ${detail.title || detail.source_id || '参考资料'}`, detail.summary_preview || '关键信息已提取'];
+        if (stage === 'organizing') return ['开始交叉核对', `${detail.order_count || 0} 种材料顺序并行整理`];
+        if (stage === 'draft_complete') return [`第 ${detail.order || detail.completed || 0} 轮核对完成`, detail.status === 'failed' ? '这一轮未形成有效结果' : `保留 ${detail.fact_count || 0} 个候选事实`];
+        if (stage === 'finalizing') return ['正在形成最终回答', '核对事实与来源编号'];
+        if (stage === 'completed') return ['回答已经完成', '完整记录已写入本机'];
+        if (stage === 'failed') return ['本次回答未完成', detail.message || '处理过程中出现错误'];
+        return [stage, ''];
+      };
+
+      const createTrace = (events = [], open = true) => {
+        let terminal = false;
+        const details = document.createElement('details');
+        details.className = 'trace-card running';
+        details.open = open;
+        const summary = document.createElement('summary');
+        const state = document.createElement('span');
+        state.className = 'trace-state';
+        const heading = document.createElement('span');
+        heading.className = 'trace-heading';
+        const title = document.createElement('span');
+        title.className = 'trace-title';
+        title.textContent = '正在查找与阅读';
+        const sub = document.createElement('span');
+        sub.className = 'trace-summary';
+        sub.textContent = '过程会实时显示在这里';
+        heading.append(title, sub);
+        const chevron = document.createElement('span');
+        chevron.className = 'trace-chevron';
+        chevron.textContent = '⌃';
+        summary.append(state, heading, chevron);
+        const body = document.createElement('div');
+        body.className = 'trace-body';
+        const progress = document.createElement('div');
+        progress.className = 'trace-progress';
+        const progressBar = document.createElement('span');
+        progress.appendChild(progressBar);
         const list = document.createElement('ol');
-        list.className = 'progress-list';
-        const stages = [
-          ['searching', '查找相关信息'],
-          ['reading', '阅读参考资料'],
-          ['organizing', '整理回答'],
-        ];
-        const stageRows = stages.map(([stage, label]) => {
-          const item = document.createElement('li');
-          item.className = 'progress-step';
-          item.dataset.stage = stage;
-          const icon = document.createElement('span');
-          icon.className = 'step-icon';
-          const text = document.createElement('span');
-          text.textContent = label;
-          item.append(icon, text);
-          list.appendChild(item);
-          return { stage, item, icon, label };
-        });
-        const note = document.createElement('p');
-        note.className = 'progress-note';
-        card.append(heading, list, note);
-        body.appendChild(card);
-        conversation.appendChild(row);
+        list.className = 'trace-list';
+        body.append(progress, list);
+        details.append(summary, body);
 
         const update = (stage, detail = {}) => {
-          const activeIndex = Math.max(0, stages.findIndex(([value]) => value === stage));
-          stageRows.forEach((entry, index) => {
-            entry.item.classList.toggle('done', index < activeIndex);
-            entry.item.classList.toggle('active', index === activeIndex);
-            entry.icon.textContent = index < activeIndex ? '✓' : index === activeIndex ? '•' : '○';
-          });
-          headingText.textContent = stageRows[activeIndex].label;
-          const count = Array.isArray(detail.sources) ? detail.sources.length : Number(detail.source_count || 0);
-          note.textContent = count ? `已获取 ${count} 个参考来源` : '';
+          const [label, note] = eventCopy(stage, detail);
+          const row = document.createElement('li');
+          row.className = `trace-row ${stage === 'failed' ? 'failed' : 'done'}`;
+          const copy = document.createElement('span');
+          const rowTitle = document.createElement('span');
+          rowTitle.className = 'trace-row-title';
+          rowTitle.textContent = label;
+          copy.appendChild(rowTitle);
+          if (note) {
+            const rowNote = document.createElement('span');
+            rowNote.className = 'trace-row-note';
+            rowNote.textContent = note;
+            copy.appendChild(rowNote);
+          }
+          const time = document.createElement('span');
+          time.className = 'trace-time';
+          const atMs = Number(detail.at_ms || 0);
+          time.textContent = atMs ? `${(atMs / 1000).toFixed(1)}s` : '';
+          row.append(copy, time);
+          list.appendChild(row);
+          list.scrollTop = list.scrollHeight;
+          if (stage === 'source_read') progressBar.style.width = `${8 + 48 * Number(detail.completed || 0) / Math.max(1, Number(detail.total || 1))}%`;
+          if (stage === 'organizing') progressBar.style.width = '62%';
+          if (stage === 'draft_complete') progressBar.style.width = `${62 + 28 * Number(detail.completed || 0) / Math.max(1, Number(detail.total || 1))}%`;
+          if (stage === 'finalizing') progressBar.style.width = '94%';
+          if (stage === 'completed') {
+            terminal = true;
+            progressBar.style.width = '100%';
+            details.classList.remove('running');
+            details.classList.add('done');
+            title.textContent = '查找与阅读过程';
+            sub.textContent = `${list.children.length} 个步骤 · ${(Number(detail.duration_ms || atMs) / 1000).toFixed(1)} 秒`;
+          } else if (stage === 'failed') {
+            terminal = true;
+            details.classList.remove('running');
+            details.classList.add('failed');
+            title.textContent = '处理未完成';
+            sub.textContent = note;
+          } else {
+            sub.textContent = label;
+          }
           scrollToBottom();
         };
+        events.forEach((event) => update(event.stage, { ...(event.detail || {}), at_ms: event.at_ms }));
+        if (!events.length && !open) {
+          terminal = true;
+          progressBar.style.width = '100%';
+          details.classList.remove('running');
+          details.classList.add('done');
+          title.textContent = '已保存的回答';
+          sub.textContent = '此记录创建于详细过程启用前';
+        }
+        return { details, update, isTerminal: () => terminal };
+      };
 
-        update('searching');
-        return { row, update };
+      const appendSources = (body, sources) => {
+        if (!sources?.length) return;
+        const details = document.createElement('details');
+        details.className = 'source-details';
+        const summary = document.createElement('summary');
+        summary.textContent = `查看 ${sources.length} 个参考来源`;
+        const grid = document.createElement('div');
+        grid.className = 'source-grid';
+        sources.forEach((source, index) => {
+          const link = document.createElement('a');
+          link.className = 'source-link';
+          link.href = source.url;
+          link.target = '_blank';
+          link.rel = 'noreferrer';
+          const number = document.createElement('span');
+          number.className = 'source-number';
+          number.textContent = `S${index + 1}`;
+          const name = document.createElement('span');
+          name.className = 'source-name';
+          name.textContent = source.title || source.url;
+          link.append(number, name);
+          grid.appendChild(link);
+        });
+        details.append(summary, grid);
+        body.appendChild(details);
+      };
+
+      const finishAssistant = (body, data) => {
+        const label = document.createElement('div');
+        label.className = 'answer-label';
+        label.textContent = '回答';
+        const answer = document.createElement('div');
+        answer.className = 'assistant-answer';
+        answer.textContent = data.answer || '没有生成回答。';
+        body.append(label, answer);
+        appendSources(body, data.sources || []);
+        const meta = document.createElement('div');
+        meta.className = 'message-meta';
+        const seconds = Number(data.timings_ms?.total || 0) / 1000;
+        meta.textContent = `${seconds.toFixed(1)} 秒 · 已保存到本机${data.degraded ? ' · 部分步骤降级' : ''}`;
+        body.appendChild(meta);
+      };
+
+      const appendError = (body, message) => {
+        const answer = document.createElement('div');
+        answer.className = 'assistant-answer';
+        answer.textContent = `暂时无法回答：${message}`;
+        body.appendChild(answer);
       };
 
       const requestAnswer = async (question, onProgress) => {
         const response = await fetch('/v1/answer/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({ question, session_id: sessionId }),
         });
         if (!response.ok || !response.body) throw new Error('请求失败');
-
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
         let result = null;
-
         const consume = (block) => {
           const line = block.split('\n').find((value) => value.startsWith('data: '));
           if (!line) return;
@@ -486,7 +482,6 @@
           if (event.type === 'result') result = event.result;
           if (event.type === 'error') throw new Error(event.error?.message || '请求失败');
         };
-
         while (true) {
           const { value, done } = await reader.read();
           buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -500,73 +495,78 @@
         return result;
       };
 
-      const appendAssistant = (data) => {
-        const { row, body } = assistantShell();
-        const answer = document.createElement('div');
-        answer.className = 'assistant-answer';
-        answer.textContent = data.answer;
-        body.appendChild(answer);
-
-        if (data.sources?.length) {
-          const details = document.createElement('details');
-          details.className = 'source-details';
-          const summary = document.createElement('summary');
-          summary.textContent = `${data.sources.length} 个参考来源`;
-          const list = document.createElement('div');
-          list.className = 'source-list';
-          data.sources.forEach((source, index) => {
-            const link = document.createElement('a');
-            link.className = 'source-link';
-            link.href = source.url;
-            link.target = '_blank';
-            link.rel = 'noreferrer';
-            link.textContent = `${index + 1}. ${source.title || source.url}`;
-            list.appendChild(link);
-          });
-          details.append(summary, list);
-          body.appendChild(details);
+      const renderHistory = () => {
+        historyList.replaceChildren();
+        historyCount.textContent = String(historyRecords.length);
+        if (!historyRecords.length) {
+          const empty = document.createElement('div');
+          empty.className = 'history-empty';
+          empty.textContent = '还没有本地记录。完成一次提问后会自动保存在这里。';
+          historyList.appendChild(empty);
+          return;
         }
-
-        const meta = document.createElement('div');
-        meta.className = 'message-meta';
-        const seconds = Number(data.timings_ms?.total || 0) / 1000;
-        meta.textContent = `${seconds.toFixed(1)} 秒${data.degraded ? ' · 部分任务已降级' : ''}`;
-        body.appendChild(meta);
-        conversation.appendChild(row);
+        historyRecords.forEach((record) => {
+          const button = document.createElement('button');
+          button.className = 'history-item';
+          button.type = 'button';
+          const question = document.createElement('span');
+          question.className = 'history-question';
+          question.textContent = record.question || '未命名问题';
+          const time = document.createElement('span');
+          time.className = 'history-time';
+          time.textContent = formatTime(record.recorded_at) || (record.status === 'error' ? '未完成' : '已保存');
+          button.append(question, time);
+          button.addEventListener('click', () => {
+            conversation.querySelectorAll('.message').forEach((node) => node.remove());
+            welcome.hidden = true;
+            appendUser(record.question || '');
+            const { body } = assistantShell();
+            const trace = createTrace(record.trace || [], false);
+            body.appendChild(trace.details);
+            if (record.status === 'error') appendError(body, record.error?.message || '处理未完成');
+            else finishAssistant(body, record);
+            chatTitle.textContent = record.question || '历史记录';
+            closeSidebar();
+            scrollToBottom();
+          });
+          historyList.appendChild(button);
+        });
       };
 
-      const appendError = (message) => {
-        const { row, body } = assistantShell();
-        const answer = document.createElement('div');
-        answer.className = 'assistant-answer';
-        answer.textContent = `暂时无法回答：${message}`;
-        body.appendChild(answer);
-        conversation.appendChild(row);
+      const loadHistory = async () => {
+        try {
+          const response = await fetch('/v1/history?limit=60');
+          if (!response.ok) throw new Error('local history unavailable');
+          const data = await response.json();
+          historyRecords = data.records || [];
+        } catch (_) {
+          historyRecords = [];
+        }
+        renderHistory();
       };
 
       const resetChat = () => {
         pending = false;
-        messageCount = 0;
+        sessionId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
         submit.disabled = false;
         questionInput.disabled = false;
         questionInput.value = '';
         resizeComposer();
         conversation.querySelectorAll('.message').forEach((node) => node.remove());
         welcome.hidden = false;
-        historyItem.textContent = '新的会话';
+        chatTitle.textContent = '新的对话';
+        closeSidebar();
         questionInput.focus();
       };
 
-      newChatButtons.forEach((button) => button.addEventListener('click', resetChat));
-      historyItem.addEventListener('click', scrollToBottom);
-      document.querySelectorAll('.suggestion').forEach((button) => {
-        button.addEventListener('click', () => {
-          questionInput.value = button.textContent.trim();
-          resizeComposer();
-          form.requestSubmit();
-        });
-      });
-
+      document.querySelector('#new-chat').addEventListener('click', resetChat);
+      document.querySelector('#menu').addEventListener('click', () => { sidebar.classList.add('open'); scrim.classList.add('open'); });
+      scrim.addEventListener('click', closeSidebar);
+      document.querySelectorAll('.suggestion').forEach((button) => button.addEventListener('click', () => {
+        questionInput.value = button.textContent.trim();
+        resizeComposer();
+        form.requestSubmit();
+      }));
       questionInput.addEventListener('input', resizeComposer);
       questionInput.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -579,26 +579,28 @@
         event.preventDefault();
         const question = questionInput.value.trim();
         if (!question || pending) return;
-
         pending = true;
         submit.disabled = true;
         questionInput.disabled = true;
         welcome.hidden = true;
         appendUser(question);
-        if (messageCount === 0) historyItem.textContent = question.slice(0, 24);
-        messageCount += 1;
+        chatTitle.textContent = question.slice(0, 42);
         questionInput.value = '';
         resizeComposer();
-        const loading = appendLoading();
+        const { body } = assistantShell();
+        const trace = createTrace([], true);
+        body.appendChild(trace.details);
         scrollToBottom();
-
         try {
-          const data = await requestAnswer(question, loading.update);
-          loading.row.remove();
-          appendAssistant(data);
+          const data = await requestAnswer(question, trace.update);
+          finishAssistant(body, data);
+          historyRecords.unshift({ ...data, recorded_at: new Date().toISOString(), status: 'ok' });
+          historyRecords = historyRecords.slice(0, 60);
+          renderHistory();
         } catch (error) {
-          loading.row.remove();
-          appendError(error.message || '未知错误');
+          if (!trace.isTerminal()) trace.update('failed', { message: error.message || '未知错误' });
+          appendError(body, error.message || '未知错误');
+          loadHistory();
         } finally {
           pending = false;
           submit.disabled = false;
@@ -609,6 +611,7 @@
       });
 
       resizeComposer();
+      loadHistory();
     </script>
   </body>
 </html>

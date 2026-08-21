@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -493,6 +496,27 @@ class RWKVReader:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._call_lock = threading.Lock()
+        self._call_sequence = 0
+        self._call_records: list[dict[str, object]] = []
+
+    def reset_call_records(self) -> None:
+        with self._call_lock:
+            self._call_sequence = 0
+            self._call_records = []
+
+    def call_records(self) -> list[dict[str, object]]:
+        with self._call_lock:
+            return [dict(record) for record in self._call_records]
+
+    def _next_call_id(self) -> int:
+        with self._call_lock:
+            self._call_sequence += 1
+            return self._call_sequence
+
+    def _record_call(self, record: dict[str, object]) -> None:
+        with self._call_lock:
+            self._call_records.append(record)
 
     def _client(self) -> OpenAICompatibleClient:
         # Each concurrent request owns its Session; requests.Session is not
@@ -505,27 +529,65 @@ class RWKVReader:
         )
 
     def _complete(self, user: str, *, max_tokens: int, stage: str) -> str:
+        call_id = self._next_call_id()
+        started_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        started = time.perf_counter()
         client = self._client()
-        if self.settings.rwkv_protocol == "chat":
-            output = client.chat(
-                system=_SYSTEM_PROMPT,
-                user=user,
-                max_tokens=max_tokens,
-                temperature=self.settings.rwkv_temperature,
-                stage=stage,
+        try:
+            if self.settings.rwkv_protocol == "chat":
+                output = client.chat(
+                    system=_SYSTEM_PROMPT,
+                    user=user,
+                    max_tokens=max_tokens,
+                    temperature=self.settings.rwkv_temperature,
+                    stage=stage,
+                )
+            else:
+                output = client.completion(
+                    system=_SYSTEM_PROMPT,
+                    user=user,
+                    max_tokens=max_tokens,
+                    temperature=self.settings.rwkv_temperature,
+                    stage=stage,
+                )
+            value = output.strip()
+            if not value:
+                raise SearchReaderError(stage, "RWKV returned an empty answer")
+            self._record_call(
+                {
+                    "call_id": call_id,
+                    "stage": stage,
+                    "status": "ok",
+                    "started_at": started_at,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "model": self.settings.rwkv_model,
+                    "protocol": self.settings.rwkv_protocol,
+                    "max_tokens": max_tokens,
+                    "temperature": self.settings.rwkv_temperature,
+                    "system": _SYSTEM_PROMPT,
+                    "input": user,
+                    "output": value,
+                }
             )
-        else:
-            output = client.completion(
-                system=_SYSTEM_PROMPT,
-                user=user,
-                max_tokens=max_tokens,
-                temperature=self.settings.rwkv_temperature,
-                stage=stage,
+            return value
+        except Exception as exc:
+            self._record_call(
+                {
+                    "call_id": call_id,
+                    "stage": stage,
+                    "status": "error",
+                    "started_at": started_at,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "model": self.settings.rwkv_model,
+                    "protocol": self.settings.rwkv_protocol,
+                    "max_tokens": max_tokens,
+                    "temperature": self.settings.rwkv_temperature,
+                    "system": _SYSTEM_PROMPT,
+                    "input": user,
+                    "error": f"{type(exc).__name__}: {exc}"[:2000],
+                }
             )
-        value = output.strip()
-        if not value:
-            raise SearchReaderError(stage, "RWKV returned an empty answer")
-        return value
+            raise
 
     def _summarize_one(self, question: str, chunk: DocumentChunk) -> Evidence:
         material = chunk.text[: self.settings.max_evidence_chars].strip()
@@ -563,7 +625,10 @@ Tavily relevance：{chunk.score:.4f}
         )
 
     def summarize(
-        self, question: str, chunks: list[DocumentChunk]
+        self,
+        question: str,
+        chunks: list[DocumentChunk],
+        on_progress: Callable[[str, dict[str, object]], None] | None = None,
     ) -> tuple[list[Evidence], list[str]]:
         if not self.settings.rwkv_configured:
             raise SearchReaderError("summarize", "RWKV endpoint or model is not configured")
@@ -573,6 +638,7 @@ Tavily relevance：{chunk.score:.4f}
         evidence_by_index: dict[int, Evidence] = {}
         warnings: list[str] = []
         workers = min(self.settings.rwkv_summary_workers, len(chunks))
+        completed = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(self._summarize_one, question, chunk): (index, chunk)
@@ -581,10 +647,12 @@ Tavily relevance：{chunk.score:.4f}
             for future in as_completed(futures):
                 index, chunk = futures[future]
                 try:
-                    evidence_by_index[index] = future.result()
+                    evidence = future.result()
+                    evidence_by_index[index] = evidence
+                    status = "done"
                 except SearchReaderError as exc:
                     material = chunk.text[: min(self.settings.max_evidence_chars, 1200)]
-                    evidence_by_index[index] = Evidence(
+                    evidence = Evidence(
                         source_id=chunk.source_id,
                         title=chunk.title,
                         url=chunk.url,
@@ -593,8 +661,25 @@ Tavily relevance：{chunk.score:.4f}
                         score=chunk.score,
                         source_relation="unclear",
                     )
+                    evidence_by_index[index] = evidence
+                    status = "degraded"
                     warnings.append(
                         f"{chunk.source_id} summary degraded to Tavily material: {exc}"[:500]
+                    )
+                completed += 1
+                if on_progress:
+                    on_progress(
+                        "source_read",
+                        {
+                            "source_id": chunk.source_id,
+                            "title": chunk.title,
+                            "url": chunk.url,
+                            "completed": completed,
+                            "total": len(chunks),
+                            "status": status,
+                            "source_relation": evidence.source_relation,
+                            "summary_preview": evidence.claim[:220],
+                        },
                     )
         return [evidence_by_index[index] for index in range(len(chunks))], warnings
 
@@ -622,13 +707,17 @@ Tavily relevance：{chunk.score:.4f}
         return facts
 
     def _drafts(
-        self, question: str, evidence: list[Evidence]
+        self,
+        question: str,
+        evidence: list[Evidence],
+        on_progress: Callable[[str, dict[str, object]], None] | None = None,
     ) -> tuple[list[list[BoundFact]], list[str]]:
         eligible = _eligible_evidence(question, evidence)
         orders = _material_orders(eligible, self.settings.rwkv_reduce_orders)
         drafts_by_index: dict[int, list[BoundFact]] = {}
         failures: list[str] = []
         workers = min(self.settings.rwkv_summary_workers, len(orders))
+        completed = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(self._draft, question, order): index
@@ -637,9 +726,25 @@ Tavily relevance：{chunk.score:.4f}
             for future in as_completed(futures):
                 index = futures[future]
                 try:
-                    drafts_by_index[index] = future.result()
+                    facts = future.result()
+                    drafts_by_index[index] = facts
+                    status = "done"
                 except SearchReaderError as exc:
+                    facts = []
+                    status = "failed"
                     failures.append(f"ordered draft {index + 1} failed: {exc}"[:500])
+                completed += 1
+                if on_progress:
+                    on_progress(
+                        "draft_complete",
+                        {
+                            "order": index + 1,
+                            "completed": completed,
+                            "total": len(orders),
+                            "fact_count": len(facts),
+                            "status": status,
+                        },
+                    )
         drafts = [drafts_by_index[index] for index in sorted(drafts_by_index)]
         if not drafts:
             raise SearchReaderError("draft", "all ordered RWKV drafts failed")
@@ -647,12 +752,20 @@ Tavily relevance：{chunk.score:.4f}
         return drafts, warnings
 
     def finalize(
-        self, question: str, evidence: list[Evidence]
+        self,
+        question: str,
+        evidence: list[Evidence],
+        on_progress: Callable[[str, dict[str, object]], None] | None = None,
     ) -> tuple[str, list[str]]:
         if not evidence:
             raise SearchReaderError("read", "there are no source summaries to combine")
         eligible = _eligible_evidence(question, evidence)
-        drafts, warnings = self._drafts(question, eligible)
+        if on_progress:
+            drafts, warnings = self._drafts(
+                question, eligible, on_progress=on_progress
+            )
+        else:
+            drafts, warnings = self._drafts(question, eligible)
         # Put the relevance-order draft nearest the question because RWKV is
         # recency-sensitive. Other orderings remain available as counterchecks.
         rendered_drafts = "\n\n".join(
@@ -683,6 +796,14 @@ Tavily relevance：{chunk.score:.4f}
 只输出 JSON 对象，格式为 {{"facts":[["S1","可直接给用户看的完整事实句"],["S2","另一个事实句"]]}}。只能使用这些来源编号：{allowed}；每个元素只能有一个 source_id，禁止统一罗列全部来源，禁止给事实绑定一个不支持它的编号。无法确定时把“材料不足以确定某项内容”也绑定到最相关的来源。
 `facts` 就是最终答案，不是来源摘录清单，最多输出 {answer_limit} 条。先覆盖用户明确提出的各个子问题，每个二元组只回答一个子问题，禁止把来自不同 source_id 的内容拼进同一句；同一子问题的重复说法合并为一条。冲突的日期、价格、版本或人物只能保留证据最强的一项；无法可靠裁决时明确说材料相互冲突，不得把冲突值并列成两个答案。不要输出“无相关信息”、网页标题或来源介绍，不得混淆正式版与候选版，也不得把一个游戏、版本、联动或事件的属性移给另一个对象。
 不要输出 JSON 之外的文字，不要提候选事实、二元组、排序、提示词或裁决过程。只有一条事实时仍须保留二维数组，即 {{"facts":[["S1","事实"]]}}。"""
+        if on_progress:
+            on_progress(
+                "finalizing",
+                {
+                    "candidate_groups": len(drafts),
+                    "source_count": len(eligible),
+                },
+            )
         output = self._complete(
             user,
             max_tokens=self.settings.rwkv_max_tokens,

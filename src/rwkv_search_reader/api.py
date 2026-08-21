@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import queue
 import threading
@@ -9,7 +10,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -18,10 +19,12 @@ from . import __version__
 from .config import PROJECT_ROOT, get_settings
 from .models import SearchReaderError
 from .pipeline import SearchReaderPipeline
+from .tracing import recent_traces
 
 
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
+    session_id: str = Field(default="", max_length=128)
 
 
 class ChatMessage(BaseModel):
@@ -46,9 +49,11 @@ def _new_pipeline() -> SearchReaderPipeline:
     return SearchReaderPipeline(get_settings())
 
 
-async def _answer(question: str) -> dict[str, Any]:
+async def _answer(question: str, session_id: str = "") -> dict[str, Any]:
     try:
-        result = await run_in_threadpool(_new_pipeline().answer, question)
+        result = await run_in_threadpool(
+            _new_pipeline().answer, question, None, session_id
+        )
     except SearchReaderError as exc:
         status = 422 if exc.stage == "input" else 502
         raise HTTPException(
@@ -58,7 +63,7 @@ async def _answer(question: str) -> dict[str, Any]:
     return result.to_dict()
 
 
-def _answer_events(question: str) -> Iterator[str]:
+def _answer_events(question: str, session_id: str = "") -> Iterator[str]:
     events: queue.Queue[dict[str, Any]] = queue.Queue()
 
     def progress(stage: str, detail: dict[str, object]) -> None:
@@ -66,7 +71,9 @@ def _answer_events(question: str) -> Iterator[str]:
 
     def work() -> None:
         try:
-            result = _new_pipeline().answer(question, on_progress=progress)
+            result = _new_pipeline().answer(
+                question, on_progress=progress, session_id=session_id
+            )
             events.put({"type": "result", "result": result.to_dict()})
         except SearchReaderError as exc:
             events.put(
@@ -113,19 +120,38 @@ def readiness() -> dict[str, Any]:
 
 @app.post("/v1/answer")
 async def answer(request: AnswerRequest) -> dict[str, Any]:
-    return await _answer(request.question)
+    return await _answer(request.question, request.session_id)
 
 
 @app.post("/v1/answer/stream")
 async def answer_stream(request: AnswerRequest) -> StreamingResponse:
     return StreamingResponse(
-        _answer_events(request.question),
+        _answer_events(request.question, request.session_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/v1/history")
+def history(
+    request: Request,
+    limit: int = Query(default=40, ge=1, le=200),
+) -> dict[str, Any]:
+    host = request.client.host if request.client else ""
+    try:
+        is_local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_local = host.casefold() == "localhost"
+    if not is_local:
+        raise HTTPException(status_code=403, detail="history is available locally only")
+    settings = get_settings()
+    return {
+        "records": recent_traces(settings.trace_directory, limit),
+        "storage": str(settings.trace_directory),
+    }
 
 
 @app.post("/v1/chat/completions")

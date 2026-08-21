@@ -39,9 +39,10 @@ RWKV SearchReader 是一个刻意保持简单的“先检索、后阅读”系�
 - 用户指定官方来源时，已知百科、媒体、论坛与商店域名不能进入第一方事实归并；
 - 所有 RWKV 用户提示均采用“材料在前、问题和要求在后”；
 - OpenAI 兼容 RWKV `/completions` 或 `/chat/completions`；
-- CLI、FastAPI、简单 Web UI；
+- CLI、FastAPI、带本地历史记录和可折叠过程时间线的聊天 Web UI；
 - 丰富结果接口 `/v1/answer` 和兼容接口 `/v1/chat/completions`；
-- JSONL 运行记录（默认位于 `logs/`，不记录 API Key）。
+- 完整 JSONL 运行记录（默认位于 `logs/`，不记录 API Key）：成功与失败请求均保存问题、回答、来源、逐来源摘要、阶段 trace、耗时和告警；每次 RWKV 调用的完整输入、原始输出、调用阶段和耗时也保存在 `model_calls` 中，便于离线复盘；
+- 本机访问时，侧栏可从 `/v1/history` 恢复最近记录；该接口拒绝公网读取，避免临时公网转发泄露历史内容。
 
 ## 安装
 

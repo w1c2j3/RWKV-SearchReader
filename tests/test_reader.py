@@ -119,6 +119,27 @@ def test_summary_prompt_puts_material_before_question_and_requirements() -> None
     assert prompt.index("UNIQUE QUESTION") < prompt.index("请只阅读")
 
 
+def test_model_calls_keep_full_local_analysis_record() -> None:
+    settings = replace(Settings(), rwkv_model="test", rwkv_protocol="completions")
+    reader = RWKVReader(settings)
+
+    class Client:
+        def completion(self, **kwargs):
+            assert kwargs["user"] == "FULL INPUT"
+            return "RAW OUTPUT"
+
+    reader._client = lambda: Client()
+
+    output = reader._complete("FULL INPUT", max_tokens=64, stage="summarize")
+    record = reader.call_records()[0]
+
+    assert output == "RAW OUTPUT"
+    assert record["input"] == "FULL INPUT"
+    assert record["output"] == "RAW OUTPUT"
+    assert record["stage"] == "summarize"
+    assert record["status"] == "ok"
+
+
 def test_bound_fact_parser_keeps_only_valid_binary_source_pairs() -> None:
     output = (
         'prefix {"facts":[["S1","supported fact"],["S9","unknown"],'

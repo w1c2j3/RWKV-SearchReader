@@ -40,6 +40,7 @@ class Evidence:
 @dataclass(slots=True)
 class PipelineResult:
     request_id: str
+    session_id: str
     question: str
     answer: str
     queries: list[str]
@@ -51,6 +52,7 @@ class PipelineResult:
     degraded: bool = False
     warnings: list[str] = field(default_factory=list)
     timings_ms: dict[str, float] = field(default_factory=dict)
+    trace: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
