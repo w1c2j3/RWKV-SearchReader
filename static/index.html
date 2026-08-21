@@ -318,6 +318,8 @@
         if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, (detail.queries || []).join(' · ')];
         if (stage === 'reading') return [`开始逐篇阅读 ${detail.source_count || 0} 个来源`, '每个来源独立阅读，互不混合'];
         if (stage === 'source_read') return [`已读 ${detail.completed || 0}/${detail.total || 0} · ${detail.title || detail.source_id || '参考资料'}`, detail.summary_preview || '关键信息已提取'];
+        if (stage === 'reviewing') return ['正在整理阅读结果', `将 ${detail.source_count || 0} 份材料分为 ${detail.group_count || 0} 组并行归纳`];
+        if (stage === 'evidence_group_read') return [`已归纳 ${detail.completed || 0}/${detail.total || 0} 组`, detail.summary_preview || '重复信息已合并'];
         if (stage === 'finalizing') return ['正在形成最终回答', `根据 ${detail.source_count || 0} 份阅读结果直接作答`];
         if (stage === 'completed') return ['回答已经完成', '完整记录已写入本机'];
         if (stage === 'failed') return ['本次回答未完成', detail.message || '处理过程中出现错误'];

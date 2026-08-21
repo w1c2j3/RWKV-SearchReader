@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import replace
-from datetime import date
 
 from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import DocumentChunk, Evidence
@@ -13,9 +13,7 @@ from rwkv_search_reader.reader import (
     _clean_final_answer,
     _eligible_evidence,
     _final_evidence_order,
-    _latest_explicit_date,
     _parse_source_summary,
-    _requested_date_range,
     _unsupported_summary_numbers,
     _verified_source_relation,
     citation_warnings,
@@ -127,25 +125,7 @@ def test_summary_numbers_must_exist_in_the_source_material() -> None:
     ) == {"1.1E+3", "2024"}
 
 
-def test_relative_date_parser_is_topic_independent() -> None:
-    today = date(2026, 8, 21)
-
-    assert _requested_date_range("概括本周动态", today=today) == (
-        date(2026, 8, 17),
-        today,
-    )
-    assert _requested_date_range("最近7天发生了什么", today=today) == (
-        date(2026, 8, 15),
-        today,
-    )
-    assert _requested_date_range("这个月有哪些更新", today=today) == (
-        date(2026, 8, 1),
-        today,
-    )
-    assert _requested_date_range("解释量子纠缠", today=today) is None
-
-
-def test_date_scope_and_irrelevance_filter_evidence_generically() -> None:
+def test_evidence_filter_drops_only_explicitly_irrelevant_summaries() -> None:
     rows = _evidence(4)
     rows[0].published_date = "Fri, 21 Aug 2026 07:00:00 GMT"
     rows[1].published_date = "Thu, 20 Aug 2026 07:00:00 GMT"
@@ -155,15 +135,7 @@ def test_date_scope_and_irrelevance_filter_evidence_generically() -> None:
 
     eligible = _eligible_evidence("概括本周动态", rows)
 
-    assert [row.source_id for row in eligible] == ["S1"]
-
-
-def test_date_parser_does_not_treat_decimal_as_calendar_date() -> None:
-    assert _latest_explicit_date("机器人极限速度12.66m/s，8月19日发布。") == (
-        2026,
-        8,
-        19,
-    )
+    assert [row.source_id for row in eligible] == ["S1", "S3", "S4"]
 
 
 def test_relevance_order_places_strongest_material_nearest_question() -> None:
@@ -180,6 +152,30 @@ def test_relevance_order_places_strongest_material_nearest_question() -> None:
     assert [row.source_id for row in ordered] == ["S1", "S2"]
 
 
+def test_recency_order_keeps_every_source_and_places_newest_nearest_question() -> None:
+    rows = _evidence(3)
+    rows[0].published_date = "Fri, 21 Aug 2026 07:00:00 GMT"
+    rows[1].published_date = ""
+    rows[2].published_date = "Mon, 20 Jul 2026 01:40:53 GMT"
+
+    ordered = _final_evidence_order("今天有什么新闻", rows)
+
+    assert [row.source_id for row in ordered] == ["S2", "S3", "S1"]
+
+
+def test_citation_binding_prefers_exact_version_and_date_support() -> None:
+    rows = _evidence(2)
+    rows[0].source_id = "S1"
+    rows[0].claim = "RWKV-7 最新模型是 RWKV7-G1，发布日期为 2025 年 3 月 18 日。"
+    rows[1].source_id = "S4"
+    rows[1].claim = "RWKV-7-World-0.1B 于 2025 年 1 月发布。"
+    answer = "RWKV-7 的最新模型是 RWKV-7-G1，发布日期为 2025 年 3 月 18 日。"
+
+    bound = _attach_missing_citations(answer, rows)
+
+    assert bound == "RWKV-7 的最新模型是 RWKV-7-G1，发布日期为 2025 年 3 月 18 日 [S1]。"
+
+
 def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
     assert (
         _verified_source_relation("https://zh.wikipedia.org/wiki/Apex", "official")
@@ -191,7 +187,7 @@ def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
 def test_final_answer_cleanup_preserves_natural_answer() -> None:
     raw = "回答：这是自然段答案。[s1][ S2 ]"
 
-    assert _clean_final_answer(raw) == "这是自然段答案。[S1][S2]"
+    assert _clean_final_answer(raw) == "这是自然段答案 [S1][S2]。"
 
 
 def test_missing_citations_are_bound_without_rewriting_answer() -> None:
@@ -205,6 +201,16 @@ def test_missing_citations_are_bound_without_rewriting_answer() -> None:
     bound = _attach_missing_citations(answer, rows)
 
     assert bound == "量子芯片取得新进展 [S1]；美光将投资100亿美元建设AI内存实验室 [S2]。"
+
+
+def test_answer_lead_ending_in_colon_does_not_receive_a_fake_citation() -> None:
+    answer = "以下是主要变化：\n性能得到提升。"
+    rows = _evidence(1)
+    rows[0].claim = "性能得到提升。"
+
+    bound = _attach_missing_citations(answer, rows)
+
+    assert bound == "以下是主要变化：\n性能得到提升 [S1]。"
 
 
 def test_model_calls_keep_full_local_analysis_record() -> None:
@@ -228,6 +234,38 @@ def test_model_calls_keep_full_local_analysis_record() -> None:
     assert record["status"] == "ok"
 
 
+def test_evidence_groups_are_reduced_concurrently_and_keep_all_source_ids() -> None:
+    settings = replace(Settings(), rwkv_model="test", rwkv_summary_workers=5)
+    reader = RWKVReader(settings)
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def complete(user: str, *, stage: str, **kwargs: object) -> str:
+        del kwargs
+        assert stage == "reduce"
+        source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return f"组摘要 [{source_ids[0]}]"
+
+    reader._complete = complete
+
+    material, warnings, group_count = reader._reduce_evidence(
+        "question", _evidence(6)
+    )
+
+    assert maximum_active >= 2
+    assert group_count == 3
+    assert warnings == []
+    assert all(f'"S{index}"' in material for index in range(1, 7))
+
+
 def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
@@ -249,5 +287,5 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     assert prompt.index("UNIQUE QUESTION") < prompt.index("根据上面的材料")
     assert '"facts"' not in prompt
     assert "不输出 JSON" in prompt
-    assert answer == "这是综合后的自然回答，不是逐来源清单。[S1][S2]"
+    assert answer == "这是综合后的自然回答，不是逐来源清单 [S1][S2]。"
     assert warnings == []

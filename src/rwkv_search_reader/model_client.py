@@ -114,11 +114,10 @@ class OpenAICompatibleClient:
     ) -> str:
         safe_system = _escape_role_headers(system)
         safe_user = _escape_role_headers(user)
-        # G1I completes the missing final `>` and then writes public prose.
-        # This empty-think prefill prevents chain-of-thought from leaking into
-        # the answer while retaining the model's native completion protocol.
+        # G1I receives a complete empty reasoning block and continues directly
+        # with the public answer. Keep this exact prefill intact.
         prompt = (
-            f"System: {safe_system}\n\nUser: {safe_user}\n\nAssistant: <think></think"
+            f"System: {safe_system}\n\nUser: {safe_user}\n\nAssistant: <think></think>"
         )
         answer = self._post(
             "/completions",
@@ -132,12 +131,6 @@ class OpenAICompatibleClient:
             },
             stage,
         )
-        if answer.startswith(">"):
-            answer = answer[1:]
-            if answer.startswith("\r\n"):
-                answer = answer[2:]
-            elif answer.startswith("\n"):
-                answer = answer[1:]
         return _strip_reasoning_markup(answer)
 
 

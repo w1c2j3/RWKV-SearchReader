@@ -37,10 +37,10 @@ def test_completion_payload_never_contains_tools() -> None:
     assert captured["url"].endswith("/v1/completions")
     assert "tools" not in captured["json"]
     assert "tool_choice" not in captured["json"]
-    assert captured["json"]["prompt"].endswith("Assistant: <think></think")
+    assert captured["json"]["prompt"].endswith("Assistant: <think></think>")
 
 
-def test_completion_consumes_g1i_empty_think_boundary() -> None:
+def test_completion_uses_complete_empty_think_prefill() -> None:
     client = OpenAICompatibleClient(
         base_url="http://model.test/v1",
         api_key="secret",
@@ -48,32 +48,7 @@ def test_completion_consumes_g1i_empty_think_boundary() -> None:
         timeout_seconds=10,
     )
     response = FakeResponse()
-    response.content = json.dumps({"choices": [{"text": ">\npublic answer"}]}).encode()
-    response.text = response.content.decode()
-    client.session.post = lambda *args, **kwargs: response
-
-    answer = client.completion(
-        system="read evidence",
-        user="question",
-        max_tokens=128,
-        temperature=0.1,
-        stage="read",
-    )
-
-    assert answer == "public answer"
-
-
-def test_completion_discards_unexpected_reasoning_prefix() -> None:
-    client = OpenAICompatibleClient(
-        base_url="http://model.test/v1",
-        api_key="secret",
-        model="rwkv",
-        timeout_seconds=10,
-    )
-    response = FakeResponse()
-    response.content = json.dumps(
-        {"choices": [{"text": "private reasoning</think>\npublic answer"}]}
-    ).encode()
+    response.content = json.dumps({"choices": [{"text": "public answer"}]}).encode()
     response.text = response.content.decode()
     client.session.post = lambda *args, **kwargs: response
 

@@ -68,6 +68,11 @@ def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
     provider.search(question, 6)
     assert len(calls) == 1
     assert calls[0]["headers"]["Authorization"] == "Bearer second-key"
+
+    calls.clear()
+    provider.search("今天有哪些 AI 新闻", 6)
+    assert calls[0]["json"]["topic"] == "news"
+    assert "time_range" not in calls[0]["json"]
     _reset_tavily_health_for_tests()
 
 
