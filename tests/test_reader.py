@@ -3,20 +3,20 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date
 
 from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import DocumentChunk, Evidence
 from rwkv_search_reader.reader import (
     RWKVReader,
-    _answer_limit,
-    _bind_facts_to_support,
+    _attach_missing_citations,
+    _clean_final_answer,
     _eligible_evidence,
     _final_evidence_order,
-    _format_bound_answer,
     _latest_explicit_date,
-    _parse_bound_facts,
     _parse_source_summary,
+    _requested_date_range,
+    _unsupported_summary_numbers,
     _verified_source_relation,
     citation_warnings,
 )
@@ -35,8 +35,8 @@ def _evidence(count: int = 1) -> list[Evidence]:
     ]
 
 
-def test_citation_audit_accepts_known_source() -> None:
-    assert citation_warnings("Answer [S1]", _evidence()) == []
+def test_citation_audit_accepts_known_sources() -> None:
+    assert citation_warnings("Answer [S1][S2]", _evidence(2)) == []
 
 
 def test_citation_audit_reports_missing_and_unknown_sources() -> None:
@@ -85,14 +85,14 @@ def test_source_summaries_run_concurrently_and_keep_input_order() -> None:
     assert warnings == []
 
 
-def test_summary_prompt_puts_material_before_question_and_requirements() -> None:
+def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
     captured = {}
 
     def complete(user, **kwargs):
         captured["user"] = user
-        return "summary"
+        return "Relevant fact."
 
     reader._complete = complete
     chunk = DocumentChunk(
@@ -102,68 +102,60 @@ def test_summary_prompt_puts_material_before_question_and_requirements() -> None
         text="UNIQUE MATERIAL",
     )
 
-    reader._summarize_one("UNIQUE QUESTION", chunk)
+    evidence = reader._summarize_one("UNIQUE QUESTION", chunk)
 
     prompt = captured["user"]
     assert prompt.index("UNIQUE MATERIAL") < prompt.index("UNIQUE QUESTION")
-    assert prompt.index("UNIQUE QUESTION") < prompt.index("只根据这一条材料")
-    assert "不要复述或改写用户问题" in prompt
+    assert prompt.index("UNIQUE QUESTION") < prompt.index("阅读这一个网页")
+    assert "股价" not in prompt
+    assert "本周最重要" not in prompt
+    assert evidence.claim == "Relevant fact."
 
 
-def test_source_and_final_rendering_remove_repeated_weekly_lead() -> None:
-    _, summary = _parse_source_summary(
-        "本周最重要的科技动态包括：量子计算取得新进展。"
+def test_source_summary_only_cleans_wrappers_and_exact_duplicates() -> None:
+    assert _parse_source_summary("摘要：事实一。事实一。事实二。") == "事实一。事实二。"
+
+
+def test_summary_numbers_must_exist_in_the_source_material() -> None:
+    material = "公司于2026年8月19日上市，发行价150.80元。"
+
+    assert _unsupported_summary_numbers(
+        "2026年8月19日上市，发行价150.8元。", material
+    ) == set()
+    assert _unsupported_summary_numbers(
+        "2024年8月19日上市，最新价1100元。", material
+    ) == {"1.1E+3", "2024"}
+
+
+def test_relative_date_parser_is_topic_independent() -> None:
+    today = date(2026, 8, 21)
+
+    assert _requested_date_range("概括本周动态", today=today) == (
+        date(2026, 8, 17),
+        today,
     )
-    answer = _format_bound_answer(
-        [
-            ("S1", "本周最重要的科技动态包括：量子计算取得新进展。"),
-            ("S2", "本周最重要的科技动态包括：新型电池完成测试。"),
-        ]
+    assert _requested_date_range("最近7天发生了什么", today=today) == (
+        date(2026, 8, 15),
+        today,
     )
-
-    assert summary == "量子计算取得新进展。"
-    assert answer == "- 量子计算取得新进展。 [S1]\n- 新型电池完成测试。 [S2]"
-
-
-def test_final_prompt_treats_importance_as_selection_not_a_quota() -> None:
-    settings = replace(Settings(), rwkv_model="test")
-    captured: dict[str, str] = {}
-
-    def complete(user: str, **kwargs: object) -> str:
-        del kwargs
-        captured["user"] = user
-        return '{"facts":[["S1","量子计算取得突破。"]]}'
-
-    reader = RWKVReader(settings)
-    reader._complete = complete
-    reader.finalize("概括本周最重要的科技动态", _evidence(2))
-
-    assert "不要把例行会议" in captured["user"]
-    assert "不要为了凑数填满上限" in captured["user"]
-
-
-def test_stock_summary_prompt_requests_only_latest_price_and_time() -> None:
-    settings = replace(Settings(), rwkv_model="test")
-    reader = RWKVReader(settings)
-    captured = {}
-
-    def complete(user, **kwargs):
-        captured["user"] = user
-        return "source_relation: secondary\n最近收盘价为687元。"
-
-    reader._complete = complete
-    chunk = DocumentChunk(
-        source_id="S1",
-        title="宇树科技上市次日行情",
-        url="https://example.com/quote",
-        text="首日高点1100元，8月20日收盘价687元。",
+    assert _requested_date_range("这个月有哪些更新", today=today) == (
+        date(2026, 8, 1),
+        today,
     )
+    assert _requested_date_range("解释量子纠缠", today=today) is None
 
-    reader._summarize_one("宇树股价", chunk)
 
-    prompt = captured["user"]
-    assert "下列四项必须全部保留" in prompt
-    assert "每个指标只说一次" in prompt
+def test_date_scope_and_irrelevance_filter_evidence_generically() -> None:
+    rows = _evidence(4)
+    rows[0].published_date = "Fri, 21 Aug 2026 07:00:00 GMT"
+    rows[1].published_date = "Thu, 20 Aug 2026 07:00:00 GMT"
+    rows[1].claim = "无相关信息"
+    rows[2].published_date = "Fri, 07 Aug 2026 07:00:00 GMT"
+    rows[3].published_date = ""
+
+    eligible = _eligible_evidence("概括本周动态", rows)
+
+    assert [row.source_id for row in eligible] == ["S1"]
 
 
 def test_date_parser_does_not_treat_decimal_as_calendar_date() -> None:
@@ -172,6 +164,47 @@ def test_date_parser_does_not_treat_decimal_as_calendar_date() -> None:
         8,
         19,
     )
+
+
+def test_relevance_order_places_strongest_material_nearest_question() -> None:
+    rows = _evidence(2)
+    rows[0].title = "无关主题"
+    rows[0].claim = "无关内容"
+    rows[0].score = 0.1
+    rows[1].title = "Python 最新版本"
+    rows[1].claim = "Python 发布了新版本"
+    rows[1].score = 0.9
+
+    ordered = _final_evidence_order("Python 最新版本", rows)
+
+    assert [row.source_id for row in ordered] == ["S1", "S2"]
+
+
+def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
+    assert (
+        _verified_source_relation("https://zh.wikipedia.org/wiki/Apex", "official")
+        == "secondary"
+    )
+    assert _verified_source_relation("https://www.ea.com/apex", "official") == "official"
+
+
+def test_final_answer_cleanup_preserves_natural_answer() -> None:
+    raw = "回答：这是自然段答案。[s1][ S2 ]"
+
+    assert _clean_final_answer(raw) == "这是自然段答案。[S1][S2]"
+
+
+def test_missing_citations_are_bound_without_rewriting_answer() -> None:
+    rows = _evidence(2)
+    rows[0].title = "量子计算突破"
+    rows[0].claim = "研究团队发布了新的量子芯片。"
+    rows[1].title = "AI 内存实验室"
+    rows[1].claim = "美光宣布投资100亿美元建设AI内存实验室。"
+    answer = "量子芯片取得新进展；美光将投资100亿美元建设AI内存实验室。"
+
+    bound = _attach_missing_citations(answer, rows)
+
+    assert bound == "量子芯片取得新进展 [S1]；美光将投资100亿美元建设AI内存实验室 [S2]。"
 
 
 def test_model_calls_keep_full_local_analysis_record() -> None:
@@ -195,172 +228,7 @@ def test_model_calls_keep_full_local_analysis_record() -> None:
     assert record["status"] == "ok"
 
 
-def test_bound_fact_parser_keeps_only_valid_binary_source_pairs() -> None:
-    output = (
-        'prefix {"facts":[["S1","supported fact"],["S9","unknown"],'
-        '["S2","second fact"],["S1","too","many"]]} suffix'
-    )
-
-    facts = _parse_bound_facts(output, {"S1", "S2"})
-
-    assert facts == [("S1", "supported fact"), ("S2", "second fact")]
-
-
-def test_bound_fact_parser_recovers_rwkv_misclosed_json_pair() -> None:
-    output = '{"facts":[["S7","official fact"]}]'
-
-    facts = _parse_bound_facts(output, {"S7"})
-
-    assert facts == [("S7", "official fact")]
-
-
-def test_bound_fact_parser_accepts_flat_single_pair_from_rwkv() -> None:
-    output = '{"facts":["S7","official fact"]}'
-
-    facts = _parse_bound_facts(output, {"S7"})
-
-    assert facts == [("S7", "official fact")]
-
-
-def test_bound_fact_parser_accepts_flat_multiple_pairs_from_rwkv() -> None:
-    output = '{"facts":["S1","first fact","S2","second fact"]}'
-
-    facts = _parse_bound_facts(output, {"S1", "S2"})
-
-    assert facts == [("S1", "first fact"), ("S2", "second fact")]
-
-
-def test_answer_limit_uses_requested_count_and_atomic_questions() -> None:
-    assert _answer_limit("列出 3 条新闻") == 3
-    assert _answer_limit("正式发布日期是什么？") == 1
-    assert _answer_limit("主题是什么，角色是谁，时间是什么？") == 3
-    assert _answer_limit("宇树股价") == 1
-    assert _answer_limit("概括本周科技动态") == 3
-
-
-def test_source_relation_is_bound_and_official_request_filters_secondary() -> None:
-    relation, summary = _parse_source_summary(
-        "source_relation: official\nsummary: first-party fact"
-    )
-    rows = _evidence(2)
-    rows[0].source_relation = relation
-    rows[0].claim = summary
-    rows[1].source_relation = "secondary"
-
-    eligible = _eligible_evidence("请依据官方页面回答", rows)
-
-    assert relation == "official"
-    assert summary == "first-party fact"
-    assert [row.source_id for row in eligible] == ["S1"]
-
-
-def test_weekly_question_keeps_only_sources_published_this_week() -> None:
-    rows = _evidence(3)
-    today = datetime.now().astimezone().date()
-    rows[0].published_date = today.isoformat()
-    rows[1].published_date = (today - timedelta(days=14)).isoformat()
-    rows[2].published_date = ""
-
-    eligible = _eligible_evidence("概括本周最重要的科技动态", rows)
-
-    assert [row.source_id for row in eligible] == ["S1"]
-
-
-def test_important_news_excludes_routine_updates_before_final_reading() -> None:
-    rows = _evidence(3)
-    today = datetime.now().astimezone().date().isoformat()
-    for row in rows:
-        row.published_date = today
-    rows[0].title = "某地召开科技政策宣传解读会议"
-    rows[1].title = "某区新增47家创新型中小企业_部门动态"
-    rows[2].title = "科研人员发现大脑全新神经调控环路"
-
-    eligible = _eligible_evidence("概括本周最重要的科技动态", rows)
-
-    assert [row.source_id for row in eligible] == ["S3"]
-
-
-def test_current_stock_price_keeps_all_material_for_final_summary() -> None:
-    rows = _evidence(3)
-    rows[0].title = "宇树科技上市首日开盘"
-    rows[0].claim = "发行价150.80元，上市首日开盘价1100元。"
-    rows[1].title = "宇树科技上市次日行情"
-    rows[1].claim = "2026年8月20日收盘价为687元。"
-    rows[2].title = "宇树科技概念股票实时行情"
-    rows[2].claim = "概念指数最新价976.11元。"
-
-    eligible = _eligible_evidence("宇树股价", rows)
-
-    assert [row.source_id for row in eligible] == ["S1", "S2", "S3"]
-
-
-def test_current_stock_price_uses_evidence_time_before_final_model() -> None:
-    rows = _evidence(2)
-    rows[0].claim = "宇树科技当前股价为900元/股。"
-    rows[0].quote = "8月19日，截至发稿股价约900元/股。"
-    rows[0].published_date = "Wed, 19 Aug 2026 10:00:00 GMT"
-    rows[1].claim = "宇树科技当前股价为687元/股。"
-    rows[1].quote = "8月20日，截至收盘股价报687元/股。"
-    rows[1].published_date = "Thu, 20 Aug 2026 18:00:00 GMT"
-
-    ordered = _final_evidence_order("宇树股价", rows)
-
-    assert [row.source_id for row in ordered] == ["S1", "S2"]
-
-
-def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
-    assert (
-        _verified_source_relation("https://zh.wikipedia.org/wiki/Apex", "official")
-        == "secondary"
-    )
-    assert _verified_source_relation("https://www.ea.com/apex", "official") == "official"
-
-
-def test_bound_answer_renderer_attaches_each_source_to_its_fact() -> None:
-    answer = _format_bound_answer([("S3", "Fact A"), ("S8", "Fact B")])
-
-    assert answer == "- Fact A [S3]\n- Fact B [S8]"
-
-
-def test_bound_answer_renderer_removes_near_duplicate_facts() -> None:
-    answer = _format_bound_answer(
-        [
-            ("S3", "当前赛季为诸神烙印，开始日期是2026年8月4日。"),
-            ("S8", "《Apex》当前赛季为诸神烙印，开始日期是2026年8月4日。"),
-        ]
-    )
-
-    assert answer == "当前赛季为诸神烙印，开始日期是2026年8月4日。 [S3]"
-
-
-def test_bound_answer_renderer_drops_empty_fact_and_honors_limit() -> None:
-    answer = _format_bound_answer(
-        [
-            ("S1", "无相关信息"),
-            ("S4", "该来源明确支持的一个事实"),
-            ("S2", "Fact A"),
-            ("S3", "Fact B"),
-        ],
-        limit=1,
-    )
-
-    assert answer == "Fact A [S2]"
-
-
-def test_fact_binding_repairs_unsupported_numeric_source() -> None:
-    rows = _evidence(3)
-    rows[0].claim = "公司于2026年8月19日上市。"
-    rows[1].claim = "上市首日收盘价为825元，日期为2026年8月19日。"
-    rows[2].claim = "发行价为150.80元。"
-
-    facts = _bind_facts_to_support(
-        [("S1", "公司股价为825元，数据时间是2026年8月19日。")], rows
-    )
-
-    assert facts == [("S2", "公司股价为825元，数据时间是2026年8月19日。")]
-
-
-def test_final_prompt_keeps_source_and_fact_pairs_bound_before_requirements() -> None:
+def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
     captured = {}
@@ -369,7 +237,7 @@ def test_final_prompt_keeps_source_and_fact_pairs_bound_before_requirements() ->
 
     def complete(user, **kwargs):
         captured["user"] = user
-        return '{"facts":[["S2","BOUND FACT"]]}'
+        return "这是综合后的自然回答，不是逐来源清单。[S1][S2]"
 
     reader._complete = complete
 
@@ -378,32 +246,8 @@ def test_final_prompt_keeps_source_and_fact_pairs_bound_before_requirements() ->
     prompt = captured["user"]
     assert '["S2", {' in prompt
     assert prompt.index("BOUND FACT") < prompt.index("UNIQUE QUESTION")
-    assert prompt.index("UNIQUE QUESTION") < prompt.index("请把上面的来源摘要")
-    assert "候选事实" not in prompt
-    assert "不要输出思维链" in prompt
-    assert answer == "BOUND FACT [S2]"
-    assert warnings == []
-
-
-def test_stock_final_reader_receives_newest_complete_evidence_only() -> None:
-    settings = replace(Settings(), rwkv_model="test")
-    reader = RWKVReader(settings)
-    captured = {}
-    rows = _evidence(2)
-    rows[0].claim = "8月19日上市，发行价150.8元，收盘900元。"
-    rows[0].quote = "8月19日上市，发行价150.8元，收盘900元。"
-    rows[1].claim = "8月19日上市，发行价150.8元；8月20日收盘687元。"
-    rows[1].quote = "8月19日上市，发行价150.8元；8月20日收盘687元。"
-
-    def complete(user, **kwargs):
-        captured["user"] = user
-        return '{"facts":[["S2","完整行情总结"]]}'
-
-    reader._complete = complete
-
-    answer, warnings = reader.finalize("宇树股价", rows)
-
-    assert '["S1", {' not in captured["user"]
-    assert '["S2", {' in captured["user"]
-    assert answer == "完整行情总结 [S2]"
+    assert prompt.index("UNIQUE QUESTION") < prompt.index("根据上面的材料")
+    assert '"facts"' not in prompt
+    assert "不输出 JSON" in prompt
+    assert answer == "这是综合后的自然回答，不是逐来源清单。[S1][S2]"
     assert warnings == []
