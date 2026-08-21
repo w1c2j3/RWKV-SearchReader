@@ -321,6 +321,44 @@ def provider_materials(hits: list[SearchHit]) -> list[DocumentChunk]:
     ]
 
 
+def _search_queries(question: str) -> list[str]:
+    """Split only explicit multi-question utterances; never ask a model to route."""
+
+    normalized = " ".join(str(question or "").split()).strip()
+    if not normalized:
+        return []
+    explicit_questions = [
+        match.group(0).strip()
+        for match in re.finditer(r"[^?？!！]+[?？]", normalized)
+        if match.group(0).strip(" ?？!！")
+    ]
+    if len(explicit_questions) < 2:
+        return [normalized]
+    return [item.strip() for item in explicit_questions[:3]]
+
+
+def _balanced_hits(groups: list[list[SearchHit]], limit: int) -> list[SearchHit]:
+    """Preserve each query's Tavily rank while giving every subquestion coverage."""
+
+    selected: list[SearchHit] = []
+    seen: set[str] = set()
+    depth = 0
+    while len(selected) < limit and any(depth < len(group) for group in groups):
+        for group in groups:
+            if depth >= len(group):
+                continue
+            hit = group[depth]
+            hit.url = normalize_url(hit.url)
+            identity = hit.url.rstrip("/").casefold()
+            if hit.url and identity not in seen:
+                seen.add(identity)
+                selected.append(hit)
+                if len(selected) >= limit:
+                    break
+        depth += 1
+    return selected
+
+
 class Retriever:
     def __init__(self, settings: Settings, provider: SearchProvider):
         self.settings = settings
@@ -329,20 +367,21 @@ class Retriever:
     def run(
         self, question: str
     ) -> tuple[list[str], list[SearchHit], list[DocumentChunk], list[str]]:
-        # The complete user utterance is the only query. RWKV never routes tools.
-        query = " ".join(question.split()).strip()
-        if not query:
+        queries = _search_queries(question)
+        if not queries:
             raise SearchReaderError("input", "question is empty")
-        hits = self.provider.search(query, self.settings.search_max_results)
-        deduplicated: list[SearchHit] = []
-        seen: set[str] = set()
-        for hit in hits:
-            hit.url = normalize_url(hit.url)
-            identity = hit.url.rstrip("/").casefold()
-            if not hit.url or identity in seen:
-                continue
-            seen.add(identity)
-            deduplicated.append(hit)
+        groups: list[list[SearchHit]] = []
+        search_warnings: list[str] = []
+        for query in queries:
+            try:
+                groups.append(
+                    self.provider.search(query, self.settings.search_max_results)
+                )
+            except SearchReaderError as exc:
+                search_warnings.append(f"{query}: {exc}"[:500])
+        if not groups:
+            raise SearchReaderError("search", "all deterministic search queries failed")
+        deduplicated = _balanced_hits(groups, self.settings.search_max_results)
         if not deduplicated:
             raise SearchReaderError("search", "search provider returned no usable results")
 
@@ -351,9 +390,9 @@ class Retriever:
             chunks = provider_materials(selected)
             if not chunks:
                 raise SearchReaderError("search", "search provider returned no readable material")
-            return [query], deduplicated, chunks, []
+            return queries, deduplicated, chunks, search_warnings
 
-        extracted = self.provider.extract(selected, query)
+        extracted = self.provider.extract(selected, question)
         for hit in selected:
             if extracted.get(hit.url):
                 hit.content = extracted[hit.url][:120_000]
@@ -366,10 +405,13 @@ class Retriever:
                 for future in as_completed(futures):
                     future.result()
 
-        warnings = [f"{hit.url}: {hit.error}" for hit in selected if hit.error]
-        chunks = rank_chunks(query, selected, self.settings)
+        warnings = [
+            *search_warnings,
+            *(f"{hit.url}: {hit.error}" for hit in selected if hit.error),
+        ]
+        chunks = rank_chunks(question, selected, self.settings)
         if not chunks:
             raise SearchReaderError(
                 "fetch", "no readable page text or search snippets were available"
             )
-        return [query], deduplicated, chunks, warnings
+        return queries, deduplicated, chunks, warnings

@@ -8,11 +8,15 @@ from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import DocumentChunk, Evidence
 from rwkv_search_reader.reader import (
     RWKVReader,
+    _answer_limit,
+    _bind_facts_to_support,
     _eligible_evidence,
     _format_bound_answer,
+    _ground_final_facts,
     _material_orders,
     _parse_bound_facts,
     _parse_source_summary,
+    _rank_final_facts,
     _verified_source_relation,
     citation_warnings,
 )
@@ -134,6 +138,28 @@ def test_bound_fact_parser_recovers_rwkv_misclosed_json_pair() -> None:
     assert facts == [("S7", "official fact")]
 
 
+def test_bound_fact_parser_accepts_flat_single_pair_from_rwkv() -> None:
+    output = '{"facts":["S7","official fact"]}'
+
+    facts = _parse_bound_facts(output, {"S7"})
+
+    assert facts == [("S7", "official fact")]
+
+
+def test_bound_fact_parser_accepts_flat_multiple_pairs_from_rwkv() -> None:
+    output = '{"facts":["S1","first fact","S2","second fact"]}'
+
+    facts = _parse_bound_facts(output, {"S1", "S2"})
+
+    assert facts == [("S1", "first fact"), ("S2", "second fact")]
+
+
+def test_answer_limit_uses_requested_count_and_atomic_questions() -> None:
+    assert _answer_limit("列出 3 条新闻") == 3
+    assert _answer_limit("正式发布日期是什么？") == 1
+    assert _answer_limit("主题是什么，角色是谁，时间是什么？") == 3
+
+
 def test_source_relation_is_bound_and_official_request_filters_secondary() -> None:
     relation, summary = _parse_source_summary(
         "source_relation: official\nsummary: first-party fact"
@@ -175,6 +201,62 @@ def test_bound_answer_renderer_removes_near_duplicate_facts() -> None:
     assert answer == "当前赛季为诸神烙印，开始日期是2026年8月4日。 [S3]"
 
 
+def test_bound_answer_renderer_drops_empty_fact_and_honors_limit() -> None:
+    answer = _format_bound_answer(
+        [
+            ("S1", "无相关信息"),
+            ("S4", "该来源明确支持的一个事实"),
+            ("S2", "Fact A"),
+            ("S3", "Fact B"),
+        ],
+        limit=1,
+    )
+
+    assert answer == "Fact A [S2]"
+
+
+def test_fact_binding_repairs_unsupported_numeric_source() -> None:
+    rows = _evidence(3)
+    rows[0].claim = "公司于2026年8月19日上市。"
+    rows[1].claim = "上市首日收盘价为825元，日期为2026年8月19日。"
+    rows[2].claim = "发行价为150.80元。"
+
+    facts = _bind_facts_to_support(
+        [("S1", "公司股价为825元，数据时间是2026年8月19日。")], rows
+    )
+
+    assert facts == [("S2", "公司股价为825元，数据时间是2026年8月19日。")]
+
+
+def test_final_fact_grounding_rejects_cross_source_synthesis() -> None:
+    drafts = [
+        [("S1", "版本主题是童话国。")],
+        [("S2", "联动确认时间是2025年4月7日。")],
+    ]
+
+    grounded = _ground_final_facts(
+        [("S2", "版本主题是童话国，联动确认时间是2026年4月7日。")],
+        drafts,
+    )
+
+    assert grounded == []
+
+
+def test_final_fact_ranking_prefers_cross_order_consensus() -> None:
+    rows = _evidence(2)
+    rows[0].claim = "正式发布日期为2024年10月7日。"
+    rows[0].score = 0.9
+    rows[1].claim = "正式发布日期为2023年10月7日。"
+    rows[1].score = 0.8
+    correct = ("S1", "正式发布日期为2024年10月7日。")
+    wrong = ("S2", "正式发布日期为2023年10月7日。")
+    drafts = [[correct], [correct], [correct], [wrong]]
+
+    ranked = _rank_final_facts("正式发布日期是什么？", [wrong, correct], rows, drafts)
+
+    assert ranked == [correct, wrong]
+
+
 def test_final_prompt_keeps_source_and_fact_pairs_bound_before_requirements() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
@@ -187,7 +269,7 @@ def test_final_prompt_keeps_source_and_fact_pairs_bound_before_requirements() ->
 
     def complete(user, **kwargs):
         captured["user"] = user
-        return '{"facts":[["S2","Final fact"]]}'
+        return '{"facts":[["S2","BOUND FACT"]]}'
 
     reader._complete = complete
 
@@ -198,5 +280,5 @@ def test_final_prompt_keeps_source_and_fact_pairs_bound_before_requirements() ->
     assert '["S2", {' in prompt
     assert prompt.index("BOUND FACT") < prompt.index("UNIQUE QUESTION")
     assert prompt.index("UNIQUE QUESTION") < prompt.index("请比较")
-    assert answer == "Final fact [S2]"
+    assert answer == "BOUND FACT [S2]"
     assert warnings == []

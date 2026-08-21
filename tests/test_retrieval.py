@@ -6,6 +6,7 @@ from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import SearchHit
 from rwkv_search_reader.retrieval import (
     Retriever,
+    _search_queries,
     chunk_text,
     provider_materials,
     rank_chunks,
@@ -71,6 +72,25 @@ def test_retriever_uses_complete_user_question_as_single_query() -> None:
     assert len(sources) == 1
     assert chunks
     assert warnings == []
+
+
+def test_retriever_splits_only_explicit_multi_question_utterance() -> None:
+    settings = replace(Settings(), search_max_results=2, fetch_pages=2)
+    provider = StubProvider(settings)
+    retriever = Retriever(settings, provider)
+    question = "原神当前主题是什么？绝区零联动时间是什么？"
+
+    queries, _, _, warnings = retriever.run(question)
+
+    assert queries == ["原神当前主题是什么？", "绝区零联动时间是什么？"]
+    assert provider.received == queries
+    assert warnings == []
+
+
+def test_search_query_split_keeps_trailing_instruction_with_single_question() -> None:
+    question = "Python 3.13.0 的发布日期是什么？请以官方页面为准。"
+
+    assert _search_queries(question) == [question]
 
 
 def test_reader_ready_results_keep_provider_order_without_extracting() -> None:
