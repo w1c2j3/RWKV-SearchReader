@@ -40,7 +40,10 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
     pipeline.reader.summarize = summarize
     pipeline.reader.finalize = finalize
 
-    result = pipeline.answer("Question")
+    progress = []
+    result = pipeline.answer(
+        "Question", on_progress=lambda stage, detail: progress.append((stage, detail))
+    )
 
     assert calls == ["retrieve", "summarize", "reduce"]
     assert result.retrieval_mode == "forced"
@@ -48,3 +51,11 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
     assert result.queries == ["Question"]
     assert result.answer == "Answer [S1]"
     assert result.warnings == []
+    assert [stage for stage, _ in progress] == [
+        "searching",
+        "reading",
+        "organizing",
+    ]
+    assert progress[1][1]["sources"] == [
+        {"title": "Source", "url": "https://example.com"}
+    ]

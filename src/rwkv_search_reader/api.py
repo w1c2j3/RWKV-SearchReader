@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
+import queue
+import threading
 import time
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
@@ -54,6 +58,39 @@ async def _answer(question: str) -> dict[str, Any]:
     return result.to_dict()
 
 
+def _answer_events(question: str) -> Iterator[str]:
+    events: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    def progress(stage: str, detail: dict[str, object]) -> None:
+        events.put({"type": "progress", "stage": stage, "detail": detail})
+
+    def work() -> None:
+        try:
+            result = _new_pipeline().answer(question, on_progress=progress)
+            events.put({"type": "result", "result": result.to_dict()})
+        except SearchReaderError as exc:
+            events.put(
+                {
+                    "type": "error",
+                    "error": {"stage": exc.stage, "message": str(exc)},
+                }
+            )
+        except Exception:  # noqa: BLE001 - preserve the stream response contract
+            events.put(
+                {
+                    "type": "error",
+                    "error": {"stage": "unexpected", "message": "服务暂时不可用"},
+                }
+            )
+
+    threading.Thread(target=work, daemon=True).start()
+    while True:
+        event = events.get()
+        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        if event["type"] in {"result", "error"}:
+            break
+
+
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "static" / "index.html")
@@ -77,6 +114,18 @@ def readiness() -> dict[str, Any]:
 @app.post("/v1/answer")
 async def answer(request: AnswerRequest) -> dict[str, Any]:
     return await _answer(request.question)
+
+
+@app.post("/v1/answer/stream")
+async def answer_stream(request: AnswerRequest) -> StreamingResponse:
+    return StreamingResponse(
+        _answer_events(request.question),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/v1/chat/completions")
