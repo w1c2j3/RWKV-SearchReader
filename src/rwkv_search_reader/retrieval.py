@@ -120,12 +120,13 @@ def _assert_public_destination(url: str) -> None:
     except socket.gaierror as exc:
         raise ValueError(f"cannot resolve host: {host}") from exc
     for address in addresses:
-        ip = ipaddress.ip_address(address)
-        if not ip.is_global:
+        if not ipaddress.ip_address(address).is_global:
             raise ValueError("private or non-global destinations are not allowed")
 
 
 def fetch_page(hit: SearchHit, settings: Settings) -> SearchHit:
+    """Fallback page fetcher for providers that only return short snippets."""
+
     if hit.content.strip():
         return hit
     try:
@@ -173,9 +174,7 @@ def fetch_page(hit: SearchHit, settings: Settings) -> SearchHit:
                 raw.extend(block)
                 if len(raw) >= 1_500_000:
                     break
-            response.encoding = (
-                response.encoding or response.apparent_encoding or "utf-8"
-            )
+            response.encoding = response.encoding or response.apparent_encoding or "utf-8"
             text = bytes(raw).decode(response.encoding, errors="replace")
             if "html" in content_type or "<html" in text[:1000].casefold():
                 parser = _ReadableTextParser()
@@ -218,9 +217,7 @@ def _source_adjustment(question: str, url: str) -> float:
         r"(?<![@\w])((?:[a-z0-9-]+\.)+[a-z]{2,})(?![\w])",
         question.casefold(),
     )
-    if any(
-        host == domain or host.endswith(f".{domain}") for domain in explicit_domains
-    ):
+    if any(host == domain or host.endswith(f".{domain}") for domain in explicit_domains):
         return 18.0
     official_requested = any(
         marker in question.casefold()
@@ -272,6 +269,8 @@ def chunk_text(text: str, size: int, overlap: int) -> list[str]:
 def rank_chunks(
     question: str, hits: list[SearchHit], settings: Settings
 ) -> list[DocumentChunk]:
+    """Fallback ranking for providers whose result snippets are not reader-ready."""
+
     query_terms = _terms(question)
     chunks: list[DocumentChunk] = []
     for source_index, hit in enumerate(hits, start=1):
@@ -305,6 +304,23 @@ def rank_chunks(
     return chunks
 
 
+def provider_materials(hits: list[SearchHit]) -> list[DocumentChunk]:
+    """Preserve a provider's query-ranked result order and material boundaries."""
+
+    return [
+        DocumentChunk(
+            source_id=f"S{source_index}",
+            title=hit.title,
+            url=hit.url,
+            text=hit.content.strip() or hit.snippet.strip(),
+            score=float(hit.score or 0.0),
+            chunk_index=0,
+        )
+        for source_index, hit in enumerate(hits, start=1)
+        if hit.content.strip() or hit.snippet.strip()
+    ]
+
+
 class Retriever:
     def __init__(self, settings: Settings, provider: SearchProvider):
         self.settings = settings
@@ -313,11 +329,10 @@ class Retriever:
     def run(
         self, question: str
     ) -> tuple[list[str], list[SearchHit], list[DocumentChunk], list[str]]:
-        # V1 deliberately uses the user's complete utterance as the sole query.
+        # The complete user utterance is the only query. RWKV never routes tools.
         query = " ".join(question.split()).strip()
         if not query:
             raise SearchReaderError("input", "question is empty")
-        queries = [query]
         hits = self.provider.search(query, self.settings.search_max_results)
         deduplicated: list[SearchHit] = []
         seen: set[str] = set()
@@ -329,16 +344,19 @@ class Retriever:
             seen.add(identity)
             deduplicated.append(hit)
         if not deduplicated:
-            raise SearchReaderError(
-                "search", "search provider returned no usable results"
-            )
+            raise SearchReaderError("search", "search provider returned no usable results")
 
         selected = deduplicated[: self.settings.fetch_pages]
+        if self.provider.results_are_material:
+            chunks = provider_materials(selected)
+            if not chunks:
+                raise SearchReaderError("search", "search provider returned no readable material")
+            return [query], deduplicated, chunks, []
+
         extracted = self.provider.extract(selected, query)
         for hit in selected:
             if extracted.get(hit.url):
                 hit.content = extracted[hit.url][:120_000]
-
         missing = [hit for hit in selected if not hit.content.strip()]
         if missing:
             with ThreadPoolExecutor(max_workers=min(5, len(missing))) as pool:
@@ -349,9 +367,9 @@ class Retriever:
                     future.result()
 
         warnings = [f"{hit.url}: {hit.error}" for hit in selected if hit.error]
-        chunks = rank_chunks(query, deduplicated, self.settings)
+        chunks = rank_chunks(query, selected, self.settings)
         if not chunks:
             raise SearchReaderError(
                 "fetch", "no readable page text or search snippets were available"
             )
-        return queries, deduplicated, chunks, warnings
+        return [query], deduplicated, chunks, warnings

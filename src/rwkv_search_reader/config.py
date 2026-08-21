@@ -98,20 +98,17 @@ class Settings:
     wigolo_base_url: str = "http://127.0.0.1:3333"
     wigolo_api_token: str = ""
     searxng_base_url: str = ""
-    search_max_results: int = 6
-    fetch_pages: int = 5
+    search_max_results: int = 10
+    fetch_pages: int = 10
     request_timeout_seconds: int = 45
-
-    compressor_enabled: bool = True
-    compressor_base_url: str = ""
-    compressor_api_key: str = ""
-    compressor_model: str = ""
-    compressor_max_tokens: int = 1400
 
     rwkv_base_url: str = "http://127.0.0.1:29613/v1"
     rwkv_api_key: str = "local"
     rwkv_model: str = ""
     rwkv_protocol: str = "completions"
+    rwkv_summary_workers: int = 10
+    rwkv_reduce_orders: int = 5
+    rwkv_summary_max_tokens: int = 384
     rwkv_max_tokens: int = 1536
     rwkv_temperature: float = 0.1
     model_timeout_seconds: int = 180
@@ -123,15 +120,6 @@ class Settings:
     api_port: int = 8790
     trace_enabled: bool = True
     trace_directory: Path = PROJECT_ROOT / "logs"
-
-    @property
-    def compressor_configured(self) -> bool:
-        return bool(
-            self.compressor_enabled
-            and self.compressor_base_url
-            and self.compressor_api_key
-            and self.compressor_model
-        )
 
     @property
     def rwkv_configured(self) -> bool:
@@ -148,7 +136,9 @@ class Settings:
             "retrieval_mode": "forced",
             "search_provider": self.search_provider,
             "search_configured": provider_ready,
-            "compressor": "model" if self.compressor_configured else "deterministic",
+            "reader_mode": "rwkv-parallel-map-reduce",
+            "summary_workers": self.rwkv_summary_workers,
+            "reduce_orders": self.rwkv_reduce_orders,
             "rwkv_configured": self.rwkv_configured,
         }
 
@@ -168,22 +158,22 @@ def get_settings() -> Settings:
         wigolo_base_url=_text("SEARCH_READER_WIGOLO_BASE_URL", "http://127.0.0.1:3333"),
         wigolo_api_token=_text("SEARCH_READER_WIGOLO_API_TOKEN"),
         searxng_base_url=_text("SEARCH_READER_SEARXNG_BASE_URL"),
-        search_max_results=_integer("SEARCH_READER_SEARCH_MAX_RESULTS", 6, 1, 10),
-        fetch_pages=_integer("SEARCH_READER_FETCH_PAGES", 5, 1, 10),
+        search_max_results=_integer("SEARCH_READER_SEARCH_MAX_RESULTS", 10, 1, 10),
+        fetch_pages=_integer("SEARCH_READER_FETCH_PAGES", 10, 1, 10),
         request_timeout_seconds=_integer(
             "SEARCH_READER_REQUEST_TIMEOUT_SECONDS", 45, 5, 180
-        ),
-        compressor_enabled=_boolean("SEARCH_READER_COMPRESSOR_ENABLED", True),
-        compressor_base_url=_text("SEARCH_READER_COMPRESSOR_BASE_URL"),
-        compressor_api_key=_text("SEARCH_READER_COMPRESSOR_API_KEY"),
-        compressor_model=_text("SEARCH_READER_COMPRESSOR_MODEL"),
-        compressor_max_tokens=_integer(
-            "SEARCH_READER_COMPRESSOR_MAX_TOKENS", 1400, 256, 8192
         ),
         rwkv_base_url=_text("SEARCH_READER_RWKV_BASE_URL", "http://127.0.0.1:29613/v1"),
         rwkv_api_key=_text("SEARCH_READER_RWKV_API_KEY", "local"),
         rwkv_model=_text("SEARCH_READER_RWKV_MODEL"),
         rwkv_protocol=protocol,
+        rwkv_summary_workers=_integer(
+            "SEARCH_READER_RWKV_SUMMARY_WORKERS", 10, 1, 32
+        ),
+        rwkv_reduce_orders=_integer("SEARCH_READER_RWKV_REDUCE_ORDERS", 5, 1, 10),
+        rwkv_summary_max_tokens=_integer(
+            "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 384, 96, 2048
+        ),
         rwkv_max_tokens=_integer("SEARCH_READER_RWKV_MAX_TOKENS", 1536, 128, 8192),
         rwkv_temperature=_number("SEARCH_READER_RWKV_TEMPERATURE", 0.1, 0.0, 2.0),
         model_timeout_seconds=_integer(

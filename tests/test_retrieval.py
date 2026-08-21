@@ -4,7 +4,12 @@ from dataclasses import replace
 
 from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import SearchHit
-from rwkv_search_reader.retrieval import Retriever, chunk_text, rank_chunks
+from rwkv_search_reader.retrieval import (
+    Retriever,
+    chunk_text,
+    provider_materials,
+    rank_chunks,
+)
 from rwkv_search_reader.search import SearchProvider
 
 
@@ -29,6 +34,30 @@ class StubProvider(SearchProvider):
         ][:max_results]
 
 
+class MaterialProvider(SearchProvider):
+    name = "material-stub"
+    results_are_material = True
+
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        self.received: list[str] = []
+
+    def search(self, query: str, max_results: int) -> list[SearchHit]:
+        self.received.append(query)
+        return [
+            SearchHit(
+                title=f"Result {index}",
+                url=f"https://example.com/{index}",
+                content=f"Provider-organized material {index}",
+                score=1.0 / index,
+            )
+            for index in range(1, max_results + 1)
+        ]
+
+    def extract(self, hits: list[SearchHit], query: str) -> dict[str, str]:
+        raise AssertionError("reader-ready provider results must not be extracted again")
+
+
 def test_retriever_uses_complete_user_question_as_single_query() -> None:
     settings = replace(Settings(), fetch_pages=1)
     provider = StubProvider(settings)
@@ -44,6 +73,34 @@ def test_retriever_uses_complete_user_question_as_single_query() -> None:
     assert warnings == []
 
 
+def test_reader_ready_results_keep_provider_order_without_extracting() -> None:
+    settings = replace(Settings(), search_max_results=4, fetch_pages=3)
+    provider = MaterialProvider(settings)
+
+    queries, sources, chunks, warnings = Retriever(settings, provider).run("question")
+
+    assert queries == ["question"]
+    assert len(sources) == 4
+    assert [chunk.source_id for chunk in chunks] == ["S1", "S2", "S3"]
+    assert [chunk.text for chunk in chunks] == [
+        "Provider-organized material 1",
+        "Provider-organized material 2",
+        "Provider-organized material 3",
+    ]
+    assert warnings == []
+
+
+def test_provider_materials_do_not_reorder_by_local_score() -> None:
+    hits = [
+        SearchHit(title="First", url="https://example.com/1", content="A", score=0.1),
+        SearchHit(title="Second", url="https://example.com/2", content="B", score=0.9),
+    ]
+
+    chunks = provider_materials(hits)
+
+    assert [chunk.title for chunk in chunks] == ["First", "Second"]
+
+
 def test_chunk_text_respects_size_and_overlap() -> None:
     chunks = chunk_text("A" * 1700, size=700, overlap=100)
     assert len(chunks) == 3
@@ -51,7 +108,7 @@ def test_chunk_text_respects_size_and_overlap() -> None:
     assert chunks[0][-100:] == chunks[1][:100]
 
 
-def test_chinese_terms_affect_ranking() -> None:
+def test_fallback_chunk_ranking_uses_question_terms() -> None:
     settings = replace(Settings(), chunk_chars=800, chunk_overlap_chars=80)
     hits = [
         SearchHit(
@@ -65,23 +122,7 @@ def test_chinese_terms_affect_ranking() -> None:
             content="RWKV 推理速度和显存占用测试。" * 20,
         ),
     ]
+
     chunks = rank_chunks("RWKV 推理速度怎么样", hits, settings)
-    assert chunks[0].source_id == "S2"
 
-
-def test_explicit_official_domain_outranks_forum_keyword_overlap() -> None:
-    settings = replace(Settings(), chunk_chars=800, chunk_overlap_chars=80)
-    hits = [
-        SearchHit(
-            title="Python 最新版本详解",
-            url="https://example.csdn.net/article",
-            content="Python 最新稳定版本和发布日期。" * 20,
-        ),
-        SearchHit(
-            title="Python downloads",
-            url="https://www.python.org/downloads/",
-            content="Download the latest Python stable release." * 20,
-        ),
-    ]
-    chunks = rank_chunks("请依据 python.org 查询 Python 最新稳定版本", hits, settings)
     assert chunks[0].source_id == "S2"

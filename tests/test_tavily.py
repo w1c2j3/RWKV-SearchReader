@@ -50,6 +50,8 @@ def test_tavily_key_pool_fails_over_without_changing_query() -> None:
     assert calls[0]["headers"]["Authorization"] == "Bearer first-key"
     assert calls[1]["headers"]["Authorization"] == "Bearer second-key"
     assert hits[0].url == "https://example.com/result"
+    assert hits[0].content == "Relevant snippet"
+    assert provider.results_are_material is True
 
     calls.clear()
     provider.search(question, 6)

@@ -33,9 +33,9 @@
   <body>
     <main>
       <header>
-        <div class="badge">Forced retrieve → compress → read</div>
+        <div class="badge">Tavily → parallel RWKV map → multi-order reduce</div>
         <h1>RWKV SearchReader</h1>
-        <p>每个问题都会先联网检索。RWKV 不选择工具，只阅读后端准备好的证据。</p>
+        <p>每个问题都会先由 Tavily 检索，再由 RWKV 并发阅读材料并汇总。RWKV 不选择工具。</p>
       </header>
       <form id="form">
         <textarea id="question" required maxlength="8000" placeholder="输入要检索的问题……"></textarea>
@@ -62,7 +62,7 @@
         const question = document.querySelector('#question').value.trim();
         if (!question) return;
         submit.disabled = true; answer.textContent = ''; sources.innerHTML = ''; meta.textContent = '';
-        sourcesBox.hidden = true; status.textContent = '正在固定执行联网检索、材料压缩和 RWKV 阅读…';
+        sourcesBox.hidden = true; status.textContent = '正在执行 Tavily 检索、RWKV 并发摘要和多顺序汇总…';
         try {
           const response = await fetch('/v1/answer', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question}) });
           const data = await response.json();
@@ -74,8 +74,8 @@
             link.textContent = source.title || source.url; li.appendChild(link); sources.appendChild(li);
           }
           sourcesBox.hidden = !data.sources.length;
-          meta.textContent = `${data.search_provider} · ${data.compression_mode} · ${(data.timings_ms.total / 1000).toFixed(1)} 秒`;
-          status.textContent = data.degraded ? '已完成（部分网页或压缩步骤发生降级）' : '已完成';
+          meta.textContent = `${data.search_provider} · ${data.reader_mode} · ${(data.timings_ms.total / 1000).toFixed(1)} 秒`;
+          status.textContent = data.degraded ? '已完成（部分并发阅读任务发生降级）' : '已完成';
         } catch (error) { status.textContent = `失败：${error.message}`; }
         finally { submit.disabled = false; }
       });

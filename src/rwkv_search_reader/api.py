@@ -121,7 +121,7 @@ async def chat_completions(request: ChatCompletionRequest) -> dict[str, Any]:
                 "evidence",
                 "retrieval_mode",
                 "search_provider",
-                "compression_mode",
+                "reader_mode",
                 "degraded",
                 "warnings",
                 "timings_ms",

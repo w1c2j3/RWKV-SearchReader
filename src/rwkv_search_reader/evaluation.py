@@ -174,9 +174,7 @@ def build_summary(
             "temperature": settings.rwkv_temperature,
         },
         "search_provider": settings.search_provider,
-        "compression_mode_configured": (
-            "model" if settings.compressor_configured else "deterministic"
-        ),
+        "reader_mode_configured": "rwkv-parallel-map-reduce",
         "counts": {
             "dataset": len(cases),
             "recorded": len(ordered),
@@ -266,7 +264,7 @@ def _markdown(summary: dict[str, Any]) -> str:
             f"- 协议：`{summary['model']['protocol']}`",
             f"- 最大输出：{summary['model']['max_tokens']} tokens",
             f"- Temperature：{summary['model']['temperature']}",
-            f"- 材料压缩：`{summary['compression_mode_configured']}`",
+            f"- 阅读模式：`{summary['reader_mode_configured']}`",
             "",
         ]
     )

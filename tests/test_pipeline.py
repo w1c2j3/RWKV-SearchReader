@@ -28,22 +28,23 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
         calls.append("retrieve")
         return [question], [hit], [chunk], []
 
-    def compress(question, chunks):
-        calls.append("compress")
-        return [evidence], "deterministic", []
+    def summarize(question, chunks):
+        calls.append("summarize")
+        return [evidence], []
 
-    def read(question, rows):
-        calls.append("read")
-        return "Answer [S1]"
+    def finalize(question, rows):
+        calls.append("reduce")
+        return "Answer [S1]", []
 
     pipeline.retriever.run = retrieve
-    pipeline.compressor.run = compress
-    pipeline.reader.run = read
+    pipeline.reader.summarize = summarize
+    pipeline.reader.finalize = finalize
 
     result = pipeline.answer("Question")
 
-    assert calls == ["retrieve", "compress", "read"]
+    assert calls == ["retrieve", "summarize", "reduce"]
     assert result.retrieval_mode == "forced"
+    assert result.reader_mode == "rwkv-parallel-map-reduce"
     assert result.queries == ["Question"]
     assert result.answer == "Answer [S1]"
     assert result.warnings == []

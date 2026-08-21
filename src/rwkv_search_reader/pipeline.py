@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 import uuid
 
-from .compression import EvidenceCompressor
 from .config import Settings, get_settings
 from .models import PipelineResult, SearchReaderError
 from .reader import RWKVReader, citation_warnings
@@ -13,13 +12,12 @@ from .tracing import append_trace
 
 
 class SearchReaderPipeline:
-    """Forced retrieve -> compress -> read pipeline with no model routing step."""
+    """Forced Tavily -> parallel RWKV summaries -> ordered reduce -> final answer."""
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self.provider = create_search_provider(self.settings)
         self.retriever = Retriever(self.settings, self.provider)
-        self.compressor = EvidenceCompressor(self.settings)
         self.reader = RWKVReader(self.settings)
 
     def answer(self, question: str) -> PipelineResult:
@@ -35,19 +33,18 @@ class SearchReaderPipeline:
         timings["retrieve"] = round((time.perf_counter() - stage) * 1000, 1)
 
         stage = time.perf_counter()
-        evidence, compression_mode, compression_warnings = self.compressor.run(
-            normalized, chunks
-        )
-        timings["compress"] = round((time.perf_counter() - stage) * 1000, 1)
+        evidence, summary_warnings = self.reader.summarize(normalized, chunks)
+        timings["summarize"] = round((time.perf_counter() - stage) * 1000, 1)
 
         stage = time.perf_counter()
-        answer = self.reader.run(normalized, evidence)
-        timings["read"] = round((time.perf_counter() - stage) * 1000, 1)
+        answer, reduce_warnings = self.reader.finalize(normalized, evidence)
+        timings["reduce"] = round((time.perf_counter() - stage) * 1000, 1)
         timings["total"] = round((time.perf_counter() - started) * 1000, 1)
 
         warnings = [
             *retrieval_warnings,
-            *compression_warnings,
+            *summary_warnings,
+            *reduce_warnings,
             *citation_warnings(answer, evidence),
         ]
         result = PipelineResult(
@@ -58,7 +55,7 @@ class SearchReaderPipeline:
             sources=sources,
             evidence=evidence,
             search_provider=self.provider.name,
-            compression_mode=compression_mode,
+            reader_mode="rwkv-parallel-map-reduce",
             degraded=bool(warnings),
             warnings=warnings,
             timings_ms=timings,

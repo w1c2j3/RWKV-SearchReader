@@ -110,6 +110,7 @@ def _json_object(response: requests.Response, stage: str) -> dict[str, Any]:
 
 class SearchProvider(ABC):
     name: str
+    results_are_material = False
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -126,6 +127,9 @@ class SearchProvider(ABC):
 
 class TavilyProvider(SearchProvider):
     name = "tavily"
+    # Advanced Search already returns query-ranked, source-bounded material in
+    # results[].content. Do not fetch or re-chunk those pages locally.
+    results_are_material = True
     endpoint = "https://api.tavily.com"
 
     @staticmethod
@@ -204,54 +208,19 @@ class TavilyProvider(SearchProvider):
             url = _clean(item.get("url"))
             if not _valid_public_url_shape(url):
                 continue
+            material = str(item.get("content") or item.get("snippet") or "").strip()
             hits.append(
                 SearchHit(
                     title=_clean(item.get("title") or url, 300),
                     url=url,
-                    snippet=_clean(item.get("content") or item.get("snippet"), 1200),
+                    snippet=_clean(material, 1200),
+                    content=material,
                     provider=self.name,
                     score=float(item.get("score") or 0.0),
                     published_date=_clean(item.get("published_date"), 80),
                 )
             )
         return hits
-
-    def extract(self, hits: list[SearchHit], query: str) -> dict[str, str]:
-        urls = [hit.url for hit in hits]
-        if not urls:
-            return {}
-        payload: dict[str, Any] = {
-            "urls": urls,
-            "extract_depth": "advanced",
-            "format": "markdown",
-            "include_images": False,
-            "include_favicon": False,
-            "include_usage": False,
-            "query": query,
-            "chunks_per_source": 5,
-        }
-        try:
-            response = self._post(
-                "extract",
-                payload,
-                timeout=(10, max(self.settings.request_timeout_seconds, 90)),
-            )
-        except (requests.RequestException, SearchReaderError):
-            return {}
-        try:
-            value = _json_object(response, "extract")
-        except SearchReaderError:
-            return {}
-        extracted: dict[str, str] = {}
-        for item in value.get("results") or []:
-            if not isinstance(item, dict):
-                continue
-            url = _clean(item.get("url"))
-            content = str(item.get("raw_content") or item.get("content") or "").strip()
-            if url and content:
-                extracted[url] = content
-        return extracted
-
 
 class WigoloProvider(SearchProvider):
     name = "wigolo"

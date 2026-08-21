@@ -34,6 +34,7 @@ class Evidence:
     claim: str
     quote: str
     score: float = 0.0
+    source_relation: str = "unclear"
 
 
 @dataclass(slots=True)
@@ -46,7 +47,7 @@ class PipelineResult:
     evidence: list[Evidence]
     retrieval_mode: str = "forced"
     search_provider: str = ""
-    compression_mode: str = ""
+    reader_mode: str = ""
     degraded: bool = False
     warnings: list[str] = field(default_factory=list)
     timings_ms: dict[str, float] = field(default_factory=dict)
