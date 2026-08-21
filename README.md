@@ -143,6 +143,17 @@ curl -s http://127.0.0.1:8790/readyz
 
 `readyz` 只验证配置是否齐全，不会消耗搜索或模型额度。
 
+运行可断点续跑的 natural/normal 100 题测试：
+
+```bash
+uv run rwkv-search-reader-eval \
+  --dataset /home/chase/GitHub/RWKV-ECRA/data/evaluation/retrieval_production_live_100_v1_20260812.json \
+  --output runs/normal100-7b \
+  --workers 4
+```
+
+结果写入 `results.jsonl`，汇总写入 `summary.json` 和 `REPORT.md`。再次使用同一 `--output` 会跳过已经成功记录的题目；加 `--retry-errors` 可重试失败题。该数据集没有标准答案，因此脚本报告完成率、引用率、降级率、失败阶段和耗时，不把这些结构指标冒充事实正确率。
+
 ## 第一版边界
 
 - 所有问题都会联网，包括闲聊和翻译。这是本项目有意选择的行为。

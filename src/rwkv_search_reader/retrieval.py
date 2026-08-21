@@ -212,6 +212,37 @@ def _terms(value: str) -> set[str]:
     return {term for term in terms if term not in ignored}
 
 
+def _source_adjustment(question: str, url: str) -> float:
+    host = (urlparse(url).hostname or "").casefold().removeprefix("www.")
+    explicit_domains = re.findall(
+        r"(?<![@\w])((?:[a-z0-9-]+\.)+[a-z]{2,})(?![\w])",
+        question.casefold(),
+    )
+    if any(
+        host == domain or host.endswith(f".{domain}") for domain in explicit_domains
+    ):
+        return 18.0
+    official_requested = any(
+        marker in question.casefold()
+        for marker in ("官方", "官网", "official", "原始论文", "政府")
+    )
+    low_authority = (
+        "csdn.net",
+        "juejin.cn",
+        "zhihu.com",
+        "medium.com",
+        "reddit.com",
+        "quora.com",
+    )
+    if official_requested and any(
+        host == domain or host.endswith(f".{domain}") for domain in low_authority
+    ):
+        return -7.0
+    if host.endswith((".gov", ".gov.cn", ".edu")):
+        return 3.0
+    return 0.0
+
+
 def chunk_text(text: str, size: int, overlap: int) -> list[str]:
     clean = re.sub(r"\n{3,}", "\n\n", str(text or "")).strip()
     if not clean:
@@ -252,7 +283,12 @@ def rank_chunks(
             overlap = len(query_terms & terms)
             coverage = overlap / max(1, len(query_terms))
             title_overlap = len(query_terms & _terms(hit.title))
-            score = coverage * 10.0 + title_overlap * 1.5 + float(hit.score or 0.0)
+            score = (
+                coverage * 10.0
+                + title_overlap * 1.5
+                + float(hit.score or 0.0)
+                + _source_adjustment(question, hit.url)
+            )
             chunks.append(
                 DocumentChunk(
                     source_id=f"S{source_index}",

@@ -56,3 +56,38 @@ def test_tavily_key_pool_fails_over_without_changing_query() -> None:
     assert len(calls) == 1
     assert calls[0]["headers"]["Authorization"] == "Bearer second-key"
     _reset_tavily_health_for_tests()
+
+
+def test_tavily_limits_search_to_explicit_domain() -> None:
+    _reset_tavily_health_for_tests()
+    settings = replace(Settings(), tavily_api_keys=("key",))
+    provider = TavilyProvider(settings)
+    captured = {}
+
+    def post(url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(200, {"results": []})
+
+    provider.session.post = post
+    provider.search("请依据 python.org 查询最新版本", 6)
+
+    assert captured["json"]["include_domains"] == ["python.org"]
+    _reset_tavily_health_for_tests()
+
+
+def test_tavily_does_not_treat_filenames_as_domains() -> None:
+    _reset_tavily_health_for_tests()
+    settings = replace(Settings(), tavily_api_keys=("key",))
+    provider = TavilyProvider(settings)
+    captured = []
+
+    def post(url, **kwargs):
+        captured.append(kwargs["json"])
+        return FakeResponse(200, {"results": []})
+
+    provider.session.post = post
+    for question in ("llama.cpp 最新版本", "给出 compose.yaml", "不要修改 uv.lock"):
+        provider.search(question, 6)
+
+    assert all("include_domains" not in request for request in captured)
+    _reset_tavily_health_for_tests()

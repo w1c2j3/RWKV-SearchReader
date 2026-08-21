@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from abc import ABC, abstractmethod
 from typing import Any
@@ -15,6 +16,26 @@ from .models import SearchHit, SearchReaderError
 _TAVILY_HEALTH_LOCK = threading.Lock()
 _TAVILY_PERMANENT_FAILURES: set[str] = set()
 _TAVILY_PREFERRED_KEY = ""
+_COMMON_GENERIC_TLDS = {
+    "ai",
+    "app",
+    "biz",
+    "cloud",
+    "com",
+    "dev",
+    "edu",
+    "gov",
+    "info",
+    "io",
+    "me",
+    "mil",
+    "net",
+    "online",
+    "org",
+    "site",
+    "tech",
+    "xyz",
+}
 
 
 def _key_identity(api_key: str) -> str:
@@ -53,6 +74,25 @@ def _reset_tavily_health_for_tests() -> None:
 def _clean(value: Any, limit: int = 0) -> str:
     text = " ".join(str(value or "").split()).strip()
     return text[:limit] if limit else text
+
+
+def _explicit_domains(query: str) -> list[str]:
+    values = re.findall(
+        r"(?<![@\w])((?:[a-z0-9-]+\.)+[a-z]{2,})(?![\w])",
+        str(query or "").casefold(),
+    )
+    excluded = {"example.com"}
+    return list(
+        dict.fromkeys(
+            value.removeprefix("www.")
+            for value in values
+            if value not in excluded
+            and (
+                len(value.rsplit(".", 1)[-1]) == 2
+                or value.rsplit(".", 1)[-1] in _COMMON_GENERIC_TLDS
+            )
+        )
+    )[:5]
 
 
 def _json_object(response: requests.Response, stage: str) -> dict[str, Any]:
@@ -139,17 +179,21 @@ class TavilyProvider(SearchProvider):
         )
 
     def search(self, query: str, max_results: int) -> list[SearchHit]:
+        request: dict[str, Any] = {
+            "query": query,
+            "search_depth": "advanced",
+            "max_results": max_results,
+            "include_answer": False,
+            "include_raw_content": False,
+            "include_images": False,
+            "topic": "general",
+        }
+        domains = _explicit_domains(query)
+        if domains:
+            request["include_domains"] = domains
         response = self._post(
             "search",
-            {
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": max_results,
-                "include_answer": False,
-                "include_raw_content": False,
-                "include_images": False,
-                "topic": "general",
-            },
+            request,
             timeout=(10, self.settings.request_timeout_seconds),
         )
         payload = _json_object(response, "search")

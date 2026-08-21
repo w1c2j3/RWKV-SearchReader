@@ -67,3 +67,21 @@ def test_chinese_terms_affect_ranking() -> None:
     ]
     chunks = rank_chunks("RWKV 推理速度怎么样", hits, settings)
     assert chunks[0].source_id == "S2"
+
+
+def test_explicit_official_domain_outranks_forum_keyword_overlap() -> None:
+    settings = replace(Settings(), chunk_chars=800, chunk_overlap_chars=80)
+    hits = [
+        SearchHit(
+            title="Python 最新版本详解",
+            url="https://example.csdn.net/article",
+            content="Python 最新稳定版本和发布日期。" * 20,
+        ),
+        SearchHit(
+            title="Python downloads",
+            url="https://www.python.org/downloads/",
+            content="Download the latest Python stable release." * 20,
+        ),
+    ]
+    chunks = rank_chunks("请依据 python.org 查询 Python 最新稳定版本", hits, settings)
+    assert chunks[0].source_id == "S2"

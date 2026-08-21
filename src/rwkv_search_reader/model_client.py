@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import requests
@@ -113,8 +114,13 @@ class OpenAICompatibleClient:
     ) -> str:
         safe_system = _escape_role_headers(system)
         safe_user = _escape_role_headers(user)
-        prompt = f"System: {safe_system}\n\nUser: {safe_user}\n\nAssistant:"
-        return self._post(
+        # G1I completes the missing final `>` and then writes public prose.
+        # This empty-think prefill prevents chain-of-thought from leaking into
+        # the answer while retaining the model's native completion protocol.
+        prompt = (
+            f"System: {safe_system}\n\nUser: {safe_user}\n\nAssistant: <think></think"
+        )
+        answer = self._post(
             "/completions",
             {
                 "model": self.model,
@@ -126,6 +132,13 @@ class OpenAICompatibleClient:
             },
             stage,
         )
+        if answer.startswith(">"):
+            answer = answer[1:]
+            if answer.startswith("\r\n"):
+                answer = answer[2:]
+            elif answer.startswith("\n"):
+                answer = answer[1:]
+        return _strip_reasoning_markup(answer)
 
 
 def _escape_role_headers(value: str) -> str:
@@ -135,3 +148,17 @@ def _escape_role_headers(value: str) -> str:
             line = "[external text] " + line
         lines.append(line)
     return "\n".join(lines)
+
+
+def _strip_reasoning_markup(value: str) -> str:
+    """Remove G1I reasoning markup without exposing the hidden prefix."""
+    answer = str(value or "").strip()
+    if "</think>" in answer.casefold():
+        answer = re.split(r"</think\s*>", answer, flags=re.IGNORECASE)[-1].strip()
+    answer = re.sub(
+        r"<think\b[^>]*>.*?</think\s*>",
+        "",
+        answer,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    return answer
