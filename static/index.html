@@ -313,6 +313,7 @@
       };
 
       const eventCopy = (stage, detail = {}) => {
+        if (stage === 'responding') return ['识别为简单对话', '无需查找资料，直接回应'];
         if (stage === 'searching') return ['开始查找相关资料', '正在理解问题并发起检索'];
         if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, (detail.queries || []).join(' · ')];
         if (stage === 'reading') return [`开始逐篇阅读 ${detail.source_count || 0} 个来源`, '每个来源独立阅读，互不混合'];

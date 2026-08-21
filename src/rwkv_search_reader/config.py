@@ -133,7 +133,7 @@ class Settings:
         }.get(self.search_provider, False)
         return {
             "ready": bool(provider_ready and self.rwkv_configured),
-            "retrieval_mode": "forced",
+            "retrieval_mode": "questions-only",
             "search_provider": self.search_provider,
             "search_configured": provider_ready,
             "reader_mode": "rwkv-parallel-map-reduce",

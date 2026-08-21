@@ -11,7 +11,7 @@ from rwkv_search_reader.models import (
     SearchHit,
     SearchReaderError,
 )
-from rwkv_search_reader.pipeline import SearchReaderPipeline
+from rwkv_search_reader.pipeline import SearchReaderPipeline, _conversation_reply
 from rwkv_search_reader.tracing import recent_traces
 
 
@@ -114,3 +114,35 @@ def test_pipeline_persists_failed_runs_with_trace(tmp_path) -> None:
     assert record["session_id"] == "failed-session"
     assert record["error"]["stage"] == "search"
     assert record["trace"][-1]["stage"] == "failed"
+
+
+def test_exact_greeting_skips_search_and_model_calls(tmp_path) -> None:
+    settings = replace(
+        Settings(),
+        trace_enabled=True,
+        trace_directory=tmp_path,
+    )
+    pipeline = SearchReaderPipeline(settings)
+    pipeline.retriever.run = lambda question: pytest.fail("search must not run")
+    pipeline.reader.summarize = lambda *args, **kwargs: pytest.fail(
+        "reader must not run"
+    )
+    progress = []
+
+    result = pipeline.answer(
+        "你好！",
+        on_progress=lambda stage, detail: progress.append((stage, detail)),
+        session_id="greeting-session",
+    )
+
+    assert result.answer == "你好！有什么想了解的，直接问我就好。"
+    assert result.retrieval_mode == "local-conversation"
+    assert result.queries == []
+    assert result.sources == []
+    assert [stage for stage, _ in progress] == ["responding", "completed"]
+    saved = recent_traces(tmp_path, 1)[0]
+    assert saved["trace"][-1]["stage"] == "completed"
+
+
+def test_greeting_with_real_question_does_not_match_small_talk_rule() -> None:
+    assert _conversation_reply("你好，请帮我查询 Python 最新版本") is None

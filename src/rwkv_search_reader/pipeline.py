@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -12,8 +13,34 @@ from .search import create_search_provider
 from .tracing import append_trace
 
 
+def _conversation_reply(question: str) -> str | None:
+    """Handle a tiny exact-match small-talk allow-list without search or a model."""
+
+    canonical = re.sub(r"[\s,，。.!！?？~～]+", "", question).casefold()
+    replies = {
+        "你好": "你好！有什么想了解的，直接问我就好。",
+        "您好": "你好！有什么想了解的，直接问我就好。",
+        "嗨": "嗨！有什么想了解的吗？",
+        "哈喽": "你好！有什么想了解的吗？",
+        "hello": "你好！有什么想了解的吗？",
+        "hi": "你好！有什么想了解的吗？",
+        "在吗": "在的。你想了解什么？",
+        "早上好": "早上好！今天想了解什么？",
+        "下午好": "下午好！有什么可以帮你了解的？",
+        "晚上好": "晚上好！有什么想了解的吗？",
+        "谢谢": "不客气。还有什么想了解的吗？",
+        "谢谢你": "不客气。还有什么想了解的吗？",
+        "多谢": "不客气。还有什么想了解的吗？",
+        "再见": "再见！需要时随时来问。",
+        "拜拜": "再见！需要时随时来问。",
+        "你是谁": "我是寻答，可以帮你查找资料、阅读来源并整理答案。",
+        "你能做什么": "我可以帮你查找资料、阅读来源并整理答案。直接问一个具体问题就好。",
+    }
+    return replies.get(canonical)
+
+
 class SearchReaderPipeline:
-    """Forced Tavily -> parallel RWKV summaries -> ordered reduce -> final answer."""
+    """Deterministic greeting reply or Tavily -> parallel RWKV reader pipeline."""
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -56,6 +83,40 @@ class SearchReaderPipeline:
                 on_progress(stage_name, {**detail, "at_ms": at_ms})
 
         try:
+            conversation_reply = _conversation_reply(normalized)
+            if conversation_reply is not None:
+                emit("responding", {"message": "直接回应简单对话"})
+                timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+                emit("completed", {"duration_ms": timings["total"]})
+                result = PipelineResult(
+                    request_id=request_id,
+                    session_id=session_id,
+                    question=normalized,
+                    answer=conversation_reply,
+                    queries=[],
+                    sources=[],
+                    evidence=[],
+                    retrieval_mode="local-conversation",
+                    search_provider="",
+                    reader_mode="deterministic-conversation",
+                    degraded=False,
+                    warnings=[],
+                    timings_ms=timings,
+                    trace=trace,
+                )
+                if self.settings.trace_enabled:
+                    append_trace(
+                        self.settings.trace_directory,
+                        {
+                            "schema_version": "rwkv-search-reader.trace.v2",
+                            "status": "ok",
+                            **result.to_dict(),
+                            "configuration": configuration,
+                            "model_calls": [],
+                        },
+                    )
+                return result
+
             emit("searching", {"message": "正在查找相关资料"})
             stage = time.perf_counter()
             queries, sources, chunks, retrieval_warnings = self.retriever.run(

@@ -41,7 +41,7 @@ class ChatCompletionRequest(BaseModel):
 app = FastAPI(
     title="RWKV SearchReader",
     version=__version__,
-    description="Mandatory retrieve-then-read API. RWKV never receives tools.",
+    description="Deterministic small-talk bypass plus retrieve-then-read answers.",
 )
 
 
@@ -108,7 +108,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "version": __version__,
-        "retrieval_mode": "forced",
+        "retrieval_mode": "questions-only",
         "tool_calling": False,
     }
 
