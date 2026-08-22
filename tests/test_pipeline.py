@@ -12,7 +12,11 @@ from rwkv_search_reader.models import (
     SearchHit,
     SearchReaderError,
 )
-from rwkv_search_reader.pipeline import SearchReaderPipeline, _conversation_reply
+from rwkv_search_reader.pipeline import (
+    SearchReaderPipeline,
+    _conversation_reply,
+    _history_only_request,
+)
 from rwkv_search_reader.tracing import append_trace, recent_traces
 
 
@@ -150,6 +154,53 @@ def test_exact_greeting_skips_search_and_model_calls(tmp_path) -> None:
 
 def test_greeting_with_real_question_does_not_match_small_talk_rule() -> None:
     assert _conversation_reply("你好，请帮我查询 Python 最新版本") is None
+
+
+def test_history_only_request_is_conservative() -> None:
+    assert _history_only_request("总结你现在知道的东西")
+    assert _history_only_request("回顾一下我们刚才聊了什么")
+    assert _history_only_request("整理前面对话的要点")
+    assert not _history_only_request("总结本周科技新闻")
+    assert not _history_only_request("前面提到的品牌分别是什么？")
+
+
+def test_pipeline_summarizes_conversation_without_search(tmp_path) -> None:
+    settings = replace(
+        Settings(),
+        rwkv_model="rwkv-test",
+        trace_enabled=False,
+        trace_directory=tmp_path,
+    )
+    pipeline = SearchReaderPipeline(settings)
+    pipeline.retriever.run = lambda question: pytest.fail("search must not run")
+    pipeline.reader.contextualize = lambda *args: pytest.fail(
+        "contextualizer must not run"
+    )
+    received = []
+
+    def answer_from_history(question, history):
+        received.append((question, history))
+        return "此前主要讨论了口粮茶，并确认你偏好回甘明显的茶。"
+
+    pipeline.reader.answer_from_history = answer_from_history
+    progress = []
+    history = [
+        {"question": "口粮茶有哪些？", "answer": "可以按茶类和品牌选择。"},
+        {"question": "我喜欢回甘好的", "answer": "可以关注铁观音和生普。"},
+    ]
+
+    result = pipeline.answer(
+        "总结你现在知道的东西",
+        conversation_history=history,
+        on_progress=lambda stage, detail: progress.append((stage, detail)),
+    )
+
+    assert received == [("总结你现在知道的东西", history)]
+    assert result.queries == []
+    assert result.sources == []
+    assert result.retrieval_mode == "conversation-history"
+    assert result.reader_mode == "rwkv-conversation-summary"
+    assert [stage for stage, _ in progress] == ["history_reading", "completed"]
 
 
 def test_pipeline_uses_audit_query_to_add_new_sources(tmp_path) -> None:

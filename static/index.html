@@ -335,6 +335,7 @@
 
       const eventCopy = (stage, detail = {}) => {
         if (stage === 'responding') return ['识别为简单对话', '无需查找资料，直接回应'];
+        if (stage === 'history_reading') return [`正在阅读此前 ${detail.turn_count || 0} 轮对话`, '直接根据本次对话整理回答'];
         if (stage === 'contextualizing') return [`正在衔接此前 ${detail.turn_count || 0} 轮对话`, '补全当前问题中的上下文指代'];
         if (stage === 'context_resolved') return ['已理解当前追问', detail.resolved_question || '已形成完整问题'];
         if (stage === 'searching') return ['开始查找相关资料', '正在理解问题并发起检索'];

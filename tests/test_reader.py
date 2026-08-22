@@ -369,3 +369,31 @@ def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> N
     assert prompt.index("口粮茶有哪些？") < prompt.index("我喜欢回甘好的")
     assert prompt.index("我喜欢回甘好的") < prompt.index("此前对话用于保持连续语境")
     assert "不是本轮事实来源" in prompt
+
+
+def test_conversation_answer_reads_history_before_request_without_citations() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        captured["stage"] = kwargs["stage"]
+        return "根据此前对话内容，我们讨论了口粮茶，你偏好回甘明显的茶 [S8]。"
+
+    reader._complete = complete
+    answer = reader.answer_from_history(
+        "总结你现在知道的东西",
+        [
+            {"question": "口粮茶有哪些？", "answer": "有红茶和乌龙茶 [S1]。"},
+            {"question": "我喜欢回甘好的", "answer": "可以关注铁观音 [S8]。"},
+        ],
+    )
+
+    prompt = captured["user"]
+    assert captured["stage"] == "conversation"
+    assert prompt.index("口粮茶有哪些？") < prompt.index("总结你现在知道的东西")
+    assert "不要把当前请求里的泛称" in prompt
+    assert "当前用户请求不属于待总结的历史内容" in prompt
+    assert "不要按轮次复述" in prompt
+    assert answer == "我们讨论了口粮茶，你偏好回甘明显的茶。"

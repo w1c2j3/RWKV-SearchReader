@@ -12,6 +12,27 @@ from .retrieval import Retriever
 from .search import create_search_provider
 from .tracing import append_trace, session_turns
 
+_HISTORY_REFERENCE_RE = re.compile(
+    r"刚才|前面|上面|之前|此前|前文|对话|聊天|我们(?:聊|说)|"
+    r"你(?:刚才|之前|前面)?(?:说|提到)|我(?:刚才|之前|前面)?(?:说|提到)|"
+    r"你现在知道|你已经知道|已经聊过|讨论过"
+)
+_HISTORY_SUMMARY_RE = re.compile(
+    r"总结|概括|归纳|整理|回顾|复述|要点|结论|"
+    r"(?:说|聊|讨论)了什么|知道(?:了)?(?:哪些|什么)|记得.*(?:什么|吗)"
+)
+
+
+def _history_only_request(question: str) -> bool:
+    """Conservatively recognize requests that operate on this chat itself."""
+
+    text = " ".join(str(question or "").split()).strip()
+    return bool(
+        text
+        and _HISTORY_REFERENCE_RE.search(text)
+        and _HISTORY_SUMMARY_RE.search(text)
+    )
+
 
 def _conversation_reply(question: str) -> str | None:
     """Handle a tiny exact-match small-talk allow-list without search or a model."""
@@ -130,6 +151,51 @@ class SearchReaderPipeline:
                     self.settings.conversation_turns,
                 )
             )
+            if history and _history_only_request(normalized):
+                emit(
+                    "history_reading",
+                    {
+                        "turn_count": len(history),
+                        "message": "正在阅读此前对话",
+                    },
+                )
+                stage = time.perf_counter()
+                answer = self.reader.answer_from_history(normalized, history)
+                timings["conversation"] = round(
+                    (time.perf_counter() - stage) * 1000, 1
+                )
+                timings["total"] = round(
+                    (time.perf_counter() - started) * 1000, 1
+                )
+                emit("completed", {"duration_ms": timings["total"]})
+                result = PipelineResult(
+                    request_id=request_id,
+                    session_id=session_id,
+                    question=normalized,
+                    answer=answer,
+                    queries=[],
+                    sources=[],
+                    evidence=[],
+                    retrieval_mode="conversation-history",
+                    search_provider="",
+                    reader_mode="rwkv-conversation-summary",
+                    degraded=False,
+                    warnings=[],
+                    timings_ms=timings,
+                    trace=trace,
+                )
+                if self.settings.trace_enabled:
+                    append_trace(
+                        self.settings.trace_directory,
+                        {
+                            "schema_version": "rwkv-search-reader.trace.v2",
+                            "status": "ok",
+                            **result.to_dict(),
+                            "configuration": configuration,
+                            "model_calls": self.reader.call_records(),
+                        },
+                    )
+                return result
             effective_question = normalized
             if history:
                 emit(

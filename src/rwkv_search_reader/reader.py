@@ -447,6 +447,53 @@ class RWKVReader:
                 return f"上一问：{previous_question}；当前追问：{question}"[:8000]
         return rewritten
 
+    def answer_from_history(
+        self, question: str, history: list[dict[str, str]]
+    ) -> str:
+        """Answer a request about this conversation without external retrieval."""
+
+        material = "\n".join(
+            json.dumps(
+                {
+                    "turn": index,
+                    "user": turn.get("question", "")[:1200],
+                    "assistant": turn.get("answer", "")[:1800],
+                },
+                ensure_ascii=False,
+            )
+            for index, turn in enumerate(history, start=1)
+        )
+        user = f"""<此前对话消息>
+{material}
+</此前对话消息>
+
+<当前用户请求>
+{question}
+</当前用户请求>
+
+此前对话材料严格只有上面的 {len(history)} 个已完成轮次，当前用户请求不属于待总结的历史内容。只根据这些历史消息完成当前请求，不检索、不补充模型记忆中的事实，也不要把当前请求里的泛称（例如“东西”“内容”）当成一个外部主题。
+若用户要求总结：提炼对话中已经形成的主题、事实、用户偏好和结论；忽略问候、致谢等寒暄；合并重复内容；不要按轮次复述，不要描述“用户问了什么、助手回答了什么”，也不要把本次“总结”请求写进总结。历史答案中的 [S数字] 是各轮当时的来源编号，本次不再绑定原网页，因此不要复制这些编号。
+直接给出自然、简洁的回答。不要以“我已阅读”“根据对话”“以下是总结”开头，不展示思维过程。"""
+        output = self._complete(
+            user,
+            max_tokens=min(1000, self.settings.rwkv_max_tokens),
+            stage="conversation",
+        )
+        answer = _clean_final_answer(output)
+        answer = re.sub(
+            r"^\s*(?:我已阅读(?:完)?(?:所有|上述|此前)?对话(?:消息|内容)?|"
+            r"根据(?:上述|此前|前面)?对话(?:内容|消息)?|"
+            r"以下是(?:对当前对话的)?总结)\s*[，,:：。]?\s*",
+            "",
+            answer,
+        )
+        answer = re.sub(r"\s*(?:\[S\d+\])+", "", answer, flags=re.IGNORECASE)
+        if not answer:
+            raise SearchReaderError(
+                "conversation", "RWKV returned an empty conversation answer"
+            )
+        return answer
+
     def audit(
         self,
         question: str,
