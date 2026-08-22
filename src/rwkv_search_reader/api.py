@@ -19,7 +19,7 @@ from . import __version__
 from .config import PROJECT_ROOT, get_settings
 from .models import SearchReaderError
 from .pipeline import SearchReaderPipeline
-from .tracing import recent_traces
+from .tracing import recent_traces, session_records
 
 
 class AnswerRequest(BaseModel):
@@ -36,6 +36,11 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage]
     stream: bool = False
+
+
+class SessionHistoryRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=128)
+    limit: int = Field(default=60, ge=1, le=200)
 
 
 app = FastAPI(
@@ -159,6 +164,17 @@ def history(
     return {
         "records": recent_traces(settings.trace_directory, limit),
         "storage": str(settings.trace_directory),
+    }
+
+
+@app.post("/v1/session/history")
+def session_history(request: SessionHistoryRequest) -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "session_id": request.session_id,
+        "records": session_records(
+            settings.trace_directory, request.session_id, request.limit
+        ),
     }
 
 

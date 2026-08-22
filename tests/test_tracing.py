@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from rwkv_search_reader.tracing import append_trace, recent_traces, session_turns
+from rwkv_search_reader.tracing import (
+    append_trace,
+    recent_traces,
+    session_records,
+    session_turns,
+)
 
 
 def test_trace_records_are_durable_and_history_omits_raw_evidence(tmp_path) -> None:
@@ -25,7 +30,7 @@ def test_trace_records_are_durable_and_history_omits_raw_evidence(tmp_path) -> N
     assert len(records) == 1
     assert records[0]["session_id"] == "session-1"
     assert records[0]["sources"] == [
-        {"title": "Source", "url": "https://example.com"}
+        {"source_id": "", "title": "Source", "url": "https://example.com"}
     ]
     assert "evidence" not in records[0]
     assert "model_calls" not in records[0]
@@ -64,3 +69,6 @@ def test_session_turns_returns_only_matching_successful_conversation(tmp_path) -
         {"question": "第一问", "answer": "第一答"},
         {"question": "第二问", "answer": "第二答"},
     ]
+    records = session_records(tmp_path, "chat-a", 6)
+    assert [record["question"] for record in records] == ["第二问", "第一问"]
+    assert all(record["session_id"] == "chat-a" for record in records)

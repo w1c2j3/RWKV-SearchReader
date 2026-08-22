@@ -511,17 +511,50 @@
         return result;
       };
 
+      const showConversation = (turns) => {
+        if (!turns.length) return;
+        conversation.querySelectorAll('.message').forEach((node) => node.remove());
+        welcome.hidden = true;
+        sessionId = turns[0].session_id || createSessionId();
+        saveSessionId();
+        turns.forEach((turn) => {
+          appendUser(turn.question || '');
+          const { body } = assistantShell();
+          const trace = createTrace(turn.trace || [], false);
+          body.appendChild(trace.details);
+          if (turn.status === 'error') appendError(body, turn.error?.message || '处理未完成');
+          else finishAssistant(body, turn);
+        });
+        chatTitle.textContent = (turns[0].question || '历史记录').slice(0, 42);
+        closeSidebar();
+        scrollToBottom();
+      };
+
       const renderHistory = () => {
         historyList.replaceChildren();
-        historyCount.textContent = String(historyRecords.length);
-        if (!historyRecords.length) {
+        const conversations = [];
+        const grouped = new Map();
+        historyRecords.forEach((record) => {
+          const key = record.session_id || record.request_id || `record-${conversations.length}`;
+          if (!grouped.has(key)) {
+            const conversationRecord = { key, turns: [] };
+            grouped.set(key, conversationRecord);
+            conversations.push(conversationRecord);
+          }
+          grouped.get(key).turns.push(record);
+        });
+        historyCount.textContent = String(conversations.length);
+        if (!conversations.length) {
           const empty = document.createElement('div');
           empty.className = 'history-empty';
           empty.textContent = '还没有本地记录。完成一次提问后会自动保存在这里。';
           historyList.appendChild(empty);
           return;
         }
-        historyRecords.forEach((record) => {
+        conversations.forEach((conversationRecord) => {
+          const turns = conversationRecord.turns.sort((left, right) => new Date(left.recorded_at || 0) - new Date(right.recorded_at || 0));
+          const record = turns[0];
+          const latest = turns[turns.length - 1];
           const button = document.createElement('button');
           button.className = 'history-item';
           button.type = 'button';
@@ -530,27 +563,11 @@
           question.textContent = record.question || '未命名问题';
           const time = document.createElement('span');
           time.className = 'history-time';
-          time.textContent = formatTime(record.recorded_at) || (record.status === 'error' ? '未完成' : '已保存');
+          const savedTime = formatTime(latest.recorded_at) || (latest.status === 'error' ? '未完成' : '已保存');
+          time.textContent = `${turns.length} 轮 · ${savedTime}`;
           button.append(question, time);
           button.addEventListener('click', () => {
-            conversation.querySelectorAll('.message').forEach((node) => node.remove());
-            welcome.hidden = true;
-            sessionId = record.session_id || createSessionId();
-            saveSessionId();
-            const turns = historyRecords
-              .filter((item) => item.session_id && item.session_id === record.session_id)
-              .sort((left, right) => new Date(left.recorded_at || 0) - new Date(right.recorded_at || 0));
-            (turns.length ? turns : [record]).forEach((turn) => {
-              appendUser(turn.question || '');
-              const { body } = assistantShell();
-              const trace = createTrace(turn.trace || [], false);
-              body.appendChild(trace.details);
-              if (turn.status === 'error') appendError(body, turn.error?.message || '处理未完成');
-              else finishAssistant(body, turn);
-            });
-            chatTitle.textContent = (turns[0]?.question || record.question || '历史记录').slice(0, 42);
-            closeSidebar();
-            scrollToBottom();
+            showConversation(turns);
           });
           historyList.appendChild(button);
         });
@@ -559,13 +576,29 @@
       const loadHistory = async () => {
         try {
           const response = await fetch('/v1/history?limit=60');
-          if (!response.ok) throw new Error('local history unavailable');
-          const data = await response.json();
-          historyRecords = data.records || [];
+          if (response.ok) {
+            const data = await response.json();
+            historyRecords = data.records || [];
+          } else {
+            const sessionResponse = await fetch('/v1/session/history', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ session_id: sessionId, limit: 60 }),
+            });
+            if (!sessionResponse.ok) throw new Error('session history unavailable');
+            const data = await sessionResponse.json();
+            historyRecords = data.records || [];
+          }
         } catch (_) {
-          historyRecords = [];
+          historyRecords = historyRecords.filter((record) => record.session_id === sessionId);
         }
         renderHistory();
+        const currentTurns = historyRecords
+          .filter((record) => record.session_id === sessionId)
+          .sort((left, right) => new Date(left.recorded_at || 0) - new Date(right.recorded_at || 0));
+        if (currentTurns.length && !conversation.querySelector('.message')) {
+          showConversation(currentTurns);
+        }
       };
 
       const resetChat = () => {
@@ -603,12 +636,13 @@
         event.preventDefault();
         const question = questionInput.value.trim();
         if (!question || pending) return;
+        const isNewConversation = !conversation.querySelector('.message.user');
         pending = true;
         submit.disabled = true;
         questionInput.disabled = true;
         welcome.hidden = true;
         appendUser(question);
-        chatTitle.textContent = question.slice(0, 42);
+        if (isNewConversation) chatTitle.textContent = question.slice(0, 42);
         questionInput.value = '';
         resizeComposer();
         const { body } = assistantShell();

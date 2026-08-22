@@ -339,5 +339,6 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     assert prompt.index("UNIQUE QUESTION") < prompt.index("根据上面的材料")
     assert '"facts"' not in prompt
     assert "不输出 JSON" in prompt
+    assert "组织 4–8 个互不重复的信息维度" in prompt
     assert answer == "这是综合后的自然回答，不是逐来源清单 [S1][S2]。"
     assert warnings == []
