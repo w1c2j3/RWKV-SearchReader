@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import PROJECT_ROOT, get_settings
+from .conversations import ConversationStore, new_conversation_id
 from .models import SearchReaderError
 from .pipeline import SearchReaderPipeline
 from .tracing import recent_traces, session_records
@@ -25,6 +26,8 @@ from .tracing import recent_traces, session_records
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     session_id: str = Field(default="", max_length=128)
+    conversation_id: str = Field(default="", max_length=128)
+    client_id: str = Field(default="", max_length=128)
 
 
 class ChatMessage(BaseModel):
@@ -43,6 +46,16 @@ class SessionHistoryRequest(BaseModel):
     limit: int = Field(default=60, ge=1, le=200)
 
 
+class ConversationAccessRequest(BaseModel):
+    client_id: str = Field(min_length=8, max_length=128)
+    conversation_id: str = Field(min_length=8, max_length=128)
+
+
+class ConversationListRequest(BaseModel):
+    client_id: str = Field(min_length=8, max_length=128)
+    limit: int = Field(default=60, ge=1, le=200)
+
+
 app = FastAPI(
     title="RWKV SearchReader",
     version=__version__,
@@ -54,29 +67,66 @@ def _new_pipeline() -> SearchReaderPipeline:
     return SearchReaderPipeline(get_settings())
 
 
+def _conversation_store() -> ConversationStore:
+    settings = get_settings()
+    return ConversationStore(settings.trace_directory / "conversations.sqlite3")
+
+
 async def _answer(
     question: str,
     session_id: str = "",
     conversation_history: list[dict[str, str]] | None = None,
+    conversation_id: str = "",
+    client_id: str = "",
 ) -> dict[str, Any]:
     try:
+        if conversation_history is not None and not (conversation_id or client_id):
+            result = await run_in_threadpool(
+                _new_pipeline().answer,
+                question,
+                None,
+                "",
+                conversation_history,
+            )
+            return result.to_dict()
+
+        settings = get_settings()
+        identity = conversation_id or session_id or new_conversation_id()
+        owner = client_id or "client_api_anonymous"
+        store = _conversation_store()
+        store.ensure(
+            identity,
+            owner,
+            legacy_records=session_records(settings.trace_directory, identity, 200),
+        )
+        history = store.history(identity, owner, settings.conversation_turns)
         result = await run_in_threadpool(
             _new_pipeline().answer,
             question,
             None,
-            session_id,
-            conversation_history,
+            identity,
+            history,
         )
+        payload = result.to_dict()
+        payload["conversation_id"] = identity
+        store.append_turn(identity, owner, question, payload)
     except SearchReaderError as exc:
         status = 422 if exc.stage == "input" else 502
         raise HTTPException(
             status_code=status,
             detail={"stage": exc.stage, "message": str(exc)},
         ) from exc
-    return result.to_dict()
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return payload
 
 
-def _answer_events(question: str, session_id: str = "") -> Iterator[str]:
+def _answer_events(
+    question: str,
+    session_id: str = "",
+    conversation_id: str = "",
+    client_id: str = "",
+) -> Iterator[str]:
     events: queue.Queue[dict[str, Any]] = queue.Queue()
 
     def progress(stage: str, detail: dict[str, object]) -> None:
@@ -84,10 +134,26 @@ def _answer_events(question: str, session_id: str = "") -> Iterator[str]:
 
     def work() -> None:
         try:
-            result = _new_pipeline().answer(
-                question, on_progress=progress, session_id=session_id
+            settings = get_settings()
+            identity = conversation_id or session_id or new_conversation_id()
+            owner = client_id or "client_api_anonymous"
+            store = _conversation_store()
+            store.ensure(
+                identity,
+                owner,
+                legacy_records=session_records(settings.trace_directory, identity, 200),
             )
-            events.put({"type": "result", "result": result.to_dict()})
+            history = store.history(identity, owner, settings.conversation_turns)
+            result = _new_pipeline().answer(
+                question,
+                on_progress=progress,
+                session_id=identity,
+                conversation_history=history,
+            )
+            payload = result.to_dict()
+            payload["conversation_id"] = identity
+            store.append_turn(identity, owner, question, payload)
+            events.put({"type": "result", "result": payload})
         except SearchReaderError as exc:
             events.put(
                 {
@@ -133,13 +199,23 @@ def readiness() -> dict[str, Any]:
 
 @app.post("/v1/answer")
 async def answer(request: AnswerRequest) -> dict[str, Any]:
-    return await _answer(request.question, request.session_id)
+    return await _answer(
+        request.question,
+        request.session_id,
+        conversation_id=request.conversation_id,
+        client_id=request.client_id,
+    )
 
 
 @app.post("/v1/answer/stream")
 async def answer_stream(request: AnswerRequest) -> StreamingResponse:
     return StreamingResponse(
-        _answer_events(request.question, request.session_id),
+        _answer_events(
+            request.question,
+            request.session_id,
+            request.conversation_id,
+            request.client_id,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -176,6 +252,38 @@ def session_history(request: SessionHistoryRequest) -> dict[str, Any]:
             settings.trace_directory, request.session_id, request.limit
         ),
     }
+
+
+@app.post("/v1/conversations/create")
+def create_conversation(request: ConversationAccessRequest) -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        return _conversation_store().ensure(
+            request.conversation_id,
+            request.client_id,
+            legacy_records=session_records(
+                settings.trace_directory, request.conversation_id, 200
+            ),
+        )
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/conversations/list")
+def list_conversations(request: ConversationListRequest) -> dict[str, Any]:
+    try:
+        conversations = _conversation_store().list(request.client_id, request.limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"object": "list", "data": conversations}
+
+
+@app.post("/v1/conversations/get")
+def get_conversation(request: ConversationAccessRequest) -> dict[str, Any]:
+    try:
+        return _conversation_store().get(request.conversation_id, request.client_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/v1/chat/completions")

@@ -273,19 +273,30 @@
       const chatTitle = document.querySelector('#chat-title');
       const sidebar = document.querySelector('#sidebar');
       const scrim = document.querySelector('#scrim');
-      const sessionStorageKey = 'rwkv-search-reader-session';
-      const createSessionId = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
-      const readSessionId = () => {
-        try { return localStorage.getItem(sessionStorageKey) || createSessionId(); }
-        catch (_) { return createSessionId(); }
+      const conversationStorageKey = 'rwkv-search-reader-session';
+      const clientStorageKey = 'rwkv-search-reader-client';
+      const randomToken = () => (crypto.randomUUID?.() || `${Date.now()}${Math.random()}`).replace(/[^A-Za-z0-9]/g, '');
+      const createConversationId = () => `conv_${randomToken()}`;
+      const createClientId = () => `client_${randomToken()}`;
+      const readConversationId = () => {
+        try { return localStorage.getItem(conversationStorageKey) || createConversationId(); }
+        catch (_) { return createConversationId(); }
       };
-      const saveSessionId = () => {
-        try { localStorage.setItem(sessionStorageKey, sessionId); } catch (_) {}
+      const readClientId = () => {
+        try { return localStorage.getItem(clientStorageKey) || createClientId(); }
+        catch (_) { return createClientId(); }
+      };
+      const saveConversationIdentity = () => {
+        try {
+          localStorage.setItem(conversationStorageKey, conversationId);
+          localStorage.setItem(clientStorageKey, clientId);
+        } catch (_) {}
       };
       let pending = false;
-      let sessionId = readSessionId();
-      saveSessionId();
-      let historyRecords = [];
+      let conversationId = readConversationId();
+      const clientId = readClientId();
+      saveConversationIdentity();
+      let conversationRecords = [];
 
       const scrollToBottom = () => requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
       const formatTime = (value) => {
@@ -483,7 +494,11 @@
         const response = await fetch('/v1/answer/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question, session_id: sessionId }),
+          body: JSON.stringify({
+            question,
+            conversation_id: conversationId,
+            client_id: clientId,
+          }),
         });
         if (!response.ok || !response.body) throw new Error('请求失败');
         const reader = response.body.getReader();
@@ -511,12 +526,37 @@
         return result;
       };
 
-      const showConversation = (turns) => {
+      const conversationTurns = (record) => {
+        const turns = [];
+        let question = '';
+        (record.items || []).forEach((item) => {
+          if (item.role === 'user') {
+            question = item.content || '';
+          } else if (item.role === 'assistant' && question) {
+            const payload = item.payload || {};
+            turns.push({
+              question,
+              answer: item.content || '',
+              sources: payload.sources || [],
+              trace: payload.trace || [],
+              timings_ms: payload.timings_ms || {},
+              degraded: Boolean(payload.degraded),
+              warnings: payload.warnings || [],
+              status: 'ok',
+            });
+            question = '';
+          }
+        });
+        return turns;
+      };
+
+      const showConversation = (record) => {
+        const turns = conversationTurns(record);
         if (!turns.length) return;
         conversation.querySelectorAll('.message').forEach((node) => node.remove());
         welcome.hidden = true;
-        sessionId = turns[0].session_id || createSessionId();
-        saveSessionId();
+        conversationId = record.id;
+        saveConversationIdentity();
         turns.forEach((turn) => {
           appendUser(turn.question || '');
           const { body } = assistantShell();
@@ -525,86 +565,81 @@
           if (turn.status === 'error') appendError(body, turn.error?.message || '处理未完成');
           else finishAssistant(body, turn);
         });
-        chatTitle.textContent = (turns[0].question || '历史记录').slice(0, 42);
+        chatTitle.textContent = record.title || (turns[0].question || '历史记录').slice(0, 42);
         closeSidebar();
         scrollToBottom();
       };
 
+      const fetchConversation = async (identity) => {
+        const response = await fetch('/v1/conversations/get', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_id: clientId, conversation_id: identity }),
+        });
+        if (!response.ok) throw new Error('conversation unavailable');
+        return response.json();
+      };
+
       const renderHistory = () => {
         historyList.replaceChildren();
-        const conversations = [];
-        const grouped = new Map();
-        historyRecords.forEach((record) => {
-          const key = record.session_id || record.request_id || `record-${conversations.length}`;
-          if (!grouped.has(key)) {
-            const conversationRecord = { key, turns: [] };
-            grouped.set(key, conversationRecord);
-            conversations.push(conversationRecord);
-          }
-          grouped.get(key).turns.push(record);
-        });
-        historyCount.textContent = String(conversations.length);
-        if (!conversations.length) {
+        historyCount.textContent = String(conversationRecords.length);
+        if (!conversationRecords.length) {
           const empty = document.createElement('div');
           empty.className = 'history-empty';
           empty.textContent = '还没有本地记录。完成一次提问后会自动保存在这里。';
           historyList.appendChild(empty);
           return;
         }
-        conversations.forEach((conversationRecord) => {
-          const turns = conversationRecord.turns.sort((left, right) => new Date(left.recorded_at || 0) - new Date(right.recorded_at || 0));
-          const record = turns[0];
-          const latest = turns[turns.length - 1];
+        conversationRecords.forEach((record) => {
           const button = document.createElement('button');
           button.className = 'history-item';
           button.type = 'button';
           const question = document.createElement('span');
           question.className = 'history-question';
-          question.textContent = record.question || '未命名问题';
+          question.textContent = record.title || '未命名对话';
           const time = document.createElement('span');
           time.className = 'history-time';
-          const savedTime = formatTime(latest.recorded_at) || (latest.status === 'error' ? '未完成' : '已保存');
-          time.textContent = `${turns.length} 轮 · ${savedTime}`;
+          const savedTime = formatTime(record.updated_at) || '已保存';
+          time.textContent = `${Math.floor(Number(record.message_count || 0) / 2)} 轮 · ${savedTime}`;
           button.append(question, time);
-          button.addEventListener('click', () => {
-            showConversation(turns);
+          button.addEventListener('click', async () => {
+            try { showConversation(await fetchConversation(record.id)); }
+            catch (_) {}
           });
           historyList.appendChild(button);
         });
       };
 
-      const loadHistory = async () => {
+      const loadHistory = async (restoreCurrent = true) => {
         try {
-          const response = await fetch('/v1/history?limit=60');
-          if (response.ok) {
-            const data = await response.json();
-            historyRecords = data.records || [];
-          } else {
-            const sessionResponse = await fetch('/v1/session/history', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ session_id: sessionId, limit: 60 }),
-            });
-            if (!sessionResponse.ok) throw new Error('session history unavailable');
-            const data = await sessionResponse.json();
-            historyRecords = data.records || [];
-          }
+          await fetch('/v1/conversations/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: clientId, conversation_id: conversationId }),
+          });
+          const response = await fetch('/v1/conversations/list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: clientId, limit: 60 }),
+          });
+          if (!response.ok) throw new Error('conversation list unavailable');
+          const data = await response.json();
+          conversationRecords = data.data || [];
         } catch (_) {
-          historyRecords = historyRecords.filter((record) => record.session_id === sessionId);
+          conversationRecords = [];
         }
         renderHistory();
-        const currentTurns = historyRecords
-          .filter((record) => record.session_id === sessionId)
-          .sort((left, right) => new Date(left.recorded_at || 0) - new Date(right.recorded_at || 0));
-        if (currentTurns.length && !conversation.querySelector('.message')) {
-          showConversation(currentTurns);
+        const current = conversationRecords.find((record) => record.id === conversationId);
+        if (restoreCurrent && current?.message_count && !conversation.querySelector('.message')) {
+          try { showConversation(await fetchConversation(conversationId)); }
+          catch (_) {}
         }
       };
 
       const resetChat = () => {
         pending = false;
-        sessionId = createSessionId();
-        saveSessionId();
+        conversationId = createConversationId();
+        saveConversationIdentity();
         submit.disabled = false;
         questionInput.disabled = false;
         questionInput.value = '';
@@ -652,13 +687,13 @@
         try {
           const data = await requestAnswer(question, trace.update);
           finishAssistant(body, data);
-          historyRecords.unshift({ ...data, recorded_at: new Date().toISOString(), status: 'ok' });
-          historyRecords = historyRecords.slice(0, 60);
-          renderHistory();
+          conversationId = data.conversation_id || conversationId;
+          saveConversationIdentity();
+          await loadHistory(false);
         } catch (error) {
           if (!trace.isTerminal()) trace.update('failed', { message: error.message || '未知错误' });
           appendError(body, error.message || '未知错误');
-          loadHistory();
+          loadHistory(false);
         } finally {
           pending = false;
           submit.disabled = false;

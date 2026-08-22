@@ -8,4 +8,5 @@ build/
 dist/
 *.egg-info/
 logs/*.jsonl
+logs/*.sqlite3*
 runs/

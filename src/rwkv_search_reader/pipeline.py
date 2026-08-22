@@ -328,7 +328,11 @@ class SearchReaderPipeline:
 
             stage = time.perf_counter()
             answer, final_warnings = self.reader.finalize(
-                effective_question, evidence, on_progress=emit
+                effective_question,
+                evidence,
+                on_progress=emit,
+                conversation_history=history,
+                current_message=normalized,
             )
             timings["finalize"] = round((time.perf_counter() - stage) * 1000, 1)
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)

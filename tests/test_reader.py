@@ -342,3 +342,30 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     assert "组织 4–8 个互不重复的信息维度" in prompt
     assert answer == "这是综合后的自然回答，不是逐来源清单 [S1][S2]。"
     assert warnings == []
+
+
+def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    captured = {}
+    rows = _evidence(2)
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "结合偏好后的回答 [S1]"
+
+    reader._complete = complete
+    reader.finalize(
+        "适合回甘偏好的口粮茶有哪些？",
+        rows,
+        conversation_history=[
+            {"question": "口粮茶有哪些？", "answer": "可以按六大茶类选择。"}
+        ],
+        current_message="我喜欢回甘好的",
+    )
+
+    prompt = captured["user"]
+    assert prompt.index("Fact 1") < prompt.index("口粮茶有哪些？")
+    assert prompt.index("口粮茶有哪些？") < prompt.index("我喜欢回甘好的")
+    assert prompt.index("我喜欢回甘好的") < prompt.index("此前对话用于保持连续语境")
+    assert "不是本轮事实来源" in prompt

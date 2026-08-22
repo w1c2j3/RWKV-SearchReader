@@ -7,7 +7,8 @@ RWKV SearchReader 是一个刻意保持简单的“先检索、后阅读”系�
 ## 核心行为
 
 ```text
-当前消息 + 同一会话的最近对话（只用于补全指代）
+当前 Conversation 中按顺序保存的消息 items
+  → 最近对话用于补全检索指代，并作为最终回答的连续语境
   → Tavily Advanced Search
   → 保持 results[].content 的来源边界和相关度顺序
   → 一个网页对应一个独立 RWKV 请求，最多 10 路并发摘要
@@ -20,7 +21,7 @@ RWKV SearchReader 是一个刻意保持简单的“先检索、后阅读”系�
 
 - `你好`、`谢谢`、`再见` 等少量完整寒暄句由后端精确匹配并直接回复，不发起搜索或模型调用；寒暄后只要带有实际问题就不会命中该规则；
 - 其他非空问题都必须经过检索；
-- 新会话的普通单问直接使用用户原句；连续会话会先用 RWKV 把“它、这个、那次”等指代补全为独立问题，但 RWKV 仍不决定是否联网；
+- 新会话的普通单问直接使用用户原句；连续会话会先用 RWKV 把“它、这个、那次”等指代补全为独立问题，同时最终阅读器也会收到此前消息以保持偏好与语境，但 RWKV 仍不决定是否联网；
 - 发给 RWKV 的 HTTP 请求不包含 `tools`、`tool_choice` 或 function schema；
 - 搜索失败时请求失败，不会悄悄退回 RWKV 参数记忆；
 - 任一来源摘要失败时，只让该来源退化为 Tavily 原材料摘录，其他并发任务继续；
@@ -47,10 +48,11 @@ RWKV SearchReader 是一个刻意保持简单的“先检索、后阅读”系�
 - 所有 RWKV 用户提示均采用“材料在前、问题和要求在后”；
 - OpenAI 兼容 RWKV `/completions` 或 `/chat/completions`；
 - CLI、FastAPI、带本地历史记录和可折叠过程时间线的聊天 Web UI；
-- Web 会话 ID 保存在浏览器本地；同一会话的后续提问会读取服务器本地 JSONL 中最近轮次并补全上下文，历史侧栏按会话而不是按单轮分组；公网只可凭当前随机会话 ID 恢复该会话，不能读取其他本机历史；
+- 使用 SQLite 持久化一级 `conversation` 对象及其有序 `user` / `assistant` message items；侧栏直接列 conversation，点击后读取其 items，不再从单轮日志临时拼接聊天；
+- 浏览器保存独立的 client ID 和当前 conversation ID；公网只能列出该 client ID 所属 conversations，不能读取其他浏览器或本机历史；旧 JSONL `session_id` 会在首次打开时一次性迁移为 conversation；
 - 丰富结果接口 `/v1/answer` 和兼容接口 `/v1/chat/completions`；
-- 完整 JSONL 运行记录（默认位于 `logs/`，不记录 API Key）：成功与失败请求均保存问题、回答、来源、逐来源摘要、阶段 trace、耗时和告警；每次 RWKV 调用的完整输入、原始输出、调用阶段和耗时也保存在 `model_calls` 中，便于离线复盘；
-- 本机访问时，侧栏可从 `/v1/history` 恢复最近记录；该接口拒绝公网读取，避免临时公网转发泄露历史内容。
+- 完整 JSONL 运行 trace（默认位于 `logs/`，不记录 API Key）：成功与失败请求均保存问题、回答、来源、逐来源摘要、阶段 trace、耗时和告警；每次 RWKV 调用的完整输入、原始输出、调用阶段和耗时也保存在 `model_calls` 中，便于离线复盘；聊天数据则保存在 `logs/conversations.sqlite3`；
+- 前端通过 `/v1/conversations/list` 与 `/v1/conversations/get` 恢复当前浏览器所属的完整对话；`/v1/history` 仅保留为本机运行 trace 的诊断接口，并拒绝公网读取。
 
 ## 安装
 
@@ -182,6 +184,7 @@ src/rwkv_search_reader/
   retrieval.py       Tavily 材料保序与其他后端兼容抓取
   reader.py          RWKV 逐网页并发阅读和最终汇总输出
   pipeline.py        固定执行的主流水线
+  conversations.py   Conversation 与有序 Message items 的 SQLite 持久化
   api.py             FastAPI 与兼容接口
   cli.py             命令行入口
 ```

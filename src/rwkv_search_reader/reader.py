@@ -673,6 +673,8 @@ URL：{chunk.url}
         question: str,
         evidence: list[Evidence],
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
+        current_message: str = "",
     ) -> tuple[str, list[str]]:
         if not evidence:
             raise SearchReaderError("read", "there are no source summaries to combine")
@@ -683,6 +685,29 @@ URL：{chunk.url}
             question, ordered, on_progress=on_progress
         )
         allowed = "、".join(item.source_id for item in ordered)
+        conversation = "\n".join(
+            json.dumps(
+                {
+                    "user": turn.get("question", "")[:800],
+                    "assistant": turn.get("answer", "")[:500],
+                },
+                ensure_ascii=False,
+            )
+            for turn in (conversation_history or [])
+        )
+        conversation_block = (
+            f"""
+<此前对话消息>
+{conversation}
+</此前对话消息>
+
+<当前用户消息>
+{current_message or question}
+</当前用户消息>
+"""
+            if conversation
+            else ""
+        )
         user = f"""<来源索引>
 {source_index}
 </来源索引>
@@ -690,11 +715,13 @@ URL：{chunk.url}
 <并发归纳后的材料>
 {reduced_material}
 </并发归纳后的材料>
+{conversation_block}
 
 <用户问题>
 {question}
 </用户问题>
 
+此前对话用于保持连续语境、用户偏好和指代关系，不是本轮事实来源；所有事实仍必须由来源材料支持。
 根据上面的材料直接回答用户问题。把所有材料当成一份资料来综合总结，合并重复信息，不要按网页逐条复述，也不要重复用户的问法。充分利用材料中能够补充不同维度的有效信息；重复、无关或明显低质量的内容可以舍弃，但不得仅仅为了缩短答案而省略材料中独有且有用的类别、名称、数字、条件或选择标准。
 根据问题范围决定篇幅：针对单一事实的问题简洁回答；“有哪些、推荐、比较、总结、动态”等开放式问题先给直接结论，再组织 4–8 个互不重复的信息维度，每个维度选择 1–3 个有代表性的具体例子。维度可以包括定义、类别、具体对象、关键差异、数字、适用条件和选择标准，以实际材料为准。不要把网页标题、用户问题、搜索词或“有哪些/推荐”等标签文字当成答案内容；相同名称和相同事实只出现一次。全文控制在约 900 个中文字符内。综合相同结论时优先合并多个来源引用。
 严格区分来源发布时间、事件发生时间和用户询问的时间范围。age_days 的含义是：0 代表来源今天发布，1 代表昨天，unknown 代表时间不明。只有材料中的日期明确支持时，才能将事件说成“今天”、“当前”或“最新”；日期不明或过时材料可作背景，不得冒充当期事实。不得把一个指标的数值当成另一个指标。有冲突时说明冲突；材料不足时如实说明。当前日期是 {_today()}。

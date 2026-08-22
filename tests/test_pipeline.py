@@ -46,7 +46,8 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
             )
         return [evidence], []
 
-    def finalize(question, rows, on_progress=None):
+    def finalize(question, rows, on_progress=None, **kwargs):
+        del kwargs
         calls.append("finalize")
         if on_progress:
             on_progress("finalizing", {"source_count": 1})
@@ -204,7 +205,7 @@ def test_pipeline_uses_audit_query_to_add_new_sources(tmp_path) -> None:
         ]
     )
     pipeline.reader.audit = lambda *args: next(audits)
-    pipeline.reader.finalize = lambda question, rows, on_progress=None: (
+    pipeline.reader.finalize = lambda question, rows, on_progress=None, **kwargs: (
         f"Answer from {len(rows)} sources [S1][S2]",
         [],
     )
@@ -256,7 +257,7 @@ def test_pipeline_resolves_followup_from_same_session_before_search(tmp_path) ->
         [],
     )
     pipeline.reader.audit = lambda *args: EvidenceAudit(sufficient=True)
-    pipeline.reader.finalize = lambda question, rows, on_progress=None: (
+    pipeline.reader.finalize = lambda question, rows, on_progress=None, **kwargs: (
         "发布日期回答 [S1]",
         [],
     )
