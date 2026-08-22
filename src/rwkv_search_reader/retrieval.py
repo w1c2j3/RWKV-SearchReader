@@ -339,11 +339,19 @@ def _search_queries(question: str) -> list[str]:
     return [item.strip() for item in explicit_questions[:3]]
 
 
-def _balanced_hits(groups: list[list[SearchHit]], limit: int) -> list[SearchHit]:
+def _balanced_hits(
+    groups: list[list[SearchHit]],
+    limit: int,
+    excluded_urls: set[str] | None = None,
+) -> list[SearchHit]:
     """Preserve each query's Tavily rank while giving every subquestion coverage."""
 
     selected: list[SearchHit] = []
-    seen: set[str] = set()
+    seen: set[str] = {
+        normalize_url(url).rstrip("/").casefold()
+        for url in (excluded_urls or set())
+        if normalize_url(url)
+    }
     depth = 0
     while len(selected) < limit and any(depth < len(group) for group in groups):
         for group in groups:
@@ -372,6 +380,25 @@ class Retriever:
         queries = _search_queries(question)
         if not queries:
             raise SearchReaderError("input", "question is empty")
+        return self.run_queries(queries, question=question)
+
+    def run_queries(
+        self,
+        queries: list[str],
+        *,
+        question: str,
+        excluded_urls: set[str] | None = None,
+        start_index: int = 1,
+    ) -> tuple[list[str], list[SearchHit], list[DocumentChunk], list[str]]:
+        queries = list(
+            dict.fromkeys(
+                " ".join(str(query or "").split()).strip()
+                for query in queries
+                if " ".join(str(query or "").split()).strip()
+            )
+        )
+        if not queries:
+            raise SearchReaderError("input", "search query is empty")
         groups: list[list[SearchHit]] = []
         search_warnings: list[str] = []
         for query in queries:
@@ -383,10 +410,14 @@ class Retriever:
                 search_warnings.append(f"{query}: {exc}"[:500])
         if not groups:
             raise SearchReaderError("search", "all deterministic search queries failed")
-        deduplicated = _balanced_hits(groups, self.settings.search_max_results)
+        deduplicated = _balanced_hits(
+            groups,
+            self.settings.search_max_results,
+            excluded_urls=excluded_urls,
+        )
         if not deduplicated:
             raise SearchReaderError("search", "search provider returned no usable results")
-        for index, hit in enumerate(deduplicated, start=1):
+        for index, hit in enumerate(deduplicated, start=start_index):
             hit.source_id = f"S{index}"
 
         selected = deduplicated[: self.settings.fetch_pages]

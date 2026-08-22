@@ -273,8 +273,18 @@
       const chatTitle = document.querySelector('#chat-title');
       const sidebar = document.querySelector('#sidebar');
       const scrim = document.querySelector('#scrim');
+      const sessionStorageKey = 'rwkv-search-reader-session';
+      const createSessionId = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      const readSessionId = () => {
+        try { return localStorage.getItem(sessionStorageKey) || createSessionId(); }
+        catch (_) { return createSessionId(); }
+      };
+      const saveSessionId = () => {
+        try { localStorage.setItem(sessionStorageKey, sessionId); } catch (_) {}
+      };
       let pending = false;
-      let sessionId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      let sessionId = readSessionId();
+      saveSessionId();
       let historyRecords = [];
 
       const scrollToBottom = () => requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
@@ -314,10 +324,17 @@
 
       const eventCopy = (stage, detail = {}) => {
         if (stage === 'responding') return ['识别为简单对话', '无需查找资料，直接回应'];
+        if (stage === 'contextualizing') return [`正在衔接此前 ${detail.turn_count || 0} 轮对话`, '补全当前问题中的上下文指代'];
+        if (stage === 'context_resolved') return ['已理解当前追问', detail.resolved_question || '已形成完整问题'];
         if (stage === 'searching') return ['开始查找相关资料', '正在理解问题并发起检索'];
         if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, (detail.queries || []).join(' · ')];
         if (stage === 'reading') return [`开始逐篇阅读 ${detail.source_count || 0} 个来源`, '每个来源独立阅读，互不混合'];
         if (stage === 'source_read') return [`已读 ${detail.completed || 0}/${detail.total || 0} · ${detail.title || detail.source_id || '参考资料'}`, detail.summary_preview || '关键信息已提取'];
+        if (stage === 'auditing') return [`第 ${detail.round || 1} 次检查材料完整性`, `当前共有 ${detail.source_count || 0} 份材料`];
+        if (stage === 'audit_completed') return [detail.sufficient ? '材料检查通过' : '发现材料缺口', detail.message || '检查已经完成'];
+        if (stage === 'supplemental_searching') return [`第 ${detail.round || 1} 轮补充查找`, (detail.queries || []).join(' · ')];
+        if (stage === 'supplemental_sources_found') return [`补充找到 ${detail.source_count || 0} 个新来源`, `目前共 ${detail.total_source_count || 0} 个来源`];
+        if (stage === 'supplemental_reading') return [`开始阅读 ${detail.source_count || 0} 个补充来源`, `累计 ${detail.total_source_count || 0} 个来源`];
         if (stage === 'reviewing') return ['正在整理阅读结果', `将 ${detail.source_count || 0} 份材料分为 ${detail.group_count || 0} 组并行归纳`];
         if (stage === 'evidence_group_read') return [`已归纳 ${detail.completed || 0}/${detail.total || 0} 组`, detail.summary_preview || '重复信息已合并'];
         if (stage === 'finalizing') return ['正在形成最终回答', `根据 ${detail.source_count || 0} 份阅读结果直接作答`];
@@ -518,13 +535,20 @@
           button.addEventListener('click', () => {
             conversation.querySelectorAll('.message').forEach((node) => node.remove());
             welcome.hidden = true;
-            appendUser(record.question || '');
-            const { body } = assistantShell();
-            const trace = createTrace(record.trace || [], false);
-            body.appendChild(trace.details);
-            if (record.status === 'error') appendError(body, record.error?.message || '处理未完成');
-            else finishAssistant(body, record);
-            chatTitle.textContent = record.question || '历史记录';
+            sessionId = record.session_id || createSessionId();
+            saveSessionId();
+            const turns = historyRecords
+              .filter((item) => item.session_id && item.session_id === record.session_id)
+              .sort((left, right) => new Date(left.recorded_at || 0) - new Date(right.recorded_at || 0));
+            (turns.length ? turns : [record]).forEach((turn) => {
+              appendUser(turn.question || '');
+              const { body } = assistantShell();
+              const trace = createTrace(turn.trace || [], false);
+              body.appendChild(trace.details);
+              if (turn.status === 'error') appendError(body, turn.error?.message || '处理未完成');
+              else finishAssistant(body, turn);
+            });
+            chatTitle.textContent = (turns[0]?.question || record.question || '历史记录').slice(0, 42);
             closeSidebar();
             scrollToBottom();
           });
@@ -546,7 +570,8 @@
 
       const resetChat = () => {
         pending = false;
-        sessionId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+        sessionId = createSessionId();
+        saveSessionId();
         submit.disabled = false;
         questionInput.disabled = false;
         questionInput.value = '';

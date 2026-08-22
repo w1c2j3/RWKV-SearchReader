@@ -100,6 +100,9 @@ class Settings:
     searxng_base_url: str = ""
     search_max_results: int = 10
     fetch_pages: int = 10
+    review_max_rounds: int = 2
+    review_max_queries: int = 3
+    conversation_turns: int = 6
     request_timeout_seconds: int = 45
 
     rwkv_base_url: str = "http://127.0.0.1:29613/v1"
@@ -137,6 +140,7 @@ class Settings:
             "search_configured": provider_ready,
             "reader_mode": "rwkv-parallel-read-final-summary",
             "summary_workers": self.rwkv_summary_workers,
+            "review_max_rounds": self.review_max_rounds,
             "rwkv_configured": self.rwkv_configured,
         }
 
@@ -158,6 +162,9 @@ def get_settings() -> Settings:
         searxng_base_url=_text("SEARCH_READER_SEARXNG_BASE_URL"),
         search_max_results=_integer("SEARCH_READER_SEARCH_MAX_RESULTS", 10, 1, 10),
         fetch_pages=_integer("SEARCH_READER_FETCH_PAGES", 10, 1, 10),
+        review_max_rounds=_integer("SEARCH_READER_REVIEW_MAX_ROUNDS", 2, 0, 3),
+        review_max_queries=_integer("SEARCH_READER_REVIEW_MAX_QUERIES", 3, 1, 4),
+        conversation_turns=_integer("SEARCH_READER_CONVERSATION_TURNS", 6, 1, 12),
         request_timeout_seconds=_integer(
             "SEARCH_READER_REQUEST_TIMEOUT_SECONDS", 45, 5, 180
         ),

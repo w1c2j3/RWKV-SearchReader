@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rwkv_search_reader.tracing import append_trace, recent_traces
+from rwkv_search_reader.tracing import append_trace, recent_traces, session_turns
 
 
 def test_trace_records_are_durable_and_history_omits_raw_evidence(tmp_path) -> None:
@@ -29,3 +29,38 @@ def test_trace_records_are_durable_and_history_omits_raw_evidence(tmp_path) -> N
     ]
     assert "evidence" not in records[0]
     assert "model_calls" not in records[0]
+
+
+def test_session_turns_returns_only_matching_successful_conversation(tmp_path) -> None:
+    append_trace(
+        tmp_path,
+        {
+            "status": "ok",
+            "session_id": "chat-a",
+            "question": "第一问",
+            "answer": "第一答",
+        },
+    )
+    append_trace(
+        tmp_path,
+        {
+            "status": "ok",
+            "session_id": "chat-b",
+            "question": "其他问题",
+            "answer": "其他回答",
+        },
+    )
+    append_trace(
+        tmp_path,
+        {
+            "status": "ok",
+            "session_id": "chat-a",
+            "question": "第二问",
+            "answer": "第二答",
+        },
+    )
+
+    assert session_turns(tmp_path, "chat-a", 6) == [
+        {"question": "第一问", "answer": "第一答"},
+        {"question": "第二问", "answer": "第二答"},
+    ]

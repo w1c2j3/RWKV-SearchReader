@@ -49,10 +49,18 @@ def _new_pipeline() -> SearchReaderPipeline:
     return SearchReaderPipeline(get_settings())
 
 
-async def _answer(question: str, session_id: str = "") -> dict[str, Any]:
+async def _answer(
+    question: str,
+    session_id: str = "",
+    conversation_history: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     try:
         result = await run_in_threadpool(
-            _new_pipeline().answer, question, None, session_id
+            _new_pipeline().answer,
+            question,
+            None,
+            session_id,
+            conversation_history,
         )
     except SearchReaderError as exc:
         status = 422 if exc.stage == "input" else 502
@@ -160,19 +168,35 @@ async def chat_completions(request: ChatCompletionRequest) -> dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="streaming is not implemented in v0.1"
         )
-    question = next(
-        (
-            message.content
-            for message in reversed(request.messages)
-            if message.role.casefold() == "user" and message.content.strip()
-        ),
-        "",
-    )
+    user_indexes = [
+        index
+        for index, message in enumerate(request.messages)
+        if message.role.casefold() == "user" and message.content.strip()
+    ]
+    question = request.messages[user_indexes[-1]].content if user_indexes else ""
     if not question:
         raise HTTPException(
             status_code=422, detail="a non-empty user message is required"
         )
-    result = await _answer(question)
+    history: list[dict[str, str]] = []
+    for position, user_index in enumerate(user_indexes[:-1]):
+        next_user_index = user_indexes[position + 1]
+        answer = next(
+            (
+                message.content.strip()
+                for message in request.messages[user_index + 1 : next_user_index]
+                if message.role.casefold() == "assistant" and message.content.strip()
+            ),
+            "",
+        )
+        if answer:
+            history.append(
+                {
+                    "question": request.messages[user_index].content.strip(),
+                    "answer": answer,
+                }
+            )
+    result = await _answer(question, conversation_history=history)
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     return {
         "id": completion_id,

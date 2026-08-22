@@ -41,6 +41,12 @@ class Evidence:
 
 
 @dataclass(slots=True)
+class EvidenceAudit:
+    sufficient: bool
+    queries: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class PipelineResult:
     request_id: str
     session_id: str

@@ -10,7 +10,7 @@ from .models import PipelineResult, SearchReaderError
 from .reader import RWKVReader, citation_warnings
 from .retrieval import Retriever
 from .search import create_search_provider
-from .tracing import append_trace
+from .tracing import append_trace, session_turns
 
 
 def _conversation_reply(question: str) -> str | None:
@@ -53,6 +53,7 @@ class SearchReaderPipeline:
         question: str,
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
         session_id: str = "",
+        conversation_history: list[dict[str, str]] | None = None,
     ) -> PipelineResult:
         normalized = " ".join(str(question or "").split()).strip()
         if not normalized:
@@ -66,6 +67,9 @@ class SearchReaderPipeline:
         configuration = {
             "search_provider": self.settings.search_provider,
             "search_max_results": self.settings.search_max_results,
+            "review_max_rounds": self.settings.review_max_rounds,
+            "review_max_queries": self.settings.review_max_queries,
+            "conversation_turns": self.settings.conversation_turns,
             "model": self.settings.rwkv_model,
             "protocol": self.settings.rwkv_protocol,
             "summary_workers": self.settings.rwkv_summary_workers,
@@ -116,10 +120,38 @@ class SearchReaderPipeline:
                     )
                 return result
 
+            pipeline_warnings: list[str] = []
+            history = (
+                conversation_history[-self.settings.conversation_turns :]
+                if conversation_history is not None
+                else session_turns(
+                    self.settings.trace_directory,
+                    session_id,
+                    self.settings.conversation_turns,
+                )
+            )
+            effective_question = normalized
+            if history:
+                emit(
+                    "contextualizing",
+                    {"turn_count": len(history), "message": "正在衔接此前对话"},
+                )
+                try:
+                    effective_question = self.reader.contextualize(normalized, history)
+                except SearchReaderError as exc:
+                    pipeline_warnings.append(f"conversation context degraded: {exc}"[:500])
+                emit(
+                    "context_resolved",
+                    {
+                        "turn_count": len(history),
+                        "resolved_question": effective_question,
+                    },
+                )
+
             emit("searching", {"message": "正在查找相关资料"})
             stage = time.perf_counter()
             queries, sources, chunks, retrieval_warnings = self.retriever.run(
-                normalized
+                effective_question
             )
             timings["retrieve"] = round((time.perf_counter() - stage) * 1000, 1)
             emit(
@@ -144,21 +176,169 @@ class SearchReaderPipeline:
             emit("reading", {"source_count": len(chunks)})
             stage = time.perf_counter()
             evidence, summary_warnings = self.reader.summarize(
-                normalized, chunks, on_progress=emit
+                effective_question, chunks, on_progress=emit
             )
             timings["summarize"] = round((time.perf_counter() - stage) * 1000, 1)
 
+            audit_warnings: list[str] = []
+            audit_started = time.perf_counter()
+            for review_index in range(self.settings.review_max_rounds + 1):
+                emit(
+                    "auditing",
+                    {
+                        "round": review_index + 1,
+                        "source_count": len(evidence),
+                        "message": "正在检查材料是否足够",
+                    },
+                )
+                try:
+                    audit = self.reader.audit(effective_question, evidence, queries)
+                except SearchReaderError as exc:
+                    audit_warnings.append(f"evidence audit degraded: {exc}"[:500])
+                    emit(
+                        "audit_completed",
+                        {
+                            "round": review_index + 1,
+                            "sufficient": True,
+                            "degraded": True,
+                            "message": "审核结果不可用，使用现有材料",
+                        },
+                    )
+                    break
+
+                if audit.sufficient:
+                    emit(
+                        "audit_completed",
+                        {
+                            "round": review_index + 1,
+                            "sufficient": True,
+                            "message": "现有材料足以回答",
+                        },
+                    )
+                    break
+
+                tried = {query.casefold() for query in queries}
+                supplemental_queries = [
+                    query for query in audit.queries if query.casefold() not in tried
+                ]
+                emit(
+                    "audit_completed",
+                    {
+                        "round": review_index + 1,
+                        "sufficient": False,
+                        "queries": supplemental_queries,
+                        "message": "材料仍有缺口，需要补充查找",
+                    },
+                )
+                if review_index >= self.settings.review_max_rounds:
+                    audit_warnings.append(
+                        "evidence remained incomplete after the maximum review rounds"
+                    )
+                    break
+                if not supplemental_queries:
+                    audit_warnings.append(
+                        "evidence audit requested retrieval without a new query"
+                    )
+                    break
+
+                supplement_round = review_index + 1
+                emit(
+                    "supplemental_searching",
+                    {
+                        "round": supplement_round,
+                        "queries": supplemental_queries,
+                        "message": "正在补充缺失资料",
+                    },
+                )
+                stage = time.perf_counter()
+                try:
+                    (
+                        new_queries,
+                        new_sources,
+                        new_chunks,
+                        new_retrieval_warnings,
+                    ) = self.retriever.run_queries(
+                        supplemental_queries,
+                        question=effective_question,
+                        excluded_urls={source.url for source in sources},
+                        start_index=len(sources) + 1,
+                    )
+                except SearchReaderError as exc:
+                    audit_warnings.append(
+                        f"supplemental retrieval round {supplement_round} failed: {exc}"[
+                            :500
+                        ]
+                    )
+                    emit(
+                        "supplemental_sources_found",
+                        {
+                            "round": supplement_round,
+                            "source_count": 0,
+                            "total_source_count": len(sources),
+                            "message": "没有找到新的可用材料",
+                        },
+                    )
+                    break
+                timings["retrieve"] += round(
+                    (time.perf_counter() - stage) * 1000, 1
+                )
+                queries.extend(new_queries)
+                sources.extend(new_sources)
+                retrieval_warnings.extend(new_retrieval_warnings)
+                emit(
+                    "supplemental_sources_found",
+                    {
+                        "round": supplement_round,
+                        "queries": new_queries,
+                        "source_count": len(new_chunks),
+                        "total_source_count": len(sources),
+                        "sources": [
+                            {
+                                "source_id": source.source_id,
+                                "title": source.title,
+                                "url": source.url,
+                                "score": source.score,
+                                "published_date": source.published_date,
+                            }
+                            for source in new_sources[: len(new_chunks)]
+                        ],
+                    },
+                )
+                emit(
+                    "supplemental_reading",
+                    {
+                        "round": supplement_round,
+                        "source_count": len(new_chunks),
+                        "total_source_count": len(sources),
+                    },
+                )
+                stage = time.perf_counter()
+                new_evidence, new_summary_warnings = self.reader.summarize(
+                    effective_question, new_chunks, on_progress=emit
+                )
+                timings["summarize"] += round(
+                    (time.perf_counter() - stage) * 1000, 1
+                )
+                evidence.extend(new_evidence)
+                summary_warnings.extend(new_summary_warnings)
+
+            timings["audit"] = round(
+                (time.perf_counter() - audit_started) * 1000, 1
+            )
+
             stage = time.perf_counter()
             answer, final_warnings = self.reader.finalize(
-                normalized, evidence, on_progress=emit
+                effective_question, evidence, on_progress=emit
             )
             timings["finalize"] = round((time.perf_counter() - stage) * 1000, 1)
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)
             emit("completed", {"duration_ms": timings["total"]})
 
             warnings = [
+                *pipeline_warnings,
                 *retrieval_warnings,
                 *summary_warnings,
+                *audit_warnings,
                 *final_warnings,
                 *citation_warnings(answer, evidence),
             ]
@@ -171,7 +351,7 @@ class SearchReaderPipeline:
                 sources=sources,
                 evidence=evidence,
                 search_provider=self.provider.name,
-                reader_mode="rwkv-parallel-read-final-summary",
+                reader_mode="rwkv-reviewed-parallel-read-final-summary",
                 degraded=bool(warnings),
                 warnings=warnings,
                 timings_ms=timings,

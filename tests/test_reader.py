@@ -13,6 +13,7 @@ from rwkv_search_reader.reader import (
     _clean_final_answer,
     _eligible_evidence,
     _final_evidence_order,
+    _parse_audit_output,
     _parse_source_summary,
     _unsupported_summary_numbers,
     _verified_source_relation,
@@ -112,6 +113,57 @@ def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
 
 def test_source_summary_only_cleans_wrappers_and_exact_duplicates() -> None:
     assert _parse_source_summary("摘要：事实一。事实一。事实二。") == "事实一。事实二。"
+
+
+def test_audit_output_is_either_enough_or_targeted_search_queries() -> None:
+    enough = _parse_audit_output("ENOUGH", 3)
+    missing = _parse_audit_output(
+        "SEARCH: RWKV 最新模型发布日期 官方\nSEARCH: RWKV latest release GitHub", 3
+    )
+
+    assert enough.sufficient is True
+    assert enough.queries == []
+    assert missing.sufficient is False
+    assert missing.queries == [
+        "RWKV 最新模型发布日期 官方",
+        "RWKV latest release GitHub",
+    ]
+
+
+def test_contextualizer_puts_history_before_current_message_and_instruction() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        captured["stage"] = kwargs["stage"]
+        return "RWKV-7-G1 是什么时候发布的？"
+
+    reader._complete = complete
+    question = reader.contextualize(
+        "它是什么时候发布的？",
+        [{"question": "RWKV 最新版本？", "answer": "RWKV-7-G1。"}],
+    )
+
+    prompt = captured["user"]
+    assert prompt.index("RWKV 最新版本？") < prompt.index("它是什么时候发布的？")
+    assert prompt.index("它是什么时候发布的？") < prompt.index("把当前消息改写")
+    assert captured["stage"] == "contextualize"
+    assert question == "RWKV-7-G1 是什么时候发布的？"
+
+
+def test_contextualizer_falls_back_to_previous_question_if_pronoun_remains() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    reader._complete = lambda *args, **kwargs: "它是什么时候发布的？"
+
+    question = reader.contextualize(
+        "它是什么时候发布的？",
+        [{"question": "RWKV 最新版本是什么？", "answer": "RWKV-7-G1。"}],
+    )
+
+    assert question == "上一问：RWKV 最新版本是什么；当前追问：它是什么时候发布的？"
 
 
 def test_summary_numbers_must_exist_in_the_source_material() -> None:

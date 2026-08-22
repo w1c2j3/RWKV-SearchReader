@@ -70,3 +70,39 @@ def recent_traces(directory: Path, limit: int = 50) -> list[dict[str, Any]]:
                 if len(records) >= limit:
                     return records
     return records
+
+
+def session_turns(
+    directory: Path, session_id: str, limit: int = 6
+) -> list[dict[str, str]]:
+    """Return prior successful turns for one opaque browser session, oldest first."""
+
+    identity = str(session_id or "").strip()
+    if not identity:
+        return []
+    turns: list[dict[str, str]] = []
+    paths = sorted(directory.glob("runs-*.jsonl"), reverse=True)
+    with _LOCK:
+        for path in paths:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in reversed(lines):
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    not isinstance(row, dict)
+                    or row.get("status") != "ok"
+                    or str(row.get("session_id") or "") != identity
+                ):
+                    continue
+                question = str(row.get("question") or "").strip()
+                answer = str(row.get("answer") or "").strip()
+                if question and answer:
+                    turns.append({"question": question, "answer": answer})
+                if len(turns) >= limit:
+                    return list(reversed(turns))
+    return list(reversed(turns))

@@ -110,6 +110,21 @@ def test_reader_ready_results_keep_provider_order_without_extracting() -> None:
     assert warnings == []
 
 
+def test_supplemental_retrieval_excludes_old_urls_and_continues_source_ids() -> None:
+    settings = replace(Settings(), search_max_results=4, fetch_pages=4)
+    provider = MaterialProvider(settings)
+
+    _, sources, chunks, _ = Retriever(settings, provider).run_queries(
+        ["missing detail"],
+        question="original question",
+        excluded_urls={"https://example.com/1", "https://example.com/2"},
+        start_index=11,
+    )
+
+    assert [source.source_id for source in sources] == ["S11", "S12"]
+    assert [chunk.source_id for chunk in chunks] == ["S11", "S12"]
+
+
 def test_provider_materials_do_not_reorder_by_local_score() -> None:
     hits = [
         SearchHit(
