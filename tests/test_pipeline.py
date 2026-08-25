@@ -100,6 +100,7 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
         "score": 0.0,
         "published_date": "",
     }
+    assert progress[0][1]["query"] == "Question"
     assert result.trace[-1]["stage"] == "completed"
 
 

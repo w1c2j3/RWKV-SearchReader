@@ -155,14 +155,26 @@
       .trace-body { padding: 4px 14px 14px 46px; border-top: 1px solid var(--soft-line); }
       .trace-progress { height: 3px; margin: 9px 0 13px; overflow: hidden; border-radius: 999px; background: #e8e8e2; }
       .trace-progress span { display: block; width: 4%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--mint), #65a597); transition: width .35s ease; }
-      .trace-list { max-height: 245px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
-      .trace-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 7px 0 7px 17px; color: #5e6b68; font-size: 11px; line-height: 1.45; }
+      .trace-list { max-height: min(58vh, 520px); margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+      .trace-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 9px 0 9px 17px; color: #5e6b68; font-size: 11px; line-height: 1.5; }
       .trace-row::before { position: absolute; top: 12px; left: 1px; width: 6px; height: 6px; border-radius: 50%; background: #a9b9b5; content: ""; }
       .trace-row.done::before { background: var(--mint); }
       .trace-row.failed::before { background: #bf624d; }
+      .trace-row-copy { min-width: 0; }
       .trace-row-title { display: block; color: #46524f; }
-      .trace-row-note { display: block; margin-top: 2px; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+      .trace-row-note { display: block; margin-top: 3px; color: var(--faint); white-space: normal; overflow-wrap: anywhere; }
       .trace-time { color: #a0a7a5; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .trace-extra { display: grid; gap: 6px; margin-top: 8px; }
+      .trace-query-list { display: flex; flex-wrap: wrap; gap: 5px; }
+      .trace-query { max-width: 100%; padding: 4px 7px; border-radius: 7px; background: #eef4f1; color: #58706a; font-size: 10px; overflow-wrap: anywhere; }
+      .trace-query::before { margin-right: 4px; color: #83a098; content: "查找"; font-size: 8px; font-weight: 750; letter-spacing: .08em; }
+      .trace-source-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+      .trace-source { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; min-width: 0; padding: 7px 8px; border: 1px solid var(--soft-line); border-radius: 9px; background: rgb(255 255 255 / 48%); color: #5c6865; text-decoration: none; }
+      .trace-source:hover { border-color: #c8d3cf; background: #fff; }
+      .trace-source-id { color: var(--mint); font-size: 9px; font-weight: 760; }
+      .trace-source-copy { min-width: 0; }
+      .trace-source-title { display: -webkit-box; overflow: hidden; color: #52605d; font-size: 10px; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+      .trace-source-meta { display: block; margin-top: 2px; overflow: hidden; color: #9aa3a0; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
       .assistant-answer { color: #202826; font-size: 15px; line-height: 1.86; white-space: pre-wrap; overflow-wrap: anywhere; }
       .answer-label { margin-bottom: 7px; color: var(--mint); font-size: 10px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
       .source-details { margin-top: 16px; }
@@ -211,6 +223,7 @@
         .suggestion:nth-child(n+4) { display: none; }
         .user-bubble { max-width: 90%; }
         .source-grid { grid-template-columns: 1fr; }
+        .trace-source-list { grid-template-columns: 1fr; }
         .trace-body { padding-left: 14px; }
         .composer-wrap { padding-right: 12px; padding-left: 12px; }
       }
@@ -389,23 +402,92 @@
         if (stage === 'history_reading') return [`正在阅读此前 ${detail.turn_count || 0} 轮对话`, '直接根据本次对话整理回答'];
         if (stage === 'contextualizing') return [`正在衔接此前 ${detail.turn_count || 0} 轮对话`, '补全当前问题中的上下文指代'];
         if (stage === 'context_resolved') return ['已理解当前追问', detail.resolved_question || '已形成完整问题'];
-        if (stage === 'searching') return ['开始查找相关资料', '正在理解问题并发起检索'];
-        if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, (detail.queries || []).join(' · ')];
+        if (stage === 'searching') return ['开始查找相关资料', detail.query ? `围绕“${detail.query}”查找` : '正在理解问题并发起检索'];
+        if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, `使用了 ${(detail.queries || []).length || 1} 个检索式`];
         if (stage === 'document_searching') return [`正在阅读 ${detail.document_count || 0} 份文档`, '定位与当前问题相关的章节和段落'];
-        if (stage === 'documents_found') return [`选出 ${detail.source_count || 0} 个文档片段`, '文档片段将分别独立阅读'];
+        if (stage === 'documents_found') return [`选出 ${detail.source_count || 0} 个文档片段`, '下面是本轮实际选中的文档位置'];
         if (stage === 'reading') return [`开始逐篇阅读 ${detail.source_count || 0} 个来源`, '每个来源独立阅读，互不混合'];
-        if (stage === 'source_read') return [`已读 ${detail.completed || 0}/${detail.total || 0} · ${detail.title || detail.source_id || '参考资料'}`, detail.summary_preview || '关键信息已提取'];
-        if (stage === 'auditing') return [`第 ${detail.round || 1} 次检查材料完整性`, `当前共有 ${detail.source_count || 0} 份材料`];
-        if (stage === 'audit_completed') return [detail.sufficient ? '材料检查通过' : '发现材料缺口', detail.message || '检查已经完成'];
-        if (stage === 'supplemental_searching') return [`第 ${detail.round || 1} 轮补充查找`, (detail.queries || []).join(' · ')];
-        if (stage === 'supplemental_sources_found') return [`补充找到 ${detail.source_count || 0} 个新来源`, `目前共 ${detail.total_source_count || 0} 个来源`];
+        if (stage === 'source_read') return [`已读 ${detail.completed || 0}/${detail.total || 0} · ${detail.source_id || '材料'} · ${detail.title || '参考资料'}`, `${detail.status === 'degraded' ? '读取不完整：' : '提取结果：'}${detail.summary_preview || '关键信息已提取'}`];
+        if (stage === 'auditing') return [`第 ${detail.round || 1} 次检查材料完整性`, `逐项检查问题需要的事实；当前共有 ${detail.source_count || 0} 份阅读结果`];
+        if (stage === 'audit_completed') return [detail.sufficient ? '材料检查通过' : '发现材料缺口', detail.sufficient ? (detail.message || '检查已经完成') : `${detail.message || '需要补充材料'}${(detail.queries || []).length ? `：${detail.queries.join('；')}` : ''}`];
+        if (stage === 'supplemental_searching') return [`第 ${detail.round || 1} 轮补充查找`, '只查找审核发现的缺失部分'];
+        if (stage === 'supplemental_sources_found') return [`补充找到 ${detail.source_count || 0} 个新来源`, `排除重复页面后，目前共 ${detail.total_source_count || 0} 个来源`];
         if (stage === 'supplemental_reading') return [`开始阅读 ${detail.source_count || 0} 个补充来源`, `累计 ${detail.total_source_count || 0} 个来源`];
         if (stage === 'reviewing') return ['正在整理阅读结果', `将 ${detail.source_count || 0} 份材料分为 ${detail.group_count || 0} 组并行归纳`];
-        if (stage === 'evidence_group_read') return [`已归纳 ${detail.completed || 0}/${detail.total || 0} 组`, detail.summary_preview || '重复信息已合并'];
+        if (stage === 'evidence_group_read') return [`已归纳 ${detail.completed || 0}/${detail.total || 0} 组 · ${(detail.source_ids || []).join(' + ')}`, `合并结果：${detail.summary_preview || '重复信息已合并'}`];
         if (stage === 'finalizing') return ['正在形成最终回答', `根据 ${detail.source_count || 0} 份阅读结果直接作答`];
         if (stage === 'completed') return ['回答已经完成', '完整记录已写入本机'];
         if (stage === 'failed') return ['本次回答未完成', detail.message || '处理过程中出现错误'];
         return [stage, ''];
+      };
+
+      const traceQueries = (stage, detail) => {
+        if (stage === 'searching' && detail.query) return [detail.query];
+        if (['sources_found', 'audit_completed', 'supplemental_searching', 'supplemental_sources_found'].includes(stage)) return detail.queries || [];
+        return [];
+      };
+
+      const traceSourceMeta = (source) => {
+        const parts = [];
+        if (source.published_date) parts.push(`时间 ${source.published_date}`);
+        if (/^https?:\/\//i.test(source.url || '')) {
+          try { parts.push(new URL(source.url).hostname.replace(/^www\./, '')); }
+          catch (_) {}
+        } else if ((source.url || '').startsWith('document://')) parts.push('本地文档');
+        return parts.join(' · ');
+      };
+
+      const appendTraceDetails = (copy, stage, detail) => {
+        const queries = traceQueries(stage, detail);
+        const sources = ['sources_found', 'documents_found', 'supplemental_sources_found'].includes(stage) ? (detail.sources || []) : [];
+        if (!queries.length && !sources.length) return;
+        const extra = document.createElement('span');
+        extra.className = 'trace-extra';
+        if (queries.length) {
+          const queryList = document.createElement('span');
+          queryList.className = 'trace-query-list';
+          queries.forEach((query) => {
+            const item = document.createElement('span');
+            item.className = 'trace-query';
+            item.textContent = query;
+            queryList.appendChild(item);
+          });
+          extra.appendChild(queryList);
+        }
+        if (sources.length) {
+          const sourceList = document.createElement('span');
+          sourceList.className = 'trace-source-list';
+          sources.forEach((source, index) => {
+            const isWeb = /^https?:\/\//i.test(source.url || '');
+            const item = document.createElement(isWeb ? 'a' : 'span');
+            item.className = 'trace-source';
+            if (isWeb) {
+              item.href = source.url;
+              item.target = '_blank';
+              item.rel = 'noreferrer';
+            }
+            const id = document.createElement('span');
+            id.className = 'trace-source-id';
+            id.textContent = source.source_id || `S${index + 1}`;
+            const sourceCopy = document.createElement('span');
+            sourceCopy.className = 'trace-source-copy';
+            const sourceTitle = document.createElement('span');
+            sourceTitle.className = 'trace-source-title';
+            sourceTitle.textContent = source.title || source.url || '参考资料';
+            sourceCopy.appendChild(sourceTitle);
+            const meta = traceSourceMeta(source);
+            if (meta) {
+              const sourceMeta = document.createElement('span');
+              sourceMeta.className = 'trace-source-meta';
+              sourceMeta.textContent = meta;
+              sourceCopy.appendChild(sourceMeta);
+            }
+            item.append(id, sourceCopy);
+            sourceList.appendChild(item);
+          });
+          extra.appendChild(sourceList);
+        }
+        copy.appendChild(extra);
       };
 
       const createTrace = (events = [], open = true) => {
@@ -445,6 +527,7 @@
           const row = document.createElement('li');
           row.className = `trace-row ${stage === 'failed' ? 'failed' : 'done'}`;
           const copy = document.createElement('span');
+          copy.className = 'trace-row-copy';
           const rowTitle = document.createElement('span');
           rowTitle.className = 'trace-row-title';
           rowTitle.textContent = label;
@@ -455,6 +538,7 @@
             rowNote.textContent = note;
             copy.appendChild(rowNote);
           }
+          appendTraceDetails(copy, stage, detail);
           const time = document.createElement('span');
           time.className = 'trace-time';
           const atMs = Number(detail.at_ms || 0);

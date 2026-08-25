@@ -363,7 +363,13 @@ class SearchReaderPipeline:
             retrieval_warnings: list[str] = []
             web_enabled = not local_passages or bool(_EXPLICIT_WEB_RE.search(normalized))
             if web_enabled:
-                emit("searching", {"message": "正在查找相关资料"})
+                emit(
+                    "searching",
+                    {
+                        "query": effective_question,
+                        "message": "正在查找相关资料",
+                    },
+                )
                 queries, sources, chunks, retrieval_warnings = self.retriever.run(
                     effective_question
                 )
