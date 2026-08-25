@@ -10,6 +10,9 @@ from rwkv_search_reader.models import (
     DocumentChunk,
     Evidence,
     EvidenceAudit,
+    FieldEvidenceSelection,
+    ResearchPlan,
+    ResearchRecord,
     SearchHit,
     SearchReaderError,
 )
@@ -19,6 +22,7 @@ from rwkv_search_reader.pipeline import (
     _conversation_reply,
     _history_only_request,
     _rechecks_supported_fact,
+    _sanitize_supplemental_query,
 )
 from rwkv_search_reader.tracing import append_trace, recent_traces
 
@@ -102,6 +106,107 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
     }
     assert progress[0][1]["query"] == "Question"
     assert result.trace[-1]["stage"] == "completed"
+
+
+def test_model_planner_can_request_scope_clarification_without_search(tmp_path) -> None:
+    settings = replace(
+        Settings(),
+        rwkv_model="rwkv-test",
+        research_plan_enabled=True,
+        trace_enabled=False,
+        trace_directory=tmp_path,
+    )
+    pipeline = SearchReaderPipeline(settings)
+    pipeline.reader.plan_research = lambda question: ResearchPlan(
+        decision="clarify",
+        goal="逐个给出二游当前版本和福利",
+        clarification="你想比较哪些二游？例如原神、绝区零或鸣潮。",
+    )
+    pipeline.retriever.run = lambda question: pytest.fail("search must not run")
+    pipeline.retriever.run_queries = lambda *args, **kwargs: pytest.fail(
+        "search must not run"
+    )
+    progress = []
+
+    result = pipeline.answer(
+        "二游中各个最新的版本和福利分别是什么？",
+        on_progress=lambda stage, detail: progress.append((stage, detail)),
+    )
+
+    assert result.answer == "你想比较哪些二游？例如原神、绝区零或鸣潮。"
+    assert result.retrieval_mode == "model-clarification"
+    assert result.queries == []
+    assert [stage for stage, _ in progress] == [
+        "planning",
+        "plan_completed",
+        "clarifying",
+        "completed",
+    ]
+
+
+def test_model_planner_queries_and_records_reach_audit_and_writer(tmp_path) -> None:
+    settings = replace(
+        Settings(),
+        rwkv_model="rwkv-test",
+        research_plan_enabled=True,
+        trace_enabled=False,
+        trace_directory=tmp_path,
+    )
+    pipeline = SearchReaderPipeline(settings)
+    records = [
+        ResearchRecord("原神", "当前版本和福利", ["版本", "福利"]),
+        ResearchRecord("绝区零", "当前版本和福利", ["版本", "福利"]),
+    ]
+    planned_queries = ["原神 当前版本 福利", "绝区零 当前版本 福利"]
+    pipeline.reader.plan_research = lambda question: ResearchPlan(
+        decision="search",
+        goal="比较两个游戏",
+        records=records,
+        queries=planned_queries,
+    )
+    hit = SearchHit("Source", "https://example.com", content="Fact")
+    chunk = DocumentChunk("S1", hit.title, hit.url, "Fact")
+    received = {}
+
+    def retrieve(queries, **kwargs):
+        received["retrieval"] = (queries, kwargs)
+        return queries, [hit], [chunk], []
+
+    pipeline.retriever.run_queries = retrieve
+    pipeline.retriever.run = lambda question: pytest.fail("planned search required")
+    evidence = Evidence("S1", hit.title, hit.url, "Fact", "Fact")
+    pipeline.reader.summarize = lambda *args, **kwargs: ([evidence], [])
+
+    def audit(question, rows, queries, **kwargs):
+        received["audit_records"] = kwargs["research_records"]
+        return EvidenceAudit(sufficient=True)
+
+    def finalize(question, rows, **kwargs):
+        received["writer_records"] = kwargs["research_records"]
+        received["evidence_sufficient"] = kwargs["evidence_sufficient"]
+        return "比较结果 [S1]", []
+
+    pipeline.reader.audit = audit
+    pipeline.reader.select_evidence = lambda *args, **kwargs: (
+        [
+            FieldEvidenceSelection("原神", "版本", "S1", "supported", "Fact"),
+            FieldEvidenceSelection("绝区零", "版本", "S1", "supported", "Fact"),
+        ],
+        [],
+    )
+    pipeline.reader.finalize = finalize
+
+    result = pipeline.answer("原神和绝区零当前版本和福利分别是什么？")
+
+    assert received["retrieval"] == (
+        planned_queries,
+        {"question": "原神和绝区零当前版本和福利分别是什么？"},
+    )
+    assert received["audit_records"] == records
+    assert received["writer_records"] == records
+    assert received["evidence_sufficient"] is True
+    assert len(received.get("writer_records", [])) == 2
+    assert result.queries == planned_queries
 
 
 def test_pipeline_persists_failed_runs_with_trace(tmp_path) -> None:
@@ -211,6 +316,28 @@ def test_audit_stop_guard_rejects_answer_seeded_confirmation_search() -> None:
         "Python 3.14 什么时候发布，发行价格是多少？",
         evidence,
     )
+
+
+def test_supplemental_query_removes_evidence_answer_seed_and_adds_current_month() -> None:
+    sanitized = _sanitize_supplemental_query(
+        "原神 5.0 版本 更新时间 福利",
+        "原神当前版本和福利是什么？",
+    )
+
+    assert "5.0" not in sanitized
+    assert "原神" in sanitized
+    assert "最新" in sanitized
+    assert "年 月" not in sanitized
+    assert str(__import__("time").localtime().tm_year) in sanitized
+
+
+def test_supplemental_query_preserves_version_named_by_user() -> None:
+    sanitized = _sanitize_supplemental_query(
+        "Python 3.14 正式发布日期",
+        "Python 3.14 正式发布于什么时候？",
+    )
+
+    assert "3.14" in sanitized
 
 
 def test_pipeline_summarizes_conversation_without_search(tmp_path) -> None:

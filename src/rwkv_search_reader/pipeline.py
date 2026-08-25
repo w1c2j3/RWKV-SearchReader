@@ -73,6 +73,7 @@ _GAP_NOISE_PHRASES = (
     "最新",
     "当前",
 )
+_QUERY_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 def _history_only_request(question: str) -> bool:
@@ -135,6 +136,32 @@ def _rechecks_supported_fact(
         str(getattr(item, "claim", "")).casefold() for item in evidence
     )
     return bool(terms) and all(term in evidence_text for term in terms)
+
+
+def _sanitize_supplemental_query(query: str, question: str) -> str:
+    """Remove answer-like numbers leaked from evidence and anchor recency safely."""
+
+    question_numbers = {
+        match.group(0).replace(",", "")
+        for match in _QUERY_NUMBER_RE.finditer(str(question or ""))
+    }
+
+    def keep_question_number(match: re.Match[str]) -> str:
+        value = match.group(0)
+        return value if value.replace(",", "") in question_numbers else " "
+
+    sanitized = _QUERY_NUMBER_RE.sub(keep_question_number, str(query or ""))
+    sanitized = re.sub(r"(?:^|\s)[年月日](?=\s|$)", " ", sanitized)
+    sanitized = " ".join(sanitized.split()).strip(" -，,；;：:")
+    if sanitized and re.search(
+        r"今日|今天|当前|现在|最新|本周|这周|近期|最近|本月|今年",
+        question,
+    ):
+        current = time.localtime()
+        anchor = f"{current.tm_year}年{current.tm_mon}月"
+        if str(current.tm_year) not in sanitized:
+            sanitized = f"{sanitized} {anchor} 最新"
+    return sanitized[:800]
 
 
 def _document_sources(
@@ -223,6 +250,8 @@ class SearchReaderPipeline:
         configuration = {
             "search_provider": self.settings.search_provider,
             "search_max_results": self.settings.search_max_results,
+            "research_plan_enabled": self.settings.research_plan_enabled,
+            "research_plan_max_queries": self.settings.research_plan_max_queries,
             "review_max_rounds": self.settings.review_max_rounds,
             "review_max_queries": self.settings.review_max_queries,
             "conversation_turns": self.settings.conversation_turns,
@@ -356,23 +385,128 @@ class SearchReaderPipeline:
                     },
                 )
 
+            web_enabled = not local_passages or bool(_EXPLICIT_WEB_RE.search(normalized))
+            research_plan = None
+            if (
+                web_enabled
+                and not local_passages
+                and self.settings.research_plan_enabled
+            ):
+                emit(
+                    "planning",
+                    {
+                        "message": "正在判断问题范围并拆分需要回答的记录",
+                    },
+                )
+                stage = time.perf_counter()
+                try:
+                    research_plan = self.reader.plan_research(effective_question)
+                except SearchReaderError as exc:
+                    pipeline_warnings.append(f"research plan degraded: {exc}"[:500])
+                    emit(
+                        "plan_completed",
+                        {
+                            "decision": "search",
+                            "fallback": True,
+                            "queries": [effective_question],
+                            "records": [],
+                            "message": "范围规划不可用，保留用户原问题检索",
+                        },
+                    )
+                else:
+                    emit(
+                        "plan_completed",
+                        {
+                            "decision": research_plan.decision,
+                            "goal": research_plan.goal,
+                            "queries": research_plan.queries,
+                            "clarification": research_plan.clarification,
+                            "records": [
+                                {
+                                    "subject": record.subject,
+                                    "question": record.question,
+                                    "fields": record.fields,
+                                }
+                                for record in research_plan.records
+                            ],
+                            "message": (
+                                "问题范围需要用户补充"
+                                if research_plan.decision == "clarify"
+                                else "已经形成可执行的检索计划"
+                            ),
+                        },
+                    )
+                timings["plan"] = round(
+                    (time.perf_counter() - stage) * 1000, 1
+                )
+                if research_plan and research_plan.decision == "clarify":
+                    timings["total"] = round(
+                        (time.perf_counter() - started) * 1000, 1
+                    )
+                    emit(
+                        "clarifying",
+                        {
+                            "message": research_plan.clarification,
+                        },
+                    )
+                    emit("completed", {"duration_ms": timings["total"]})
+                    result = PipelineResult(
+                        request_id=request_id,
+                        session_id=session_id,
+                        question=normalized,
+                        answer=research_plan.clarification,
+                        queries=[],
+                        sources=[],
+                        evidence=[],
+                        retrieval_mode="model-clarification",
+                        search_provider="",
+                        reader_mode="rwkv-research-planner",
+                        degraded=False,
+                        warnings=pipeline_warnings,
+                        timings_ms=timings,
+                        trace=trace,
+                    )
+                    if self.settings.trace_enabled:
+                        append_trace(
+                            self.settings.trace_directory,
+                            {
+                                "schema_version": "rwkv-search-reader.trace.v2",
+                                "status": "ok",
+                                **result.to_dict(),
+                                "configuration": configuration,
+                                "model_calls": self.reader.call_records(),
+                            },
+                        )
+                    return result
+
             stage = time.perf_counter()
             queries: list[str] = []
             sources: list[SearchHit] = []
             chunks: list[DocumentChunk] = []
             retrieval_warnings: list[str] = []
-            web_enabled = not local_passages or bool(_EXPLICIT_WEB_RE.search(normalized))
             if web_enabled:
+                planned_queries = (
+                    research_plan.queries
+                    if research_plan and research_plan.decision == "search"
+                    else [effective_question]
+                )
                 emit(
                     "searching",
                     {
-                        "query": effective_question,
+                        "query": planned_queries[0],
+                        "queries": planned_queries,
                         "message": "正在查找相关资料",
                     },
                 )
-                queries, sources, chunks, retrieval_warnings = self.retriever.run(
-                    effective_question
-                )
+                if research_plan and research_plan.decision == "search":
+                    queries, sources, chunks, retrieval_warnings = self.retriever.run_queries(
+                        planned_queries,
+                        question=effective_question,
+                    )
+                else:
+                    queries, sources, chunks, retrieval_warnings = self.retriever.run(
+                        effective_question
+                    )
                 emit(
                     "sources_found",
                     {
@@ -438,6 +572,7 @@ class SearchReaderPipeline:
             timings["summarize"] = round((time.perf_counter() - stage) * 1000, 1)
 
             audit_warnings: list[str] = []
+            audit_sufficient: bool | None = None
             audit_started = time.perf_counter()
             for review_index in range(self.settings.review_max_rounds + 1):
                 emit(
@@ -449,7 +584,17 @@ class SearchReaderPipeline:
                     },
                 )
                 try:
-                    audit = self.reader.audit(effective_question, evidence, queries)
+                    if research_plan and research_plan.records:
+                        audit = self.reader.audit(
+                            effective_question,
+                            evidence,
+                            queries,
+                            research_records=research_plan.records,
+                        )
+                    else:
+                        audit = self.reader.audit(
+                            effective_question, evidence, queries
+                        )
                 except SearchReaderError as exc:
                     audit_warnings.append(f"evidence audit degraded: {exc}"[:500])
                     emit(
@@ -464,6 +609,7 @@ class SearchReaderPipeline:
                     break
 
                 if audit.sufficient:
+                    audit_sufficient = True
                     emit(
                         "audit_completed",
                         {
@@ -475,9 +621,21 @@ class SearchReaderPipeline:
                     break
 
                 tried = {query.casefold() for query in queries}
-                candidate_queries = [
+                raw_candidate_queries = [
                     query for query in audit.queries if query.casefold() not in tried
                 ]
+                candidate_queries = list(
+                    dict.fromkeys(
+                        sanitized
+                        for query in raw_candidate_queries
+                        if (
+                            sanitized := _sanitize_supplemental_query(
+                                query, effective_question
+                            )
+                        )
+                        and sanitized.casefold() not in tried
+                    )
+                )
                 supplemental_queries = [
                     query
                     for query in candidate_queries
@@ -485,7 +643,8 @@ class SearchReaderPipeline:
                         query, effective_question, evidence
                     )
                 ]
-                if candidate_queries and not supplemental_queries:
+                if raw_candidate_queries and not supplemental_queries:
+                    audit_sufficient = True
                     emit(
                         "audit_completed",
                         {
@@ -495,6 +654,7 @@ class SearchReaderPipeline:
                         },
                     )
                     break
+                audit_sufficient = False
                 emit(
                     "audit_completed",
                     {
@@ -605,6 +765,31 @@ class SearchReaderPipeline:
                 (time.perf_counter() - audit_started) * 1000, 1
             )
 
+            evidence_selections = []
+            selection_warnings: list[str] = []
+            if research_plan and research_plan.records:
+                field_count = sum(
+                    max(1, len(record.fields)) for record in research_plan.records
+                )
+                emit(
+                    "evidence_selecting",
+                    {
+                        "record_count": len(research_plan.records),
+                        "field_count": field_count,
+                        "message": "正在逐对象逐字段绑定直接来源",
+                    },
+                )
+                selection_started = time.perf_counter()
+                evidence_selections, selection_warnings = self.reader.select_evidence(
+                    effective_question,
+                    research_plan.records,
+                    evidence,
+                    on_progress=emit,
+                )
+                timings["evidence_select"] = round(
+                    (time.perf_counter() - selection_started) * 1000, 1
+                )
+
             stage = time.perf_counter()
             answer, final_warnings = self.reader.finalize(
                 effective_question,
@@ -612,6 +797,11 @@ class SearchReaderPipeline:
                 on_progress=emit,
                 conversation_history=history,
                 current_message=normalized,
+                research_records=(
+                    research_plan.records if research_plan else None
+                ),
+                evidence_sufficient=audit_sufficient,
+                evidence_selections=evidence_selections,
             )
             timings["finalize"] = round((time.perf_counter() - stage) * 1000, 1)
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)
@@ -622,6 +812,7 @@ class SearchReaderPipeline:
                 *retrieval_warnings,
                 *summary_warnings,
                 *audit_warnings,
+                *selection_warnings,
                 *final_warnings,
                 *citation_warnings(answer, evidence),
             ]
@@ -647,7 +838,11 @@ class SearchReaderPipeline:
                     if local_passages
                     else self.provider.name
                 ),
-                reader_mode="rwkv-reviewed-parallel-read-final-summary",
+                reader_mode=(
+                    "rwkv-planned-field-bound-final-summary"
+                    if evidence_selections
+                    else "rwkv-reviewed-parallel-read-final-summary"
+                ),
                 degraded=bool(warnings),
                 warnings=warnings,
                 timings_ms=timings,

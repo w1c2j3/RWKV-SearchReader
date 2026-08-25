@@ -100,6 +100,8 @@ class Settings:
     searxng_base_url: str = ""
     search_max_results: int = 10
     fetch_pages: int = 10
+    research_plan_enabled: bool = False
+    research_plan_max_queries: int = 4
     review_max_rounds: int = 2
     review_max_queries: int = 3
     conversation_turns: int = 10
@@ -161,9 +163,11 @@ class Settings:
             "retrieval_mode": "web-or-attached-documents",
             "search_provider": self.search_provider,
             "search_configured": provider_ready,
-            "reader_mode": "rwkv-parallel-read-final-summary",
+            "reader_mode": "rwkv-planned-field-bound-final-summary",
             "summary_workers": self.rwkv_summary_workers,
             "review_max_rounds": self.review_max_rounds,
+            "research_plan_enabled": self.research_plan_enabled,
+            "research_plan_max_queries": self.research_plan_max_queries,
             "rwkv_configured": self.rwkv_configured,
             "final_model": self.final_model,
             "final_model_configured": bool(self.final_base_url and self.final_model),
@@ -191,6 +195,10 @@ def get_settings() -> Settings:
         searxng_base_url=_text("SEARCH_READER_SEARXNG_BASE_URL"),
         search_max_results=_integer("SEARCH_READER_SEARCH_MAX_RESULTS", 10, 1, 10),
         fetch_pages=_integer("SEARCH_READER_FETCH_PAGES", 10, 1, 10),
+        research_plan_enabled=_boolean("SEARCH_READER_RESEARCH_PLAN_ENABLED", True),
+        research_plan_max_queries=_integer(
+            "SEARCH_READER_RESEARCH_PLAN_MAX_QUERIES", 4, 1, 6
+        ),
         review_max_rounds=_integer("SEARCH_READER_REVIEW_MAX_ROUNDS", 2, 0, 3),
         review_max_queries=_integer("SEARCH_READER_REVIEW_MAX_QUERIES", 3, 1, 4),
         conversation_turns=_integer("SEARCH_READER_CONVERSATION_TURNS", 10, 1, 20),

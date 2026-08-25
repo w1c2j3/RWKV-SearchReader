@@ -6,6 +6,7 @@ from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import SearchHit
 from rwkv_search_reader.retrieval import (
     Retriever,
+    _balanced_hits,
     _search_queries,
     chunk_text,
     provider_materials,
@@ -123,6 +124,17 @@ def test_supplemental_retrieval_excludes_old_urls_and_continues_source_ids() -> 
 
     assert [source.source_id for source in sources] == ["S11", "S12"]
     assert [chunk.source_id for chunk in chunks] == ["S11", "S12"]
+
+
+def test_balanced_hits_deduplicates_http_and_https_page_variants() -> None:
+    groups = [
+        [SearchHit("HTTPS", "https://www.example.com/news/item/")],
+        [SearchHit("HTTP", "http://example.com/news/item")],
+    ]
+
+    selected = _balanced_hits(groups, limit=10)
+
+    assert [hit.title for hit in selected] == ["HTTPS"]
 
 
 def test_provider_materials_do_not_reorder_by_local_score() -> None:

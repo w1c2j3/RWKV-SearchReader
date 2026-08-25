@@ -47,6 +47,32 @@ class EvidenceAudit:
 
 
 @dataclass(slots=True)
+class ResearchRecord:
+    subject: str
+    question: str
+    fields: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ResearchPlan:
+    decision: str
+    goal: str
+    records: list[ResearchRecord] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    clarification: str = ""
+    fallback: bool = False
+
+
+@dataclass(slots=True)
+class FieldEvidenceSelection:
+    subject: str
+    field: str
+    source_id: str
+    status: str
+    fact: str = ""
+
+
+@dataclass(slots=True)
 class PipelineResult:
     request_id: str
     session_id: str

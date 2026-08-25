@@ -402,6 +402,9 @@
         if (stage === 'history_reading') return [`正在阅读此前 ${detail.turn_count || 0} 轮对话`, '直接根据本次对话整理回答'];
         if (stage === 'contextualizing') return [`正在衔接此前 ${detail.turn_count || 0} 轮对话`, '补全当前问题中的上下文指代'];
         if (stage === 'context_resolved') return ['已理解当前追问', detail.resolved_question || '已形成完整问题'];
+        if (stage === 'planning') return ['正在理解问题范围', '判断需要回答的对象、字段和检索任务'];
+        if (stage === 'plan_completed') return [detail.decision === 'clarify' ? '需要先确认回答范围' : `已拆分为 ${(detail.queries || []).length || 1} 个检索任务`, detail.decision === 'clarify' ? (detail.clarification || '范围不同会改变答案') : (detail.goal || '已形成本轮资料计划')];
+        if (stage === 'clarifying') return ['正在等待你补充范围', detail.message || '补充范围后可以继续'];
         if (stage === 'searching') return ['开始查找相关资料', detail.query ? `围绕“${detail.query}”查找` : '正在理解问题并发起检索'];
         if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, `使用了 ${(detail.queries || []).length || 1} 个检索式`];
         if (stage === 'document_searching') return [`正在阅读 ${detail.document_count || 0} 份文档`, '定位与当前问题相关的章节和段落'];
@@ -416,6 +419,8 @@
         if (stage === 'reviewing') return ['正在整理阅读结果', `将 ${detail.source_count || 0} 份材料分为 ${detail.group_count || 0} 组并行归纳`];
         if (stage === 'evidence_group_read') return [`已归纳 ${detail.completed || 0}/${detail.total || 0} 组 · ${(detail.source_ids || []).join(' + ')}`, `合并结果：${detail.summary_preview || '重复信息已合并'}`];
         if (stage === 'finalizing') return ['正在形成最终回答', `根据 ${detail.source_count || 0} 份阅读结果直接作答`];
+        if (stage === 'evidence_selecting') return ['正在建立回答与来源的对应关系', `逐项核对 ${detail.field_count || 0} 个必答字段`];
+        if (stage === 'evidence_field_selected') return [`已核对 ${detail.completed || 0}/${detail.total || 0} · ${detail.subject || '对象'} · ${detail.field || '字段'}`, detail.status === 'supported' ? `绑定来源 ${detail.source_id || ''}：${detail.fact_preview || '已有直接证据'}` : `${detail.status === 'conflict' ? '材料存在冲突' : '材料尚未覆盖'}：${detail.fact_preview || ''}`];
         if (stage === 'completed') return ['回答已经完成', '完整记录已写入本机'];
         if (stage === 'failed') return ['本次回答未完成', detail.message || '处理过程中出现错误'];
         return [stage, ''];
@@ -423,7 +428,7 @@
 
       const traceQueries = (stage, detail) => {
         if (stage === 'searching' && detail.query) return [detail.query];
-        if (['sources_found', 'audit_completed', 'supplemental_searching', 'supplemental_sources_found'].includes(stage)) return detail.queries || [];
+        if (['plan_completed', 'sources_found', 'audit_completed', 'supplemental_searching', 'supplemental_sources_found'].includes(stage)) return detail.queries || [];
         return [];
       };
 

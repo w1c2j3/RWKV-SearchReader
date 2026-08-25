@@ -1,20 +1,28 @@
 from __future__ import annotations
 
-import re
 import threading
 import time
 from dataclasses import replace
 
 from rwkv_search_reader.config import Settings
-from rwkv_search_reader.models import DocumentChunk, Evidence
+from rwkv_search_reader.models import (
+    DocumentChunk,
+    Evidence,
+    FieldEvidenceSelection,
+)
 from rwkv_search_reader.reader import (
     RWKVReader,
     _attach_missing_citations,
+    _bind_subject_citations,
     _clean_final_answer,
     _eligible_evidence,
     _final_evidence_order,
+    _is_explicit_benefit_fact,
+    _narrow_selected_fact,
     _parse_audit_output,
+    _parse_research_plan_output,
     _parse_source_summary,
+    _remove_copied_temporal_qualifiers,
     _unsupported_summary_numbers,
     _verified_source_relation,
     citation_warnings,
@@ -41,6 +49,95 @@ def test_citation_audit_accepts_known_sources() -> None:
 def test_citation_audit_reports_missing_and_unknown_sources() -> None:
     assert "no [S1]-style" in citation_warnings("Answer", _evidence())[0]
     assert "S9" in citation_warnings("Answer [S9]", _evidence())[0]
+
+
+def test_research_plan_parser_keeps_records_and_queries() -> None:
+    plan = _parse_research_plan_output(
+        """```json
+        {"decision":"search","goal":"比较两个游戏",
+         "records":[
+           {"subject":"原神","question":"当前版本和福利","fields":["版本","福利"]},
+           {"subject":"绝区零","question":"当前版本和福利","fields":["版本","福利"]}],
+         "queries":["原神 2026年8月 当前版本 福利", "绝区零 2026年8月 当前版本 福利"],
+         "clarification":""}
+        ```""",
+        "fallback",
+        4,
+    )
+
+    assert plan.decision == "search"
+    assert [record.subject for record in plan.records] == ["原神", "绝区零"]
+    assert plan.records[0].fields == ["版本", "福利"]
+    assert plan.queries == [
+        "原神 2026年8月 当前版本 福利",
+        "绝区零 2026年8月 当前版本 福利",
+    ]
+
+
+def test_research_plan_parser_requires_a_real_clarification_question() -> None:
+    plan = _parse_research_plan_output(
+        '{"decision":"clarify","goal":"逐个回答","records":[],"queries":[],"clarification":"你说的各个二游具体包括哪些？"}',
+        "各个二游版本是什么？",
+        4,
+    )
+
+    assert plan.decision == "clarify"
+    assert plan.clarification == "你说的各个二游具体包括哪些？"
+
+
+def test_research_plan_prompt_puts_question_before_requirements() -> None:
+    reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        captured.update(kwargs)
+        return '{"decision":"search","goal":"查日期","records":[],"queries":["Python 3.14 发布日期"],"clarification":""}'
+
+    reader._complete = complete
+    plan = reader.plan_research("UNIQUE PLAN QUESTION")
+
+    assert captured["user"].index("UNIQUE PLAN QUESTION") < captured["user"].index(
+        "你是资料研究规划器"
+    )
+    assert captured["stage"] == "plan"
+    assert plan.queries == ["Python 3.14 发布日期"]
+
+
+def test_current_version_plan_adds_time_and_announcement_terms() -> None:
+    reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
+    reader._complete = lambda *args, **kwargs: (
+        '{"decision":"search","goal":"查版本","records":[],"queries":["原神 当前版本 福利"],"clarification":""}'
+    )
+
+    plan = reader.plan_research("原神当前版本和福利是什么？")
+
+    assert "最新" in plan.queries[0]
+    assert "更新公告" in plan.queries[0]
+    assert "活动" in plan.queries[0]
+
+
+def test_source_summary_cannot_copy_current_claim_from_question() -> None:
+    assert (
+        _remove_copied_temporal_qualifiers(
+            "绝区零当前版本为3.1，当前福利包括签到。",
+            "绝区零3.1版本公告，福利包括签到。",
+        )
+        == "绝区零版本为3.1，福利包括签到。"
+    )
+
+
+def test_source_summary_removes_material_wrapper() -> None:
+    assert _parse_source_summary("<材料>相关事实。</材料>") == "相关事实。"
+
+
+def test_selected_fact_is_narrowed_to_the_requested_field() -> None:
+    fact = "原神版本为7.0版本「无神怜爱的雪国」，更新时间为2026年8月12日，停服维护补偿为原石x300。"
+
+    assert _narrow_selected_fact("版本号", fact) == "原神版本为7.0版本「无神怜爱的雪国」"
+    assert _narrow_selected_fact("福利", fact) == "停服维护补偿为原石x300"
+    assert _is_explicit_benefit_fact("停服维护补偿为原石x300")
+    assert not _is_explicit_benefit_fact("新增角色、区域、玩法和剧情")
 
 
 def test_source_summaries_run_concurrently_and_keep_input_order() -> None:
@@ -237,6 +334,10 @@ def test_summary_numbers_must_exist_in_the_source_material() -> None:
     ) == {"1.1E+3", "2024"}
 
 
+def test_semantic_version_numbers_support_their_major_version() -> None:
+    assert _unsupported_summary_numbers("7.0版本", "版本7.0.0_47144228") == set()
+
+
 def test_evidence_filter_drops_only_explicitly_irrelevant_summaries() -> None:
     rows = _evidence(4)
     rows[0].published_date = "Fri, 21 Aug 2026 07:00:00 GMT"
@@ -286,6 +387,34 @@ def test_citation_binding_prefers_exact_version_and_date_support() -> None:
     bound = _attach_missing_citations(answer, rows)
 
     assert bound == "RWKV-7 的最新模型是 RWKV-7-G1，发布日期为 2025 年 3 月 18 日 [S1]。"
+
+
+def test_citation_binding_skips_a_missing_field_notice() -> None:
+    rows = _evidence(1)
+    rows[0].title = "原神 更新时间"
+    rows[0].claim = "2026年8月12日更新"
+
+    bound = _attach_missing_citations(
+        "绝区零的更新时间未在材料中明确写出，无法核实。",
+        rows,
+    )
+
+    assert bound == "绝区零的更新时间未在材料中明确写出，无法核实。"
+
+
+def test_subject_citations_use_all_sources_selected_for_that_subject() -> None:
+    selections = [
+        FieldEvidenceSelection("原神", "版本", "S1", "supported", "7.0版本"),
+        FieldEvidenceSelection("原神", "更新时间", "S12", "supported", "8月12日"),
+        FieldEvidenceSelection("绝区零", "版本", "S2", "supported", "3.1版本"),
+    ]
+
+    bound = _bind_subject_citations(
+        "原神为7.0版本，8月12日更新 [S12]。绝区零为3.1版本 [S1]。",
+        selections,
+    )
+
+    assert bound == "原神为7.0版本，8月12日更新 [S1][S12]。绝区零为3.1版本 [S2]。"
 
 
 def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
@@ -383,36 +512,17 @@ def test_final_stages_use_the_larger_model_profile_and_4090_cap() -> None:
     assert settings.rwkv_max_tokens == 4090
 
 
-def test_evidence_groups_are_reduced_concurrently_and_keep_all_source_ids() -> None:
+def test_final_material_keeps_every_source_pair_without_intermediate_reduction() -> None:
     settings = replace(Settings(), rwkv_model="test", rwkv_summary_workers=5)
     reader = RWKVReader(settings)
-    lock = threading.Lock()
-    active = 0
-    maximum_active = 0
-
-    def complete(user: str, *, stage: str, **kwargs: object) -> str:
-        del kwargs
-        assert stage == "reduce"
-        source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
-        nonlocal active, maximum_active
-        with lock:
-            active += 1
-            maximum_active = max(maximum_active, active)
-        time.sleep(0.03)
-        with lock:
-            active -= 1
-        return f"组摘要 [{source_ids[0]}]"
-
-    reader._complete = complete
 
     material, warnings, group_count = reader._reduce_evidence(
         "question", _evidence(6)
     )
 
-    assert maximum_active >= 2
-    assert group_count == 3
+    assert group_count == 0
     assert warnings == []
-    assert all(f'"S{index}"' in material for index in range(1, 7))
+    assert all(f'["S{index}", {{' in material for index in range(1, 7))
 
 
 def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> None:
@@ -423,14 +533,14 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     rows[1].claim = "BOUND FACT"
 
     def complete(user, **kwargs):
-        captured["user"] = user
+        captured.setdefault("prompts", []).append(user)
         return "这是综合后的自然回答，不是逐来源清单。[S1][S2]"
 
     reader._complete = complete
 
     answer, warnings = reader.finalize("UNIQUE QUESTION", rows)
 
-    prompt = captured["user"]
+    prompt = captured["prompts"][0]
     assert '["S2", {' in prompt
     assert prompt.index("BOUND FACT") < prompt.index("UNIQUE QUESTION")
     assert prompt.index("UNIQUE QUESTION") < prompt.index("根据上面的材料")
@@ -439,6 +549,31 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     assert "组织 4–8 个互不重复的信息维度" in prompt
     assert answer == "这是综合后的自然回答，不是逐来源清单 [S1][S2]。"
     assert warnings == []
+    assert len(captured["prompts"]) == 1
+
+
+def test_final_reader_only_receives_sources_selected_for_answer_fields() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    rows = _evidence(2)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "只使用已绑定字段 [S2]"
+
+    reader._complete = complete
+    answer, _ = reader.finalize(
+        "question",
+        rows,
+        evidence_selections=[
+            FieldEvidenceSelection("对象", "字段", "S2", "supported", "Fact 2")
+        ],
+    )
+
+    assert '"S2"' in captured["user"]
+    assert "Fact 2" in captured["user"]
+    assert "Fact 1" not in captured["user"]
+    assert answer == "只使用已绑定字段 [S2]"
 
 
 def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> None:
@@ -448,7 +583,7 @@ def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> N
     rows = _evidence(2)
 
     def complete(user, **kwargs):
-        captured["user"] = user
+        captured.setdefault("prompts", []).append(user)
         return "结合偏好后的回答 [S1]"
 
     reader._complete = complete
@@ -461,7 +596,7 @@ def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> N
         current_message="我喜欢回甘好的",
     )
 
-    prompt = captured["user"]
+    prompt = captured["prompts"][0]
     assert prompt.index("Fact 1") < prompt.index("口粮茶有哪些？")
     assert prompt.index("口粮茶有哪些？") < prompt.index("我喜欢回甘好的")
     assert prompt.index("我喜欢回甘好的") < prompt.index("此前对话用于保持连续语境")

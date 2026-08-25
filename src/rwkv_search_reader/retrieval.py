@@ -347,11 +347,8 @@ def _balanced_hits(
     """Preserve each query's Tavily rank while giving every subquestion coverage."""
 
     selected: list[SearchHit] = []
-    seen: set[str] = {
-        normalize_url(url).rstrip("/").casefold()
-        for url in (excluded_urls or set())
-        if normalize_url(url)
-    }
+    seen = {_url_identity(url) for url in (excluded_urls or set())}
+    seen.discard("")
     depth = 0
     while len(selected) < limit and any(depth < len(group) for group in groups):
         for group in groups:
@@ -359,7 +356,7 @@ def _balanced_hits(
                 continue
             hit = group[depth]
             hit.url = normalize_url(hit.url)
-            identity = hit.url.rstrip("/").casefold()
+            identity = _url_identity(hit.url)
             if hit.url and identity not in seen:
                 seen.add(identity)
                 selected.append(hit)
@@ -367,6 +364,25 @@ def _balanced_hits(
                     break
         depth += 1
     return selected
+
+
+def _url_identity(url: str) -> str:
+    """Treat HTTP/HTTPS variants of the same page as one evidence source."""
+
+    normalized = normalize_url(url)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    port = parsed.port
+    if port and not (
+        (parsed.scheme == "http" and port == 80)
+        or (parsed.scheme == "https" and port == 443)
+    ):
+        host = f"{host}:{port}"
+    path = parsed.path.rstrip("/") or "/"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{host}{path}{query}".casefold()
 
 
 class Retriever:
