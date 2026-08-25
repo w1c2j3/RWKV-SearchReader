@@ -33,6 +33,7 @@ _KNOWN_SECONDARY_HOSTS = (
     "ourplay.net",
     "fun-game.online",
 )
+_FINAL_MODEL_STAGES = {"conversation", "document", "finalize", "memory"}
 
 
 def _today() -> str:
@@ -300,19 +301,62 @@ def _attach_missing_citations(answer: str, evidence: list[Evidence]) -> str:
         clause = parts[index]
         if not _normalized_text(clause) or clause.rstrip().endswith((":", "：")):
             continue
-        referenced = {
+        referenced = [
             item.upper()
             for item in re.findall(r"\[(S\d+)\]", clause, flags=re.IGNORECASE)
-        }
-        if referenced & allowed:
-            continue
+            if item.upper() in allowed
+        ]
+        plain_clause = re.sub(r"\s*(?:\[S\d+\])+", "", clause, flags=re.IGNORECASE)
+        clause_terms = _claim_terms(plain_clause)
+        selected = [
+            item for item in evidence if item.source_id in set(referenced)
+        ]
+        covered_terms = set().union(
+            *(
+                clause_terms & _claim_terms(f"{item.title} {item.claim}")
+                for item in selected
+            ),
+            set(),
+        )
         ranked = sorted(
             evidence,
-            key=lambda item: (_support_score(clause, item), item.score),
+            key=lambda item: (_support_score(plain_clause, item), item.score),
             reverse=True,
         )
-        if ranked and _support_score(clause, ranked[0]) >= 0.08:
-            parts[index] = f"{clause.rstrip()} [{ranked[0].source_id}]"
+        for candidate in ranked:
+            if candidate.source_id in {item.source_id for item in selected}:
+                continue
+            support = _support_score(plain_clause, candidate)
+            candidate_terms = clause_terms & _claim_terms(
+                f"{candidate.title} {candidate.claim}"
+            )
+            new_terms = candidate_terms - covered_terms
+            clause_numbers = _normalized_numbers(plain_clause)
+            candidate_numbers = _normalized_numbers(candidate.claim)
+            covered_numbers = set().union(
+                *(_normalized_numbers(item.claim) for item in selected), set()
+            )
+            adds_number = bool(
+                (clause_numbers & candidate_numbers) - covered_numbers
+            )
+            if not selected:
+                if support < 0.08:
+                    break
+            elif not adds_number and len(new_terms) < max(
+                2, round(len(clause_terms) * 0.12)
+            ):
+                continue
+            selected.append(candidate)
+            covered_terms.update(candidate_terms)
+            if len(selected) >= 2:
+                break
+        if selected:
+            source_ids = sorted(
+                {item.source_id for item in selected},
+                key=lambda value: int(value[1:]),
+            )
+            citations = "".join(f"[{source_id}]" for source_id in source_ids)
+            parts[index] = f"{plain_clause.rstrip()} {citations}"
     return "".join(parts)
 
 
@@ -343,11 +387,25 @@ class RWKVReader:
         with self._call_lock:
             self._call_records.append(record)
 
-    def _client(self) -> OpenAICompatibleClient:
+    def _model_profile(self, stage: str) -> tuple[str, str, str]:
+        if stage in _FINAL_MODEL_STAGES:
+            return (
+                self.settings.final_base_url,
+                self.settings.final_api_key,
+                self.settings.final_model,
+            )
+        return (
+            self.settings.rwkv_base_url,
+            self.settings.rwkv_api_key,
+            self.settings.rwkv_model,
+        )
+
+    def _client(self, stage: str) -> OpenAICompatibleClient:
+        base_url, api_key, model = self._model_profile(stage)
         return OpenAICompatibleClient(
-            base_url=self.settings.rwkv_base_url,
-            api_key=self.settings.rwkv_api_key,
-            model=self.settings.rwkv_model,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
             timeout_seconds=self.settings.model_timeout_seconds,
         )
 
@@ -355,9 +413,15 @@ class RWKVReader:
         call_id = self._next_call_id()
         started_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
         started = time.perf_counter()
-        client = self._client()
+        base_url, _, model = self._model_profile(stage)
+        protocol = (
+            self.settings.final_protocol
+            if stage in _FINAL_MODEL_STAGES
+            else self.settings.rwkv_protocol
+        )
+        client = self._client(stage)
         try:
-            if self.settings.rwkv_protocol == "chat":
+            if protocol == "chat":
                 output = client.chat(
                     system=_SYSTEM_PROMPT,
                     user=user,
@@ -383,8 +447,9 @@ class RWKVReader:
                     "status": "ok",
                     "started_at": started_at,
                     "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
-                    "model": self.settings.rwkv_model,
-                    "protocol": self.settings.rwkv_protocol,
+                    "model": model,
+                    "base_url": base_url,
+                    "protocol": protocol,
                     "max_tokens": max_tokens,
                     "temperature": self.settings.rwkv_temperature,
                     "system": _SYSTEM_PROMPT,
@@ -401,8 +466,9 @@ class RWKVReader:
                     "status": "error",
                     "started_at": started_at,
                     "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
-                    "model": self.settings.rwkv_model,
-                    "protocol": self.settings.rwkv_protocol,
+                    "model": model,
+                    "base_url": base_url,
+                    "protocol": protocol,
                     "max_tokens": max_tokens,
                     "temperature": self.settings.rwkv_temperature,
                     "system": _SYSTEM_PROMPT,
@@ -476,7 +542,7 @@ class RWKVReader:
 直接给出自然、简洁的回答。不要以“我已阅读”“根据对话”“以下是总结”开头，不展示思维过程。"""
         output = self._complete(
             user,
-            max_tokens=min(1000, self.settings.rwkv_max_tokens),
+            max_tokens=self.settings.rwkv_max_tokens,
             stage="conversation",
         )
         answer = _clean_final_answer(output)
@@ -525,7 +591,20 @@ class RWKVReader:
 
     def _summarize_one(self, question: str, chunk: DocumentChunk) -> Evidence:
         material = chunk.text[: self.settings.max_evidence_chars].strip()
+        source_kind = (
+            "Markdown 文档片段"
+            if chunk.url.startswith("document://")
+            else "网页材料"
+        )
+        document_instruction = (
+            "这是用户主动上传文档中的一个片段，标题路径与正文都属于待综合材料。"
+            "只摘录这个片段明确写出的内容；即使它只覆盖用户问题中的一个方面，也属于相关信息。"
+            "不要替其他片段回答，不要照抄用户问题中的栏目，不要为本片段未覆盖的方面写“无相关信息”或“未提及”。"
+            if chunk.url.startswith("document://")
+            else ""
+        )
         user = f"""<来源材料 id="{chunk.source_id}">
+类型：{source_kind}
 标题：{chunk.title}
 URL：{chunk.url}
 发布时间：{chunk.published_date or "unknown"}
@@ -537,7 +616,8 @@ URL：{chunk.url}
 {question}
 </用户问题>
 
-阅读这一个网页，把与用户问题有关的信息直接总结成一段材料。只能保留网页明确写出的名称、日期、数字、事件和限定条件；用户问题中的“今天”、“当前”、“最新”或日期不是网页事实，不得抄进摘要。时间表述只能来自网页正文或上面的发布时间。某项信息没有出现时就省略，不得猜测，不得拿另一个数值填充，不要为了让答案看起来完整而补齐字段。合并网页内的重复内容，忽略导航、网站介绍和其他页面模板文字。不复述用户问题，不评论网页，不写阅读过程。网页无关时只输出“无相关信息”。"""
+{document_instruction}
+阅读这一个来源，把与用户问题有关的信息直接总结成一段材料。只能保留来源明确写出的名称、日期、数字、事件和限定条件；用户问题中的“今天”、“当前”、“最新”或日期不是来源事实，不得抄进摘要。时间表述只能来自来源正文或上面的发布时间。某项信息没有出现时就省略，不得猜测，不得拿另一个数值填充，不要为了让答案看起来完整而补齐字段。合并来源内的重复内容，忽略导航、网站介绍和其他模板文字。不复述用户问题，不评论来源，不写阅读过程。来源无关时只输出“无相关信息”。"""
         output = self._complete(
             user,
             max_tokens=self.settings.rwkv_summary_max_tokens,
@@ -546,6 +626,8 @@ URL：{chunk.url}
         summary = _parse_source_summary(output)
         if not summary:
             raise SearchReaderError("summarize", "RWKV returned an empty source summary")
+        if chunk.url.startswith("document://"):
+            summary = material
         unsupported = _unsupported_summary_numbers(
             summary, f"{question} {chunk.published_date} {material}"
         )
@@ -597,7 +679,7 @@ URL：{chunk.url}
                         source_id=chunk.source_id,
                         title=chunk.title,
                         url=chunk.url,
-                        claim=f"RWKV 摘要失败；Tavily 材料摘录：{material}",
+                        claim=f"RWKV 摘要失败；原始材料摘录：{material}",
                         quote=material,
                         score=chunk.score,
                         source_relation="unclear",
@@ -606,7 +688,7 @@ URL：{chunk.url}
                     evidence_by_index[index] = evidence
                     status = "degraded"
                     warnings.append(
-                        f"{chunk.source_id} summary degraded to Tavily material: {exc}"[:500]
+                        f"{chunk.source_id} summary degraded to original material: {exc}"[:500]
                     )
                 completed += 1
                 if on_progress:
@@ -781,12 +863,8 @@ URL：{chunk.url}
             )
         output = self._complete(
             user,
-            max_tokens=(
-                min(1000, self.settings.rwkv_max_tokens)
-                if _broad_question(question)
-                else self.settings.rwkv_max_tokens
-            ),
-            stage="read",
+            max_tokens=self.settings.rwkv_max_tokens,
+            stage="finalize",
         )
         answer = _clean_final_answer(output)
         if not answer:

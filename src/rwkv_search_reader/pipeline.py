@@ -6,7 +6,13 @@ import uuid
 from collections.abc import Callable
 
 from .config import Settings, get_settings
-from .models import PipelineResult, SearchReaderError
+from .documents import MarkdownPassage
+from .models import (
+    DocumentChunk,
+    PipelineResult,
+    SearchHit,
+    SearchReaderError,
+)
 from .reader import RWKVReader, citation_warnings
 from .retrieval import Retriever
 from .search import create_search_provider
@@ -21,6 +27,16 @@ _HISTORY_SUMMARY_RE = re.compile(
     r"总结|概括|归纳|整理|回顾|复述|要点|结论|"
     r"(?:说|聊|讨论)了什么|知道(?:了)?(?:哪些|什么)|记得.*(?:什么|吗)"
 )
+_DOCUMENT_REFERENCE_RE = re.compile(
+    r"文档|文件|附件|markdown|\.md\b|这篇|这份材料|上面的材料",
+    flags=re.IGNORECASE,
+)
+_EXPLICIT_WEB_RE = re.compile(
+    r"请(?:再|同时|帮我)?(?:联网|搜索|检索)|帮我(?:联网|搜索|检索)|"
+    r"(?:联网|网上|网络|网页)(?:查|搜|检索|搜索|补充)|"
+    r"(?:搜索|检索|查找)(?:一下|网络|网页|外部)|结合(?:网络|网页|外部资料)|"
+    r"最新|今天|本周|近期"
+)
 
 
 def _history_only_request(question: str) -> bool:
@@ -32,6 +48,37 @@ def _history_only_request(question: str) -> bool:
         and _HISTORY_REFERENCE_RE.search(text)
         and _HISTORY_SUMMARY_RE.search(text)
     )
+
+
+def _document_sources(
+    passages: list[MarkdownPassage], start_index: int = 1
+) -> tuple[list[SearchHit], list[DocumentChunk]]:
+    sources: list[SearchHit] = []
+    chunks: list[DocumentChunk] = []
+    for offset, passage in enumerate(passages):
+        source_id = f"S{start_index + offset}"
+        score = max(0.1, 1.0 - offset * 0.03)
+        sources.append(
+            SearchHit(
+                source_id=source_id,
+                title=passage.title,
+                url=passage.url,
+                content=passage.content,
+                provider="local-markdown",
+                score=score,
+            )
+        )
+        chunks.append(
+            DocumentChunk(
+                source_id=source_id,
+                title=passage.title,
+                url=passage.url,
+                text=passage.content,
+                score=score,
+                chunk_index=passage.ordinal,
+            )
+        )
+    return sources, chunks
 
 
 def _conversation_reply(question: str) -> str | None:
@@ -75,6 +122,7 @@ class SearchReaderPipeline:
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
         session_id: str = "",
         conversation_history: list[dict[str, str]] | None = None,
+        document_passages: list[MarkdownPassage] | None = None,
     ) -> PipelineResult:
         normalized = " ".join(str(question or "").split()).strip()
         if not normalized:
@@ -92,6 +140,7 @@ class SearchReaderPipeline:
             "review_max_queries": self.settings.review_max_queries,
             "conversation_turns": self.settings.conversation_turns,
             "model": self.settings.rwkv_model,
+            "final_model": self.settings.final_model,
             "protocol": self.settings.rwkv_protocol,
             "summary_workers": self.settings.rwkv_summary_workers,
             "summary_max_tokens": self.settings.rwkv_summary_max_tokens,
@@ -142,6 +191,7 @@ class SearchReaderPipeline:
                 return result
 
             pipeline_warnings: list[str] = []
+            local_passages = list(document_passages or [])
             history = (
                 conversation_history[-self.settings.conversation_turns :]
                 if conversation_history is not None
@@ -151,7 +201,12 @@ class SearchReaderPipeline:
                     self.settings.conversation_turns,
                 )
             )
-            if history and _history_only_request(normalized):
+            explicit_document_request = bool(_DOCUMENT_REFERENCE_RE.search(normalized))
+            if (
+                history
+                and _history_only_request(normalized)
+                and not (local_passages and explicit_document_request)
+            ):
                 emit(
                     "history_reading",
                     {
@@ -214,30 +269,73 @@ class SearchReaderPipeline:
                     },
                 )
 
-            emit("searching", {"message": "正在查找相关资料"})
             stage = time.perf_counter()
-            queries, sources, chunks, retrieval_warnings = self.retriever.run(
-                effective_question
-            )
+            queries: list[str] = []
+            sources: list[SearchHit] = []
+            chunks: list[DocumentChunk] = []
+            retrieval_warnings: list[str] = []
+            web_enabled = not local_passages or bool(_EXPLICIT_WEB_RE.search(normalized))
+            if web_enabled:
+                emit("searching", {"message": "正在查找相关资料"})
+                queries, sources, chunks, retrieval_warnings = self.retriever.run(
+                    effective_question
+                )
+                emit(
+                    "sources_found",
+                    {
+                        "queries": queries,
+                        "source_count": len(chunks),
+                        "sources": [
+                            {
+                                "source_id": source.source_id or f"S{index}",
+                                "title": source.title,
+                                "url": source.url,
+                                "score": source.score,
+                                "published_date": source.published_date,
+                            }
+                            for index, source in enumerate(
+                                sources[: len(chunks)], start=1
+                            )
+                        ],
+                    },
+                )
+            if local_passages:
+                emit(
+                    "document_searching",
+                    {
+                        "document_count": len(
+                            {item.document_id for item in local_passages}
+                        ),
+                        "message": "正在定位文档中的相关段落",
+                    },
+                )
+                document_sources, document_chunks = _document_sources(
+                    local_passages, len(chunks) + 1
+                )
+                sources.extend(document_sources)
+                chunks.extend(document_chunks)
+                emit(
+                    "documents_found",
+                    {
+                        "document_count": len(
+                            {item.document_id for item in local_passages}
+                        ),
+                        "source_count": len(document_chunks),
+                        "sources": [
+                            {
+                                "source_id": source.source_id,
+                                "title": source.title,
+                                "url": source.url,
+                                "score": source.score,
+                                "published_date": "",
+                            }
+                            for source in document_sources
+                        ],
+                    },
+                )
+            if not chunks:
+                raise SearchReaderError("search", "no usable web or document material")
             timings["retrieve"] = round((time.perf_counter() - stage) * 1000, 1)
-            emit(
-                "sources_found",
-                {
-                    "queries": queries,
-                    "source_count": len(chunks),
-                    "sources": [
-                        {
-                            "source_id": source.source_id or f"S{index}",
-                            "title": source.title,
-                            "url": source.url,
-                            "score": source.score,
-                            "published_date": source.published_date,
-                        }
-                        for index, source in enumerate(sources[: len(chunks)], start=1)
-                    ],
-                    "duration_ms": timings["retrieve"],
-                },
-            )
 
             emit("reading", {"source_count": len(chunks)})
             stage = time.perf_counter()
@@ -299,6 +397,11 @@ class SearchReaderPipeline:
                 if review_index >= self.settings.review_max_rounds:
                     audit_warnings.append(
                         "evidence remained incomplete after the maximum review rounds"
+                    )
+                    break
+                if not web_enabled:
+                    audit_warnings.append(
+                        "attached document material may be incomplete; external search was not requested"
                     )
                     break
                 if not supplemental_queries:
@@ -420,7 +523,20 @@ class SearchReaderPipeline:
                 queries=queries,
                 sources=sources,
                 evidence=evidence,
-                search_provider=self.provider.name,
+                retrieval_mode=(
+                    "document+forced"
+                    if local_passages and web_enabled
+                    else "document"
+                    if local_passages
+                    else "forced"
+                ),
+                search_provider=(
+                    f"{self.provider.name}+local-markdown"
+                    if local_passages and web_enabled
+                    else "local-markdown"
+                    if local_passages
+                    else self.provider.name
+                ),
                 reader_mode="rwkv-reviewed-parallel-read-final-summary",
                 degraded=bool(warnings),
                 warnings=warnings,

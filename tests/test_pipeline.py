@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from rwkv_search_reader.config import Settings
+from rwkv_search_reader.documents import MarkdownPassage
 from rwkv_search_reader.models import (
     DocumentChunk,
     Evidence,
@@ -13,6 +14,7 @@ from rwkv_search_reader.models import (
     SearchReaderError,
 )
 from rwkv_search_reader.pipeline import (
+    _EXPLICIT_WEB_RE,
     SearchReaderPipeline,
     _conversation_reply,
     _history_only_request,
@@ -201,6 +203,53 @@ def test_pipeline_summarizes_conversation_without_search(tmp_path) -> None:
     assert result.retrieval_mode == "conversation-history"
     assert result.reader_mode == "rwkv-conversation-summary"
     assert [stage for stage, _ in progress] == ["history_reading", "completed"]
+
+
+def test_pipeline_reads_attached_markdown_without_web_search(tmp_path) -> None:
+    settings = replace(
+        Settings(),
+        rwkv_model="rwkv-test",
+        trace_enabled=False,
+        trace_directory=tmp_path,
+    )
+    pipeline = SearchReaderPipeline(settings)
+    pipeline.retriever.run = lambda question: pytest.fail("web search must not run")
+    passage = MarkdownPassage(
+        "doc_pipeline123",
+        "project.md",
+        0,
+        "部署方案",
+        "项目使用 SQLite 保存对话，并通过临时隧道提供公网访问。",
+    )
+
+    def summarize(question, chunks, on_progress=None):
+        assert chunks[0].url.startswith("document://")
+        return [
+            Evidence(
+                source_id="S1",
+                title=chunks[0].title,
+                url=chunks[0].url,
+                claim=chunks[0].text,
+                quote=chunks[0].text,
+            )
+        ], []
+
+    pipeline.reader.summarize = summarize
+    pipeline.reader.audit = lambda *args: EvidenceAudit(sufficient=True)
+    pipeline.reader.finalize = lambda *args, **kwargs: ("项目使用本地对话库 [S1]。", [])
+
+    result = pipeline.answer("总结这份文档", document_passages=[passage])
+
+    assert result.queries == []
+    assert result.retrieval_mode == "document"
+    assert result.search_provider == "local-markdown"
+    assert result.sources[0].title == "project.md · 部署方案"
+    assert result.sources[0].url.startswith("document://")
+
+
+def test_document_question_that_mentions_web_policy_does_not_request_web() -> None:
+    assert _EXPLICIT_WEB_RE.search("文档默认会联网吗？") is None
+    assert _EXPLICIT_WEB_RE.search("请联网查一下最新变化") is not None
 
 
 def test_pipeline_uses_audit_query_to_add_new_sources(tmp_path) -> None:

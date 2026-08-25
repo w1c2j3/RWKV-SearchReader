@@ -176,10 +176,20 @@
 
       .composer-wrap { position: absolute; right: 0; bottom: 0; left: 0; z-index: 7; padding: 36px 22px 16px; background: linear-gradient(to bottom, rgb(244 242 236 / 0%), var(--paper) 32%); }
       .composer { position: relative; width: min(900px, 100%); margin: 0 auto; }
-      .composer-box { position: relative; padding: 8px 8px 8px 18px; border: 1px solid #d4d4cd; border-radius: 21px; background: var(--card); box-shadow: 0 16px 48px rgb(42 53 50 / 11%); transition: .18s ease; }
+      .attachment-tray { display: flex; flex-wrap: wrap; gap: 7px; min-height: 0; margin: 0 10px 8px; }
+      .attachment-tray:empty { display: none; }
+      .attachment-chip { display: flex; align-items: center; gap: 7px; max-width: min(360px, 90%); padding: 7px 10px; border: 1px solid #cfd9d5; border-radius: 11px; background: #edf4f1; color: #42524e; font-size: 10px; }
+      .attachment-icon { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 7px; background: var(--mint); color: white; font-size: 8px; font-weight: 800; }
+      .attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .attachment-meta { flex: 0 0 auto; color: #80908c; }
+      .attachment-chip.error { border-color: #e2c8c0; background: #f8ece8; color: #9b5948; }
+      .composer-box { position: relative; padding: 8px 8px 8px 58px; border: 1px solid #d4d4cd; border-radius: 21px; background: var(--card); box-shadow: 0 16px 48px rgb(42 53 50 / 11%); transition: .18s ease; }
       .composer-box:focus-within { border-color: #aebfba; box-shadow: 0 18px 54px rgb(42 53 50 / 15%); }
       .composer textarea { display: block; width: 100%; min-height: 44px; max-height: 180px; padding: 11px 52px 9px 0; resize: none; overflow-y: auto; border: 0; outline: 0; background: transparent; color: var(--ink); line-height: 1.55; }
       .composer textarea::placeholder { color: #9ca4a2; }
+      .attach { position: absolute; bottom: 8px; left: 8px; display: grid; place-items: center; width: 38px; height: 38px; border: 0; border-radius: 13px; background: #edf0ec; color: #53615e; font-size: 19px; transition: .18s ease; }
+      .attach:hover:not(:disabled) { background: var(--mint-soft); color: var(--mint); }
+      .attach:disabled { cursor: default; opacity: .38; }
       .send { position: absolute; right: 8px; bottom: 8px; display: grid; place-items: center; width: 38px; height: 38px; border: 0; border-radius: 13px; background: var(--forest-2); color: white; font-size: 18px; transition: .18s ease; }
       .send:hover:not(:disabled) { transform: translateY(-1px); background: var(--mint); }
       .send:disabled { cursor: default; opacity: .34; }
@@ -251,7 +261,10 @@
 
         <div class="composer-wrap">
           <form class="composer" id="form">
+            <div class="attachment-tray" id="attachment-tray"></div>
             <div class="composer-box">
+              <input id="document-file" type="file" accept=".md,.markdown,text/markdown" hidden />
+              <button class="attach" id="attach" type="button" aria-label="上传 Markdown 文档" title="上传 Markdown 文档">＋</button>
               <textarea id="question" required maxlength="8000" rows="1" aria-label="输入问题" placeholder="问一个具体的问题…"></textarea>
               <button class="send" id="submit" type="submit" aria-label="发送">↑</button>
             </div>
@@ -265,6 +278,9 @@
       const form = document.querySelector('#form');
       const questionInput = document.querySelector('#question');
       const submit = document.querySelector('#submit');
+      const attach = document.querySelector('#attach');
+      const documentFile = document.querySelector('#document-file');
+      const attachmentTray = document.querySelector('#attachment-tray');
       const messages = document.querySelector('#messages');
       const conversation = document.querySelector('#conversation');
       const welcome = document.querySelector('#welcome');
@@ -293,10 +309,13 @@
         } catch (_) {}
       };
       let pending = false;
+      let uploading = false;
       let conversationId = readConversationId();
       const clientId = readClientId();
       saveConversationIdentity();
       let conversationRecords = [];
+      let currentDocuments = [];
+      let documentNotice = '';
 
       const scrollToBottom = () => requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
       const formatTime = (value) => {
@@ -309,6 +328,37 @@
         questionInput.style.height = `${Math.min(questionInput.scrollHeight, 180)}px`;
       };
       const closeSidebar = () => { sidebar.classList.remove('open'); scrim.classList.remove('open'); };
+      const formatBytes = (value) => {
+        const bytes = Number(value || 0);
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+      };
+      const renderDocuments = () => {
+        attachmentTray.replaceChildren();
+        currentDocuments.forEach((fileRecord) => {
+          const chip = document.createElement('div');
+          chip.className = 'attachment-chip';
+          const icon = document.createElement('span');
+          icon.className = 'attachment-icon';
+          icon.textContent = 'MD';
+          const name = document.createElement('span');
+          name.className = 'attachment-name';
+          name.textContent = fileRecord.filename || 'Markdown 文档';
+          const meta = document.createElement('span');
+          meta.className = 'attachment-meta';
+          meta.textContent = `${fileRecord.chunk_count || 0} 段 · ${formatBytes(fileRecord.size_bytes)}`;
+          chip.append(icon, name, meta);
+          attachmentTray.appendChild(chip);
+        });
+        if (documentNotice) {
+          const error = document.createElement('div');
+          error.className = 'attachment-chip error';
+          error.textContent = documentNotice;
+          attachmentTray.appendChild(error);
+        }
+        questionInput.placeholder = currentDocuments.length ? `询问 ${currentDocuments[0].filename}…` : '问一个具体的问题…';
+      };
 
       const assistantShell = () => {
         const row = document.createElement('section');
@@ -340,6 +390,8 @@
         if (stage === 'context_resolved') return ['已理解当前追问', detail.resolved_question || '已形成完整问题'];
         if (stage === 'searching') return ['开始查找相关资料', '正在理解问题并发起检索'];
         if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, (detail.queries || []).join(' · ')];
+        if (stage === 'document_searching') return [`正在阅读 ${detail.document_count || 0} 份文档`, '定位与当前问题相关的章节和段落'];
+        if (stage === 'documents_found') return [`选出 ${detail.source_count || 0} 个文档片段`, '文档片段将分别独立阅读'];
         if (stage === 'reading') return [`开始逐篇阅读 ${detail.source_count || 0} 个来源`, '每个来源独立阅读，互不混合'];
         if (stage === 'source_read') return [`已读 ${detail.completed || 0}/${detail.total || 0} · ${detail.title || detail.source_id || '参考资料'}`, detail.summary_preview || '关键信息已提取'];
         if (stage === 'auditing') return [`第 ${detail.round || 1} 次检查材料完整性`, `当前共有 ${detail.source_count || 0} 份材料`];
@@ -450,11 +502,14 @@
         const grid = document.createElement('div');
         grid.className = 'source-grid';
         sources.forEach((source, index) => {
-          const link = document.createElement('a');
+          const isWeb = /^https?:\/\//i.test(source.url || '');
+          const link = document.createElement(isWeb ? 'a' : 'div');
           link.className = 'source-link';
-          link.href = source.url;
-          link.target = '_blank';
-          link.rel = 'noreferrer';
+          if (isWeb) {
+            link.href = source.url;
+            link.target = '_blank';
+            link.rel = 'noreferrer';
+          }
           const number = document.createElement('span');
           number.className = 'source-number';
           number.textContent = source.source_id || `S${index + 1}`;
@@ -553,10 +608,12 @@
 
       const showConversation = (record) => {
         const turns = conversationTurns(record);
-        if (!turns.length) return;
         conversation.querySelectorAll('.message').forEach((node) => node.remove());
-        welcome.hidden = true;
+        welcome.hidden = Boolean(turns.length);
         conversationId = record.id;
+        currentDocuments = record.documents || [];
+        documentNotice = '';
+        renderDocuments();
         saveConversationIdentity();
         turns.forEach((turn) => {
           appendUser(turn.question || '');
@@ -566,7 +623,7 @@
           if (turn.status === 'error') appendError(body, turn.error?.message || '处理未完成');
           else finishAssistant(body, turn);
         });
-        chatTitle.textContent = record.title || (turns[0].question || '历史记录').slice(0, 42);
+        chatTitle.textContent = record.title || (turns[0]?.question || currentDocuments[0]?.filename || '历史记录').slice(0, 42);
         closeSidebar();
         scrollToBottom();
       };
@@ -601,7 +658,8 @@
           const time = document.createElement('span');
           time.className = 'history-time';
           const savedTime = formatTime(record.updated_at) || '已保存';
-          time.textContent = `${Math.floor(Number(record.message_count || 0) / 2)} 轮 · ${savedTime}`;
+          const documentCopy = Number(record.document_count || 0) ? ` · ${record.document_count} 文档` : '';
+          time.textContent = `${Math.floor(Number(record.message_count || 0) / 2)} 轮${documentCopy} · ${savedTime}`;
           button.append(question, time);
           button.addEventListener('click', async () => {
             try { showConversation(await fetchConversation(record.id)); }
@@ -631,7 +689,7 @@
         }
         renderHistory();
         const current = conversationRecords.find((record) => record.id === conversationId);
-        if (restoreCurrent && current?.message_count && !conversation.querySelector('.message')) {
+        if (restoreCurrent && (current?.message_count || current?.document_count) && !conversation.querySelector('.message')) {
           try { showConversation(await fetchConversation(conversationId)); }
           catch (_) {}
         }
@@ -644,6 +702,9 @@
         submit.disabled = false;
         questionInput.disabled = false;
         questionInput.value = '';
+        currentDocuments = [];
+        documentNotice = '';
+        renderDocuments();
         resizeComposer();
         conversation.querySelectorAll('.message').forEach((node) => node.remove());
         welcome.hidden = false;
@@ -653,6 +714,61 @@
       };
 
       document.querySelector('#new-chat').addEventListener('click', resetChat);
+      attach.addEventListener('click', () => { if (!pending && !uploading) documentFile.click(); });
+      documentFile.addEventListener('change', async () => {
+        const file = documentFile.files?.[0];
+        documentFile.value = '';
+        if (!file) return;
+        documentNotice = '';
+        if (!/\.(md|markdown)$/i.test(file.name)) {
+          documentNotice = '目前只支持 .md 或 .markdown 文件';
+          renderDocuments();
+          return;
+        }
+        if (file.size > 2_000_000) {
+          documentNotice = '文档不能超过 2 MB';
+          renderDocuments();
+          return;
+        }
+        uploading = true;
+        attach.disabled = true;
+        submit.disabled = true;
+        try {
+          const content = await file.text();
+          await fetch('/v1/conversations/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: clientId, conversation_id: conversationId }),
+          });
+          const response = await fetch('/v1/documents/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              client_id: clientId,
+              conversation_id: conversationId,
+              filename: file.name,
+              content,
+            }),
+          });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.detail || '文档上传失败');
+          }
+          const uploadedDocument = await response.json();
+          if (!currentDocuments.some((item) => item.id === uploadedDocument.id)) currentDocuments.push(uploadedDocument);
+          renderDocuments();
+          if (!conversation.querySelector('.message.user')) chatTitle.textContent = uploadedDocument.filename;
+          await loadHistory(false);
+          questionInput.focus();
+        } catch (error) {
+          documentNotice = String(error.message || '文档上传失败');
+          renderDocuments();
+        } finally {
+          uploading = false;
+          attach.disabled = pending;
+          submit.disabled = pending;
+        }
+      });
       document.querySelector('#menu').addEventListener('click', () => { sidebar.classList.add('open'); scrim.classList.add('open'); });
       scrim.addEventListener('click', closeSidebar);
       document.querySelectorAll('.suggestion').forEach((button) => button.addEventListener('click', () => {
@@ -675,6 +791,7 @@
         const isNewConversation = !conversation.querySelector('.message.user');
         pending = true;
         submit.disabled = true;
+        attach.disabled = true;
         questionInput.disabled = true;
         welcome.hidden = true;
         appendUser(question);
@@ -698,6 +815,7 @@
         } finally {
           pending = false;
           submit.disabled = false;
+          attach.disabled = false;
           questionInput.disabled = false;
           questionInput.focus();
           scrollToBottom();

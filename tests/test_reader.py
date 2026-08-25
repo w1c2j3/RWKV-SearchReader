@@ -105,10 +105,33 @@ def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
 
     prompt = captured["user"]
     assert prompt.index("UNIQUE MATERIAL") < prompt.index("UNIQUE QUESTION")
-    assert prompt.index("UNIQUE QUESTION") < prompt.index("阅读这一个网页")
+    assert prompt.index("UNIQUE QUESTION") < prompt.index("阅读这一个来源")
     assert "股价" not in prompt
     assert "本周最重要" not in prompt
     assert evidence.claim == "Relevant fact."
+
+
+def test_markdown_summary_keeps_raw_fragment_when_model_marks_it_missing() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "文档策略：无相关信息。"
+
+    reader._complete = complete
+    chunk = DocumentChunk(
+        source_id="S1",
+        title="notes.md · 文档策略",
+        url="document://doc_test123#chunk-1",
+        text="Markdown 按标题和段落切块，默认只使用文档。",
+    )
+
+    evidence = reader._summarize_one("总结文档策略", chunk)
+
+    assert "只覆盖用户问题中的一个方面，也属于相关信息" in captured["user"]
+    assert evidence.claim == "Markdown 按标题和段落切块，默认只使用文档。"
 
 
 def test_source_summary_only_cleans_wrappers_and_exact_duplicates() -> None:
@@ -255,6 +278,17 @@ def test_missing_citations_are_bound_without_rewriting_answer() -> None:
     assert bound == "量子芯片取得新进展 [S1]；美光将投资100亿美元建设AI内存实验室 [S2]。"
 
 
+def test_one_clause_can_bind_two_sources_with_distinct_facts() -> None:
+    rows = _evidence(2)
+    rows[0].claim = "项目目标是建立一个连续多轮的资料阅读助手。"
+    rows[1].claim = "最终回答最多生成 4090 token。"
+    answer = "项目目标是建立一个连续多轮的资料阅读助手，最终回答最多生成 4090 token。"
+
+    bound = _attach_missing_citations(answer, rows)
+
+    assert bound == "项目目标是建立一个连续多轮的资料阅读助手，最终回答最多生成 4090 token [S1][S2]。"
+
+
 def test_answer_lead_ending_in_colon_does_not_receive_a_fake_citation() -> None:
     answer = "以下是主要变化：\n性能得到提升。"
     rows = _evidence(1)
@@ -274,7 +308,7 @@ def test_model_calls_keep_full_local_analysis_record() -> None:
             assert kwargs["user"] == "FULL INPUT"
             return "RAW OUTPUT"
 
-    reader._client = lambda: Client()
+    reader._client = lambda stage: Client()
 
     output = reader._complete("FULL INPUT", max_tokens=64, stage="summarize")
     record = reader.call_records()[0]
@@ -284,6 +318,32 @@ def test_model_calls_keep_full_local_analysis_record() -> None:
     assert record["output"] == "RAW OUTPUT"
     assert record["stage"] == "summarize"
     assert record["status"] == "ok"
+
+
+def test_final_stages_use_the_larger_model_profile_and_4090_cap() -> None:
+    settings = replace(
+        Settings(),
+        rwkv_base_url="http://reader.test/v1",
+        rwkv_model="reader-7b",
+        rwkv_final_base_url="http://final.test/v1",
+        rwkv_final_api_key="final-key",
+        rwkv_final_model="final-13b",
+        rwkv_final_protocol="completions",
+        rwkv_max_tokens=4090,
+    )
+    reader = RWKVReader(settings)
+
+    assert reader._model_profile("summarize") == (
+        "http://reader.test/v1",
+        settings.rwkv_api_key,
+        "reader-7b",
+    )
+    assert reader._model_profile("finalize") == (
+        "http://final.test/v1",
+        "final-key",
+        "final-13b",
+    )
+    assert settings.rwkv_max_tokens == 4090
 
 
 def test_evidence_groups_are_reduced_concurrently_and_keep_all_source_ids() -> None:

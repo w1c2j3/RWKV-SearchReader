@@ -102,7 +102,7 @@ class Settings:
     fetch_pages: int = 10
     review_max_rounds: int = 2
     review_max_queries: int = 3
-    conversation_turns: int = 6
+    conversation_turns: int = 10
     request_timeout_seconds: int = 45
 
     rwkv_base_url: str = "http://127.0.0.1:29613/v1"
@@ -111,13 +111,20 @@ class Settings:
     rwkv_protocol: str = "completions"
     rwkv_summary_workers: int = 10
     rwkv_summary_max_tokens: int = 384
-    rwkv_max_tokens: int = 1536
+    rwkv_max_tokens: int = 4090
     rwkv_temperature: float = 0.1
+    rwkv_final_base_url: str = ""
+    rwkv_final_api_key: str = ""
+    rwkv_final_model: str = ""
+    rwkv_final_protocol: str = ""
     model_timeout_seconds: int = 180
 
     chunk_chars: int = 2600
     chunk_overlap_chars: int = 260
     max_evidence_chars: int = 18000
+    document_max_bytes: int = 2_000_000
+    document_chunk_chars: int = 2400
+    document_max_chunks: int = 12
     api_host: str = "0.0.0.0"
     api_port: int = 8790
     trace_enabled: bool = True
@@ -127,6 +134,22 @@ class Settings:
     def rwkv_configured(self) -> bool:
         return bool(self.rwkv_base_url and self.rwkv_model)
 
+    @property
+    def final_model(self) -> str:
+        return self.rwkv_final_model or self.rwkv_model
+
+    @property
+    def final_base_url(self) -> str:
+        return self.rwkv_final_base_url or self.rwkv_base_url
+
+    @property
+    def final_api_key(self) -> str:
+        return self.rwkv_final_api_key or self.rwkv_api_key
+
+    @property
+    def final_protocol(self) -> str:
+        return self.rwkv_final_protocol or self.rwkv_protocol
+
     def readiness(self) -> dict[str, object]:
         provider_ready = {
             "tavily": bool(self.tavily_api_keys or self.tavily_api_key),
@@ -135,13 +158,16 @@ class Settings:
         }.get(self.search_provider, False)
         return {
             "ready": bool(provider_ready and self.rwkv_configured),
-            "retrieval_mode": "questions-only",
+            "retrieval_mode": "web-or-attached-documents",
             "search_provider": self.search_provider,
             "search_configured": provider_ready,
             "reader_mode": "rwkv-parallel-read-final-summary",
             "summary_workers": self.rwkv_summary_workers,
             "review_max_rounds": self.review_max_rounds,
             "rwkv_configured": self.rwkv_configured,
+            "final_model": self.final_model,
+            "final_model_configured": bool(self.final_base_url and self.final_model),
+            "answer_max_tokens": self.rwkv_max_tokens,
         }
 
 
@@ -152,6 +178,9 @@ def get_settings() -> Settings:
     protocol = _text("SEARCH_READER_RWKV_PROTOCOL", "completions").casefold()
     if protocol not in {"completions", "chat"}:
         protocol = "completions"
+    final_protocol = _text("SEARCH_READER_RWKV_FINAL_PROTOCOL").casefold()
+    if final_protocol not in {"", "completions", "chat"}:
+        final_protocol = ""
     chunk_chars = _integer("SEARCH_READER_CHUNK_CHARS", 2600, 600, 12000)
     return Settings(
         search_provider=provider,
@@ -164,7 +193,7 @@ def get_settings() -> Settings:
         fetch_pages=_integer("SEARCH_READER_FETCH_PAGES", 10, 1, 10),
         review_max_rounds=_integer("SEARCH_READER_REVIEW_MAX_ROUNDS", 2, 0, 3),
         review_max_queries=_integer("SEARCH_READER_REVIEW_MAX_QUERIES", 3, 1, 4),
-        conversation_turns=_integer("SEARCH_READER_CONVERSATION_TURNS", 6, 1, 12),
+        conversation_turns=_integer("SEARCH_READER_CONVERSATION_TURNS", 10, 1, 20),
         request_timeout_seconds=_integer(
             "SEARCH_READER_REQUEST_TIMEOUT_SECONDS", 45, 5, 180
         ),
@@ -178,8 +207,12 @@ def get_settings() -> Settings:
         rwkv_summary_max_tokens=_integer(
             "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 384, 96, 2048
         ),
-        rwkv_max_tokens=_integer("SEARCH_READER_RWKV_MAX_TOKENS", 1536, 128, 8192),
+        rwkv_max_tokens=_integer("SEARCH_READER_RWKV_MAX_TOKENS", 4090, 128, 4090),
         rwkv_temperature=_number("SEARCH_READER_RWKV_TEMPERATURE", 0.1, 0.0, 2.0),
+        rwkv_final_base_url=_text("SEARCH_READER_RWKV_FINAL_BASE_URL"),
+        rwkv_final_api_key=_text("SEARCH_READER_RWKV_FINAL_API_KEY"),
+        rwkv_final_model=_text("SEARCH_READER_RWKV_FINAL_MODEL"),
+        rwkv_final_protocol=final_protocol,
         model_timeout_seconds=_integer(
             "SEARCH_READER_MODEL_TIMEOUT_SECONDS", 180, 10, 900
         ),
@@ -189,6 +222,15 @@ def get_settings() -> Settings:
         ),
         max_evidence_chars=_integer(
             "SEARCH_READER_MAX_EVIDENCE_CHARS", 18000, 2000, 80000
+        ),
+        document_max_bytes=_integer(
+            "SEARCH_READER_DOCUMENT_MAX_BYTES", 2_000_000, 10_000, 10_000_000
+        ),
+        document_chunk_chars=_integer(
+            "SEARCH_READER_DOCUMENT_CHUNK_CHARS", 2400, 600, 8000
+        ),
+        document_max_chunks=_integer(
+            "SEARCH_READER_DOCUMENT_MAX_CHUNKS", 12, 1, 30
         ),
         api_host=_text("SEARCH_READER_API_HOST", "0.0.0.0"),
         api_port=_integer("SEARCH_READER_API_PORT", 8790, 1, 65535),

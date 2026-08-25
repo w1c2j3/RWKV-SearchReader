@@ -56,6 +56,13 @@ class ConversationListRequest(BaseModel):
     limit: int = Field(default=60, ge=1, le=200)
 
 
+class DocumentUploadRequest(BaseModel):
+    client_id: str = Field(min_length=8, max_length=128)
+    conversation_id: str = Field(min_length=8, max_length=128)
+    filename: str = Field(min_length=1, max_length=180)
+    content: str = Field(min_length=1, max_length=10_000_000)
+
+
 app = FastAPI(
     title="RWKV SearchReader",
     version=__version__,
@@ -99,13 +106,28 @@ async def _answer(
             owner,
             legacy_records=session_records(settings.trace_directory, identity, 200),
         )
-        history = store.history(identity, owner, settings.conversation_turns)
+        history = store.history(
+            identity,
+            owner,
+            settings.conversation_turns,
+            query=question,
+        )
+        document_query = " ".join(
+            [*(turn["question"] for turn in history[-2:]), question]
+        )
+        document_passages = store.search_documents(
+            identity,
+            owner,
+            document_query,
+            settings.document_max_chunks,
+        )
         result = await run_in_threadpool(
             _new_pipeline().answer,
             question,
             None,
             identity,
             history,
+            document_passages,
         )
         payload = result.to_dict()
         payload["conversation_id"] = identity
@@ -143,12 +165,27 @@ def _answer_events(
                 owner,
                 legacy_records=session_records(settings.trace_directory, identity, 200),
             )
-            history = store.history(identity, owner, settings.conversation_turns)
+            history = store.history(
+                identity,
+                owner,
+                settings.conversation_turns,
+                query=question,
+            )
+            document_query = " ".join(
+                [*(turn["question"] for turn in history[-2:]), question]
+            )
+            document_passages = store.search_documents(
+                identity,
+                owner,
+                document_query,
+                settings.document_max_chunks,
+            )
             result = _new_pipeline().answer(
                 question,
                 on_progress=progress,
                 session_id=identity,
                 conversation_history=history,
+                document_passages=document_passages,
             )
             payload = result.to_dict()
             payload["conversation_id"] = identity
@@ -187,7 +224,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "version": __version__,
-        "retrieval_mode": "questions-only",
+        "retrieval_mode": "web-or-attached-documents",
         "tool_calling": False,
     }
 
@@ -284,6 +321,37 @@ def get_conversation(request: ConversationAccessRequest) -> dict[str, Any]:
         return _conversation_store().get(request.conversation_id, request.client_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/documents/upload")
+def upload_document(request: DocumentUploadRequest) -> dict[str, Any]:
+    settings = get_settings()
+    store = _conversation_store()
+    try:
+        store.ensure(request.conversation_id, request.client_id)
+        return store.add_document(
+            request.conversation_id,
+            request.client_id,
+            request.filename,
+            request.content,
+            max_bytes=settings.document_max_bytes,
+            chunk_chars=settings.document_chunk_chars,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/v1/documents/list")
+def list_documents(request: ConversationAccessRequest) -> dict[str, Any]:
+    try:
+        documents = _conversation_store().list_documents(
+            request.conversation_id, request.client_id
+        )
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"object": "list", "data": documents}
 
 
 @app.post("/v1/chat/completions")

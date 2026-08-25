@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -8,6 +9,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .documents import (
+    MarkdownPassage,
+    normalize_markdown,
+    rank_markdown_passages,
+    split_markdown,
+)
 
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
@@ -25,6 +33,14 @@ def _identity(value: str, label: str) -> str:
 
 def new_conversation_id() -> str:
     return f"conv_{uuid.uuid4().hex}"
+
+
+def _context_terms(value: str) -> set[str]:
+    text = str(value or "").casefold()
+    terms = set(re.findall(r"[a-z][a-z0-9_.+-]{1,}", text))
+    for segment in re.findall(r"[\u3400-\u9fff]{2,}", text):
+        terms.update(segment[index : index + 2] for index in range(len(segment) - 1))
+    return terms
 
 
 def _answer_payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -88,11 +104,44 @@ class ConversationStore:
                 );
                 CREATE INDEX IF NOT EXISTS messages_conversation_ordinal
                     ON messages(conversation_id, ordinal);
+                CREATE TABLE IF NOT EXISTS documents (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    char_count INTEGER NOT NULL,
+                    chunk_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+                        ON DELETE CASCADE,
+                    UNIQUE(conversation_id, sha256)
+                );
+                CREATE INDEX IF NOT EXISTS documents_conversation_created
+                    ON documents(conversation_id, created_at);
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    heading TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    FOREIGN KEY(document_id) REFERENCES documents(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+                        ON DELETE CASCADE,
+                    UNIQUE(document_id, ordinal)
+                );
+                CREATE INDEX IF NOT EXISTS document_chunks_conversation
+                    ON document_chunks(conversation_id, document_id, ordinal);
                 """
             )
 
     @staticmethod
-    def _conversation(row: sqlite3.Row, message_count: int = 0) -> dict[str, Any]:
+    def _conversation(
+        row: sqlite3.Row, message_count: int = 0, document_count: int = 0
+    ) -> dict[str, Any]:
         return {
             "id": row["id"],
             "object": "conversation",
@@ -100,6 +149,20 @@ class ConversationStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "message_count": message_count,
+            "document_count": document_count,
+        }
+
+    @staticmethod
+    def _document(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "object": "conversation.document",
+            "conversation_id": row["conversation_id"],
+            "filename": row["filename"],
+            "size_bytes": row["size_bytes"],
+            "char_count": row["char_count"],
+            "chunk_count": row["chunk_count"],
+            "created_at": row["created_at"],
         }
 
     @staticmethod
@@ -140,7 +203,11 @@ class ConversationStore:
                     "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
                     (identity,),
                 ).fetchone()[0]
-                return self._conversation(row, count)
+                document_count = connection.execute(
+                    "SELECT COUNT(*) FROM documents WHERE conversation_id = ?",
+                    (identity,),
+                ).fetchone()[0]
+                return self._conversation(row, count, document_count)
 
             timestamp = _now()
             ordered_legacy = list(reversed(legacy_records or []))
@@ -197,7 +264,7 @@ class ConversationStore:
             row = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?", (identity,)
             ).fetchone()
-            return self._conversation(row, ordinal)
+            return self._conversation(row, ordinal, 0)
 
     def append_turn(
         self,
@@ -254,17 +321,27 @@ class ConversationStore:
         owner = _identity(client_id, "client id")
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                """SELECT c.*, COUNT(m.id) AS message_count
+                """SELECT c.*,
+                          (SELECT COUNT(*) FROM messages m
+                           WHERE m.conversation_id = c.id) AS message_count,
+                          (SELECT COUNT(*) FROM documents d
+                           WHERE d.conversation_id = c.id) AS document_count
                    FROM conversations c
-                   LEFT JOIN messages m ON m.conversation_id = c.id
                    WHERE c.client_id = ?
-                   GROUP BY c.id
-                   HAVING COUNT(m.id) > 0
+                     AND ((SELECT COUNT(*) FROM messages m
+                           WHERE m.conversation_id = c.id) > 0
+                          OR (SELECT COUNT(*) FROM documents d
+                              WHERE d.conversation_id = c.id) > 0)
                    ORDER BY c.updated_at DESC
                    LIMIT ?""",
                 (owner, limit),
             ).fetchall()
-            return [self._conversation(row, row["message_count"]) for row in rows]
+            return [
+                self._conversation(
+                    row, row["message_count"], row["document_count"]
+                )
+                for row in rows
+            ]
 
     def get(self, conversation_id: str, client_id: str) -> dict[str, Any]:
         identity = _identity(conversation_id, "conversation id")
@@ -282,10 +359,22 @@ class ConversationStore:
             ).fetchall()
             conversation = self._conversation(row, len(message_rows))
             conversation["items"] = [self._message(item) for item in message_rows]
+            document_rows = connection.execute(
+                "SELECT * FROM documents WHERE conversation_id = ? ORDER BY created_at",
+                (identity,),
+            ).fetchall()
+            conversation["documents"] = [
+                self._document(item) for item in document_rows
+            ]
+            conversation["document_count"] = len(document_rows)
             return conversation
 
     def history(
-        self, conversation_id: str, client_id: str, limit: int = 6
+        self,
+        conversation_id: str,
+        client_id: str,
+        limit: int = 10,
+        query: str = "",
     ) -> list[dict[str, str]]:
         conversation = self.get(conversation_id, client_id)
         turns: list[dict[str, str]] = []
@@ -296,4 +385,144 @@ class ConversationStore:
             elif item["role"] == "assistant" and pending:
                 turns.append({"question": pending, "answer": item["content"]})
                 pending = ""
-        return turns[-limit:]
+        if len(turns) <= limit:
+            return turns
+        recent_count = min(4, limit)
+        recent_start = len(turns) - recent_count
+        selected = set(range(recent_start, len(turns)))
+        query_terms = _context_terms(query)
+        preference_re = re.compile(r"我(?:喜欢|偏好|希望|需要|想要|不要)|我的")
+
+        def score(index: int) -> tuple[float, int]:
+            turn = turns[index]
+            text = f"{turn['question']} {turn['answer']}"
+            terms = _context_terms(text)
+            overlap = len(query_terms & terms) / max(1, len(query_terms))
+            preference = 0.2 if preference_re.search(turn["question"]) else 0.0
+            return (overlap + preference, index)
+
+        older_limit = max(0, limit - recent_count)
+        ranked = sorted(range(recent_start), key=score, reverse=True)
+        selected.update(ranked[:older_limit])
+        return [turn for index, turn in enumerate(turns) if index in selected]
+
+    def add_document(
+        self,
+        conversation_id: str,
+        client_id: str,
+        filename: str,
+        content: str,
+        *,
+        max_bytes: int,
+        chunk_chars: int,
+    ) -> dict[str, Any]:
+        identity = _identity(conversation_id, "conversation id")
+        owner = _identity(client_id, "client id")
+        clean_name, clean_content = normalize_markdown(filename, content)
+        encoded = clean_content.encode("utf-8")
+        if len(encoded) > max_bytes:
+            raise ValueError(f"document exceeds {max_bytes} bytes")
+        chunks = split_markdown(clean_content, chunk_chars)
+        if not chunks:
+            raise ValueError("document has no readable content")
+        digest = hashlib.sha256(encoded).hexdigest()
+        with self._lock, self._connect() as connection:
+            conversation = connection.execute(
+                "SELECT * FROM conversations WHERE id = ? AND client_id = ?",
+                (identity, owner),
+            ).fetchone()
+            if conversation is None:
+                raise PermissionError("conversation is unavailable")
+            existing = connection.execute(
+                "SELECT * FROM documents WHERE conversation_id = ? AND sha256 = ?",
+                (identity, digest),
+            ).fetchone()
+            if existing is not None:
+                return self._document(existing)
+            document_id = f"doc_{uuid.uuid4().hex}"
+            timestamp = _now()
+            connection.execute(
+                """INSERT INTO documents
+                   (id, conversation_id, filename, content, sha256, size_bytes,
+                    char_count, chunk_count, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    document_id,
+                    identity,
+                    clean_name,
+                    clean_content,
+                    digest,
+                    len(encoded),
+                    len(clean_content),
+                    len(chunks),
+                    timestamp,
+                ),
+            )
+            for ordinal, (heading, chunk) in enumerate(chunks):
+                connection.execute(
+                    """INSERT INTO document_chunks
+                       (id, document_id, conversation_id, ordinal, heading, content)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"chunk_{uuid.uuid4().hex}",
+                        document_id,
+                        identity,
+                        ordinal,
+                        heading,
+                        chunk,
+                    ),
+                )
+            title = conversation["title"]
+            if title == "新的对话":
+                title = clean_name[:60]
+            connection.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (title, timestamp, identity),
+            )
+            row = connection.execute(
+                "SELECT * FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            return self._document(row)
+
+    def list_documents(
+        self, conversation_id: str, client_id: str
+    ) -> list[dict[str, Any]]:
+        conversation = self.get(conversation_id, client_id)
+        return conversation["documents"]
+
+    def search_documents(
+        self,
+        conversation_id: str,
+        client_id: str,
+        query: str,
+        limit: int,
+    ) -> list[MarkdownPassage]:
+        identity = _identity(conversation_id, "conversation id")
+        owner = _identity(client_id, "client id")
+        with self._lock, self._connect() as connection:
+            conversation = connection.execute(
+                "SELECT 1 FROM conversations WHERE id = ? AND client_id = ?",
+                (identity, owner),
+            ).fetchone()
+            if conversation is None:
+                raise PermissionError("conversation is unavailable")
+            rows = connection.execute(
+                """SELECT d.id AS document_id, d.filename, c.ordinal,
+                          c.heading, c.content
+                   FROM document_chunks c
+                   JOIN documents d ON d.id = c.document_id
+                   WHERE c.conversation_id = ?
+                   ORDER BY d.created_at, c.ordinal""",
+                (identity,),
+            ).fetchall()
+        passages = [
+            MarkdownPassage(
+                document_id=row["document_id"],
+                filename=row["filename"],
+                ordinal=row["ordinal"],
+                heading=row["heading"],
+                content=row["content"],
+            )
+            for row in rows
+        ]
+        return rank_markdown_passages(query, passages, limit)
