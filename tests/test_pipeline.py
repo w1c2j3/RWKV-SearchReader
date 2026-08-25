@@ -18,6 +18,7 @@ from rwkv_search_reader.pipeline import (
     SearchReaderPipeline,
     _conversation_reply,
     _history_only_request,
+    _rechecks_supported_fact,
 )
 from rwkv_search_reader.tracing import append_trace, recent_traces
 
@@ -164,6 +165,51 @@ def test_history_only_request_is_conservative() -> None:
     assert _history_only_request("整理前面对话的要点")
     assert not _history_only_request("总结本周科技新闻")
     assert not _history_only_request("前面提到的品牌分别是什么？")
+
+
+def test_audit_stop_guard_rejects_answer_seeded_confirmation_search() -> None:
+    evidence = [
+        Evidence(
+            source_id="S1",
+            title="Source 1",
+            url="https://example.com/1",
+            claim="Python 3.14 于 2025 年 10 月 7 日发布。",
+            quote="Material 1",
+        ),
+        Evidence(
+            source_id="S2",
+            title="Source 2",
+            url="https://example.com/2",
+            claim="正式发布日期是 2025-10-07。",
+            quote="Material 2",
+        ),
+    ]
+
+    assert _rechecks_supported_fact(
+        "Python 3.14 正式发布日期 2025年10月7日 官方确认",
+        "Python 3.14 正式发布于什么时候？",
+        evidence,
+    )
+    assert _rechecks_supported_fact(
+        "Python 3.14 正式发布日期 2025-10-07",
+        "Python 3.14 正式发布于什么时候？",
+        evidence,
+    )
+    assert not _rechecks_supported_fact(
+        "Python 3.14 正式发布日期 官方确认",
+        "请给出 Python 3.14 正式发布日期的官方来源",
+        evidence,
+    )
+    assert not _rechecks_supported_fact(
+        "Python 3.14 正式发布日期 2025年10月7日 官方确认",
+        "Python 3.14 正式发布于什么时候？",
+        evidence[:1],
+    )
+    assert not _rechecks_supported_fact(
+        "Python 3.14 2025年10月7日的发行价格",
+        "Python 3.14 什么时候发布，发行价格是多少？",
+        evidence,
+    )
 
 
 def test_pipeline_summarizes_conversation_without_search(tmp_path) -> None:

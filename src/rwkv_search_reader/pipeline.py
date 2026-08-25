@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable
 
 from .config import Settings, get_settings
@@ -37,6 +38,41 @@ _EXPLICIT_WEB_RE = re.compile(
     r"(?:搜索|检索|查找)(?:一下|网络|网页|外部)|结合(?:网络|网页|外部资料)|"
     r"最新|今天|本周|近期"
 )
+_CONFIRMATION_RE = re.compile(r"官方|权威|确认|核实|验证|公告|出处|来源")
+_DATE_FACT_RE = re.compile(
+    r"(?<!\d)(\d{4})(?:年|[-/.])(\d{1,2})(?:月|[-/.])(\d{1,2})(?:日)?(?!\d)"
+)
+_QUANTITY_FACT_RE = re.compile(
+    r"(?<![\d.])(\d+(?:\.\d+)?)(%|％|亿元|万元|万股|万|亿|元/股|元|美元|"
+    r"人民币|人|家|项|个)(?![\w])"
+)
+_GAP_NOISE_PHRASES = (
+    "正式发布日期",
+    "发布日期",
+    "发布时间",
+    "官方确认",
+    "权威确认",
+    "再次验证",
+    "更多来源",
+    "什么时候",
+    "什么时间",
+    "是多少",
+    "有多少",
+    "为什么",
+    "怎么样",
+    "官方",
+    "权威",
+    "确认",
+    "核实",
+    "验证",
+    "公告",
+    "出处",
+    "来源",
+    "日期",
+    "时间",
+    "最新",
+    "当前",
+)
 
 
 def _history_only_request(question: str) -> bool:
@@ -48,6 +84,57 @@ def _history_only_request(question: str) -> bool:
         and _HISTORY_REFERENCE_RE.search(text)
         and _HISTORY_SUMMARY_RE.search(text)
     )
+
+
+def _fact_atoms(text: str) -> set[str]:
+    """Return stable date and quantity atoms used by the retrieval stop guard."""
+
+    compact = re.sub(r"\s+", "", str(text or ""))
+    atoms = {
+        f"date:{int(year)}-{int(month)}-{int(day)}"
+        for year, month, day in _DATE_FACT_RE.findall(compact)
+    }
+    atoms.update(
+        f"quantity:{number}:{unit.replace('％', '%')}"
+        for number, unit in _QUANTITY_FACT_RE.findall(compact)
+    )
+    return atoms
+
+
+def _rechecks_supported_fact(
+    query: str,
+    question: str,
+    evidence: list[object],
+) -> bool:
+    """Reject answer-seeded confirmation searches after independent agreement."""
+
+    if _CONFIRMATION_RE.search(question):
+        return False
+    counts: Counter[str] = Counter()
+    for item in evidence:
+        counts.update(_fact_atoms(str(getattr(item, "claim", ""))))
+    supported = {atom for atom, count in counts.items() if count >= 2}
+    new_query_facts = _fact_atoms(query) - _fact_atoms(question)
+    if not (supported & new_query_facts):
+        return False
+    if _CONFIRMATION_RE.search(query):
+        return True
+
+    reduced = str(query or "").casefold()
+    reduced = _DATE_FACT_RE.sub(" ", reduced)
+    reduced = _QUANTITY_FACT_RE.sub(" ", reduced)
+    for phrase in _GAP_NOISE_PHRASES:
+        reduced = reduced.replace(phrase, " ")
+    terms = set(re.findall(r"[a-z][a-z0-9_.+-]{1,}", reduced))
+    for segment in re.findall(r"[\u3400-\u9fff]{2,}", reduced):
+        terms.add(segment)
+        terms.update(
+            segment[index : index + 2] for index in range(len(segment) - 1)
+        )
+    evidence_text = "\n".join(
+        str(getattr(item, "claim", "")).casefold() for item in evidence
+    )
+    return bool(terms) and all(term in evidence_text for term in terms)
 
 
 def _document_sources(
@@ -382,9 +469,26 @@ class SearchReaderPipeline:
                     break
 
                 tried = {query.casefold() for query in queries}
-                supplemental_queries = [
+                candidate_queries = [
                     query for query in audit.queries if query.casefold() not in tried
                 ]
+                supplemental_queries = [
+                    query
+                    for query in candidate_queries
+                    if not _rechecks_supported_fact(
+                        query, effective_question, evidence
+                    )
+                ]
+                if candidate_queries and not supplemental_queries:
+                    emit(
+                        "audit_completed",
+                        {
+                            "round": review_index + 1,
+                            "sufficient": True,
+                            "message": "关键答案已有多份材料支持，停止重复查找",
+                        },
+                    )
+                    break
                 emit(
                     "audit_completed",
                     {

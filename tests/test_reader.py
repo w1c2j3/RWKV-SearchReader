@@ -153,6 +153,43 @@ def test_audit_output_is_either_enough_or_targeted_search_queries() -> None:
     ]
 
 
+def test_audit_prompt_stops_rechecking_an_already_supported_answer() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "ENOUGH"
+
+    reader._complete = complete
+    audit = reader.audit(
+        "Python 3.14 正式发布于什么时候？",
+        [
+            Evidence(
+                source_id="S1",
+                title="Source 1",
+                url="https://example.com/1",
+                claim="Python 3.14 于 2025 年 10 月 7 日发布。",
+                quote="Material 1",
+            ),
+            Evidence(
+                source_id="S2",
+                title="Source 2",
+                url="https://example.com/2",
+                claim="Python 3.14 正式发布日期为 2025 年 10 月 7 日。",
+                quote="Material 2",
+            ),
+        ],
+        ["Python 3.14 正式发布于什么时候？"],
+    )
+
+    assert audit.sufficient is True
+    assert "若至少两份相互独立的材料已经明确给出一致的关键答案" in captured["user"]
+    assert "不得仅为了“官方确认”“再次验证”“更多来源”" in captured["user"]
+    assert "不得把现有材料已经给出的日期、数字或实体答案重新拼进检索词" in captured["user"]
+
+
 def test_contextualizer_puts_history_before_current_message_and_instruction() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
