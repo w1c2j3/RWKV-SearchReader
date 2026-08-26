@@ -351,6 +351,12 @@ def _clean_final_answer(value: str) -> str:
         text,
     )
     text = re.sub(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:材料)?来源(?:\*\*)?\s*[:：]"
+        r"(?:[、，,;；\s]*(?:\[\s*S\d+\s*\])*)*$",
+        "",
+        text,
+    )
+    text = re.sub(
         r"\[\s*s(\d+)\s*\]",
         lambda match: f"[S{match.group(1)}]",
         text,
@@ -361,7 +367,80 @@ def _clean_final_answer(value: str) -> str:
         r" \2\1",
         text,
     )
-    return text.strip()
+    return _deduplicate_final_output(text).strip()
+
+
+def _deduplicate_final_output(value: str) -> str:
+    """Remove exact generation loops without rewriting the model's answer."""
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    in_code = False
+    raw_lines = str(value or "").splitlines()
+    last_content = max(
+        (index for index, line in enumerate(raw_lines) if line.strip()), default=-1
+    )
+    for index, raw_line in enumerate(raw_lines):
+        line = raw_line.rstrip()
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+            lines.append(line)
+            continue
+        if in_code:
+            lines.append(line)
+            continue
+
+        line = _deduplicate_delimited_fragments(line)
+        plain = re.sub(r"\[S\d+\]", "", line, flags=re.IGNORECASE)
+        plain = re.sub(r"^\s*(?:[-*+]\s+|\d{1,3}[.)、]\s*)", "", plain)
+        normalized = _normalized_text(plain)
+        if normalized and (
+            normalized in seen
+            or (
+                index == last_content
+                and len(normalized) >= 6
+                and any(previous.startswith(normalized) for previous in seen)
+            )
+        ):
+            continue
+        if normalized:
+            seen.add(normalized)
+        if index == last_content and _has_unbalanced_delimiters(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _deduplicate_delimited_fragments(line: str) -> str:
+    """Collapse a repeated comma-delimited list emitted on a single line."""
+
+    if line.count("、") < 3:
+        return line
+    fragments = line.split("、")
+    unique: list[str] = []
+    seen: set[str] = set()
+    for fragment in fragments:
+        if _has_unbalanced_delimiters(fragment):
+            continue
+        plain = re.sub(r"\[S\d+\]", "", fragment, flags=re.IGNORECASE)
+        normalized = _normalized_text(plain)
+        if normalized and normalized in seen:
+            continue
+        if normalized:
+            seen.add(normalized)
+        unique.append(fragment)
+    return "、".join(unique)
+
+
+def _has_unbalanced_delimiters(value: str) -> bool:
+    """Drop only visibly truncated list tails produced at the token boundary."""
+
+    text = re.sub(r"\[S\d+\]", "", value, flags=re.IGNORECASE)
+    return (
+        text.count("（") != text.count("）")
+        or text.count("(") != text.count(")")
+        or text.count("**") % 2 != 0
+    )
 
 
 def _clean_standalone_question(value: str, fallback: str) -> str:
@@ -520,6 +599,14 @@ def _attach_missing_citations(answer: str, evidence: list[Evidence]) -> str:
 
     if not answer or not evidence:
         return answer
+    segments = re.split(r"(```[\s\S]*?```)", answer)
+    if len(segments) > 1:
+        return "".join(
+            re.sub(r"\s*\[S\d+\]", "", segment, flags=re.IGNORECASE)
+            if segment.lstrip().startswith("```")
+            else _attach_missing_citations(segment, evidence)
+            for segment in segments
+        )
     allowed = {item.source_id for item in evidence}
     parts = re.split(r"([。！？!?；;\n]+)", answer)
     for index in range(0, len(parts), 2):
@@ -585,6 +672,27 @@ def _attach_missing_citations(answer: str, evidence: list[Evidence]) -> str:
             citations = "".join(f"[{source_id}]" for source_id in source_ids)
             parts[index] = f"{plain_clause.rstrip()} {citations}"
     return "".join(parts)
+
+
+def _context_retry_tokens(error: str, requested: int) -> int | None:
+    """Recover when a compatible endpoint rejects input + requested output."""
+
+    match = re.search(
+        r"maximum context length is\s+(\d+).*?requested\s+(\d+)\s+output tokens"
+        r".*?at least\s+(\d+)\s+input tokens",
+        str(error or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+    context_tokens = int(match.group(1))
+    input_tokens = int(match.group(3))
+    available = context_tokens - input_tokens - 256
+    conservative = requested // 2
+    retry = min(available, conservative)
+    if retry < 128 or retry >= requested:
+        return None
+    return retry
 
 
 class RWKVReader:
@@ -1363,17 +1471,31 @@ class RWKVReader:
         user = f"""{reduced_material}
 
 问题：{question}
-根据以上材料回答问题，合并重复内容；材料不足就说明。事实后只用 [S1] 格式标注来源。{scope_note}"""
+根据以上材料直接回答问题，只回答所问内容，合并重复内容，不推断材料没有的信息；材料不足就说明。事实后只用 [S1] 格式标注来源。{scope_note}"""
         if on_progress:
             on_progress(
                 "finalizing",
                 {"source_count": len(ordered), "group_count": group_count},
             )
-        output = self._complete(
-            user,
-            max_tokens=self.settings.rwkv_max_tokens,
-            stage="finalize",
-        )
+        requested_tokens = self.settings.rwkv_max_tokens
+        output_tokens = requested_tokens
+        for attempt in range(4):
+            try:
+                output = self._complete(
+                    user,
+                    max_tokens=output_tokens,
+                    stage="finalize",
+                )
+                break
+            except SearchReaderError as exc:
+                retry_tokens = _context_retry_tokens(str(exc), output_tokens)
+                if retry_tokens is None or attempt == 3:
+                    raise
+                output_tokens = retry_tokens
+        if output_tokens != requested_tokens:
+            reduction_warnings.append(
+                f"final output budget reduced to {output_tokens} tokens to fit context"
+            )
         answer = _clean_final_answer(output)
         if not answer:
             raise SearchReaderError("read", "RWKV returned an empty final answer")

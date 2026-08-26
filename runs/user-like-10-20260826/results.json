@@ -1,0 +1,40 @@
+{
+  "schema_version": "rwkv-search-reader.user-like-eval.v1",
+  "run_name": "user-like-10-20260826",
+  "tested_at": "2026-08-26T12:24:00+08:00",
+  "dataset": "evals/user_like_10_20260826.json",
+  "model": "rwkv7-g1i-13.3b-20260805-ctx16384",
+  "summary_max_tokens": 1024,
+  "answer_max_tokens": 4090,
+  "outer_workers": 2,
+  "cases": [
+    {"case_id":"U01","request_id":"00a2ebcebedf4d97a4b54e111b29f662","status":"ok","elapsed_seconds":0.0,"model_calls":0,"summary_calls":0,"material_sources":0,"answer_chars":18,"quality":"pass","finding":"寒暄直接回答，没有检索或 RWKV 调用。"},
+    {"case_id":"U02","request_id":"f91f2636764c48fe87f40da5dac30a20","status":"ok","elapsed_seconds":168.249,"model_calls":23,"summary_calls":15,"material_sources":15,"answer_chars":4824,"quality":"fail","finding":"回答进入人物列表重复循环，且上线日期与材料中的官方更新日期存在明显冲突。"},
+    {"case_id":"U03","request_id":"831474930b8d4dd88e9a77d4c0e54820","status":"ok","elapsed_seconds":137.488,"model_calls":15,"summary_calls":10,"material_sources":10,"answer_chars":5520,"quality":"fail","finding":"公开集合范围与版本信息不可靠，并出现重复对象循环。"},
+    {"case_id":"U04","request_id":"9bf1de4e573e4534aef624736e6da281","status":"ok","elapsed_seconds":77.676,"model_calls":26,"summary_calls":18,"material_sources":18,"answer_chars":85,"quality":"pass","finding":"日期、发行价、首日开盘价和收盘价各回答一次，结构与证据绑定清楚。"},
+    {"case_id":"U05","request_id":"77615b57575a4fbfb118b9b9235e3ecc","status":"ok","elapsed_seconds":156.904,"model_calls":16,"summary_calls":10,"material_sources":10,"answer_chars":4785,"quality":"fail","finding":"混入趋势预测与非最近一周事件，并在后半段重复同一条目。"},
+    {"case_id":"U06","request_id":"9004ed6873d04828b12de2493e30a193","status":"error","elapsed_seconds":112.919,"model_calls":32,"summary_calls":25,"material_sources":20,"answer_chars":0,"quality":"fail","finding":"首轮 final 输入加固定 4090 输出预算超过 16384 context，返回 502。"},
+    {"case_id":"U07","request_id":"d1103cfaa08249c6bc48436ee39da59b","status":"ok","elapsed_seconds":55.232,"model_calls":22,"summary_calls":16,"material_sources":16,"answer_chars":85,"quality":"fail","finding":"把 2026 年 8 月推断为发布日期，且最终答案没有来源编号。"},
+    {"case_id":"U08","request_id":"5f4c373fe9894723bd256582682bfda1","status":"ok","elapsed_seconds":45.075,"model_calls":15,"summary_calls":10,"material_sources":10,"answer_chars":557,"quality":"partial","finding":"示例和字段说明可用，但引用被插入代码块，并生成空来源栏。"},
+    {"case_id":"U09","request_id":"61f0eb500bce47b3b625f774d24c077f","status":"ok","elapsed_seconds":148.251,"model_calls":22,"summary_calls":15,"material_sources":15,"answer_chars":6963,"quality":"fail","finding":"主要变化列表在新增代理人部分进入重复循环。"},
+    {"case_id":"U10","request_id":"961bd28f3c0642d3820cca6fbd1aa8d9","status":"error","elapsed_seconds":96.049,"model_calls":27,"summary_calls":20,"material_sources":20,"answer_chars":0,"quality":"fail","finding":"多轮指代成功改写为《绝区零》下一个版本，但 final 超过 16384 context 返回 502。"}
+  ],
+  "first_run_totals": {
+    "http_ok": 8,
+    "http_error": 2,
+    "quality_pass": 2,
+    "quality_partial": 1,
+    "quality_fail": 7,
+    "model_calls": 198,
+    "summary_calls": 139,
+    "degraded_page_summaries": 29,
+    "material_sources": 134,
+    "latency_seconds_mean": 99.784,
+    "latency_seconds_median": 104.484,
+    "latency_seconds_max": 168.249
+  },
+  "focused_retries": [
+    {"case_id":"U06","request_id":"c7fe4bbff32a4097b746098b88ec2a4c","status":"ok","elapsed_seconds":112.466,"material_sources":20,"answer_chars":83,"quality":"pass","finding":"修复后正确识别 2026-08-21 19:30 的「雪淞幽梦」版本前瞻。"},
+    {"case_id":"U10","request_id":"05baea870d0e4944b988b5720bf16a65","status":"ok","elapsed_seconds":89.169,"material_sources":20,"answer_chars":64,"quality":"fail","finding":"502 已修复且对象继承正确，但错误地把旧 2.7 版本当作当前 3.1 的下一版本。"}
+  ]
+}

@@ -12,12 +12,14 @@ from rwkv_search_reader.models import (
     Evidence,
     FieldEvidenceSelection,
     SearchHit,
+    SearchReaderError,
 )
 from rwkv_search_reader.reader import (
     RWKVReader,
     _attach_missing_citations,
     _bind_subject_citations,
     _clean_final_answer,
+    _context_retry_tokens,
     _eligible_evidence,
     _final_evidence_order,
     _is_explicit_benefit_fact,
@@ -235,6 +237,80 @@ def test_final_answer_removes_runaway_material_number_line() -> None:
     value = "《绝区零》为3.1版本 [S1]。\n- 版本信息来源于材料1、2、3、4、5、6"
 
     assert _clean_final_answer(value) == "《绝区零》为3.1版本 [S1]。"
+
+
+def test_final_answer_removes_repeated_list_generation_and_empty_source_footer() -> (
+    None
+):
+    value = """最近动态：
+1. 机器人产业正在落地 [S1]。
+2. 新型抽血机器人获批 [S2]。
+3. 机器人产业正在落地 [S3]。
+4. 机器人产业正在落地 [S1][S3]。
+**来源**：、、、、 [S1][S2][S3]"""
+
+    assert _clean_final_answer(value) == (
+        "最近动态：\n"
+        "1. 机器人产业正在落地 [S1]。\n"
+        "2. 新型抽血机器人获批 [S2]。"
+    )
+
+
+def test_final_answer_deduplicates_single_line_delimited_generation() -> None:
+    value = (
+        "- 新增代理人 **维琳娜**（风·异常）、**诺姆**（火·击破）、"
+        "**维琳娜**（风·异常）、**诺姆**（火·击破）、**维琳娜**（风·异常）"
+    )
+
+    assert _clean_final_answer(value) == (
+        "- 新增代理人 **维琳娜**（风·异常）、**诺姆**（火·击破）、"
+        "**维琳娜**（风·异常）"
+    )
+
+
+def test_context_retry_budget_reserves_space_below_model_limit() -> None:
+    error = (
+        "maximum context length is 16384 tokens. However, you requested 4090 "
+        "output tokens and your prompt contains at least 12295 input tokens"
+    )
+
+    assert _context_retry_tokens(error, 4090) == 2045
+
+
+def test_final_reader_retries_with_smaller_output_budget_on_context_rejection() -> (
+    None
+):
+    reader = RWKVReader(replace(Settings(), rwkv_model="test", rwkv_max_tokens=4090))
+    requested: list[int] = []
+
+    def complete(user, *, max_tokens, stage):
+        del user, stage
+        requested.append(max_tokens)
+        if len(requested) == 1:
+            raise SearchReaderError(
+                "finalize",
+                "maximum context length is 16384 tokens; requested 4090 output "
+                "tokens; prompt contains at least 12295 input tokens",
+            )
+        return "可用答案 [S1]"
+
+    reader._complete = complete
+    answer, warnings = reader.finalize("问题", _evidence(1))
+
+    assert requested == [4090, 2045]
+    assert answer == "可用答案 [S1]"
+    assert warnings == ["final output budget reduced to 2045 tokens to fit context"]
+
+
+def test_missing_citation_binding_does_not_modify_fenced_code() -> None:
+    rows = _evidence(1)
+    rows[0].claim = "healthcheck test uses curl"
+    answer = "示例：\n```yaml [S1]\ntest: curl [S1]\n```\n`test` 执行检查。"
+
+    bound = _attach_missing_citations(answer, rows)
+
+    assert "```yaml\ntest: curl\n```" in bound
+    assert bound.endswith("`test` 执行检查 [S1]。")
 
 
 def test_selected_fact_is_narrowed_to_the_requested_field() -> None:

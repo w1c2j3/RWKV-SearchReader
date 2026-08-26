@@ -1,0 +1,70 @@
+{
+  "name": "user-like-10-20260826",
+  "description": "Ten representative questions based on the product's real failure modes. Cases U09 and U10 must run in order in the same conversation.",
+  "cases": [
+    {
+      "case_id": "U01",
+      "category": "smalltalk-no-search",
+      "query": "你好",
+      "expectation": "Direct reply without Tavily or RWKV calls."
+    },
+    {
+      "case_id": "U02",
+      "category": "current-game-version",
+      "query": "《绝区零》正式服当前是哪个版本？请给出版本号、版本名称、上线日期，并概括这个版本的主题。",
+      "expectation": "Resolve the currently live version, distinguish previews from the live release, and cite the supporting sources."
+    },
+    {
+      "case_id": "U03",
+      "category": "broad-entity-discovery",
+      "query": "现在主要二次元游戏各自是什么版本？每个版本的主题是什么？",
+      "expectation": "Choose a representative set explicitly, cover multiple games, and avoid answering only one title."
+    },
+    {
+      "case_id": "U04",
+      "category": "timeline-deduplication",
+      "query": "宇树科技什么时候上市？发行价、上市首日开盘价和收盘价分别是多少？",
+      "expectation": "Answer the requested timeline and prices once each, reconcile conflicts, and avoid repeating the same event."
+    },
+    {
+      "case_id": "U05",
+      "category": "recent-news-synthesis",
+      "query": "最近一周最值得关注的人工智能与机器人科技动态有哪些？",
+      "expectation": "Synthesize a useful cross-source overview without a canned repeated opening or duplicated events."
+    },
+    {
+      "case_id": "U06",
+      "category": "event-disambiguation",
+      "query": "《明日方舟：终末地》最近一次前瞻直播是什么时候？这是哪个版本或活动的前瞻？",
+      "expectation": "Identify the latest relevant broadcast and state what it previewed, without mixing similarly named events."
+    },
+    {
+      "case_id": "U07",
+      "category": "current-software-release",
+      "query": "Python 最新稳定版的完整版本号和发布日期是什么？",
+      "expectation": "Use authoritative current release information and distinguish stable from preview builds."
+    },
+    {
+      "case_id": "U08",
+      "category": "official-procedure",
+      "query": "Docker Compose 里怎样给服务配置 healthcheck？给一个最小可用示例，并说明关键字段。",
+      "expectation": "Provide a concise valid example and explain the fields from documentation rather than returning a news-style summary."
+    },
+    {
+      "case_id": "U09",
+      "category": "multi-turn-anchor",
+      "conversation": "follow-up-game-version",
+      "turn": 1,
+      "query": "《绝区零》当前版本发生了哪些主要变化？",
+      "expectation": "Establish the current title and version as conversation context."
+    },
+    {
+      "case_id": "U10",
+      "category": "multi-turn-follow-up",
+      "conversation": "follow-up-game-version",
+      "turn": 2,
+      "query": "那下一个版本呢？什么时候更新，主题是什么？",
+      "expectation": "Resolve pronouns from U09, search for the next version, and not fall back to unrelated history."
+    }
+  ]
+}
