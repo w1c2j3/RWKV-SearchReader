@@ -3,11 +3,14 @@ from __future__ import annotations
 import ipaddress
 import json
 import queue
+import socket
 import threading
 import time
 import uuid
+from collections import defaultdict, deque
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import urlparse
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -69,6 +72,13 @@ app = FastAPI(
     description="Deterministic small-talk bypass plus retrieve-then-read answers.",
 )
 
+_STORE_GUARD = threading.Lock()
+_STORES: dict[str, ConversationStore] = {}
+_REQUEST_CONDITION = threading.Condition()
+_ACTIVE_REQUESTS = 0
+_RATE_GUARD = threading.Lock()
+_RATE_WINDOWS: dict[str, deque[float]] = defaultdict(deque)
+
 
 def _new_pipeline() -> SearchReaderPipeline:
     return SearchReaderPipeline(get_settings())
@@ -76,13 +86,70 @@ def _new_pipeline() -> SearchReaderPipeline:
 
 def _conversation_store() -> ConversationStore:
     settings = get_settings()
-    return ConversationStore(settings.trace_directory / "conversations.sqlite3")
+    path = (settings.trace_directory / "conversations.sqlite3").resolve()
+    key = str(path)
+    with _STORE_GUARD:
+        store = _STORES.get(key)
+        if store is None:
+            store = ConversationStore(path)
+            _STORES[key] = store
+        return store
+
+
+def _request_identity(request: Request) -> str:
+    forwarded = str(request.headers.get("cf-connecting-ip") or "").strip()
+    return forwarded or (request.client.host if request.client else "unknown")
+
+
+def _enforce_rate_limit(request: Request) -> None:
+    settings = get_settings()
+    identity = _request_identity(request)
+    now = time.monotonic()
+    with _RATE_GUARD:
+        window = _RATE_WINDOWS[identity]
+        while window and now - window[0] >= 60:
+            window.popleft()
+        if len(window) >= settings.api_rate_limit_per_minute:
+            raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+        window.append(now)
+
+
+def _acquire_request_slot(limit: int, timeout: int) -> bool:
+    global _ACTIVE_REQUESTS
+    deadline = time.monotonic() + timeout
+    with _REQUEST_CONDITION:
+        while _ACTIVE_REQUESTS >= limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _REQUEST_CONDITION.wait(timeout=remaining)
+        _ACTIVE_REQUESTS += 1
+        return True
+
+
+def _release_request_slot() -> None:
+    global _ACTIVE_REQUESTS
+    with _REQUEST_CONDITION:
+        _ACTIVE_REQUESTS = max(0, _ACTIVE_REQUESTS - 1)
+        _REQUEST_CONDITION.notify()
+
+
+def _endpoint_reachable(base_url: str, timeout: float = 0.6) -> bool:
+    parsed = urlparse(str(base_url or ""))
+    if not parsed.hostname:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 async def _answer(
     question: str,
     session_id: str = "",
-    conversation_history: list[dict[str, str]] | None = None,
+    conversation_history: list[dict[str, Any]] | None = None,
     conversation_id: str = "",
     client_id: str = "",
 ) -> dict[str, Any]:
@@ -148,10 +215,14 @@ def _answer_events(
     session_id: str = "",
     conversation_id: str = "",
     client_id: str = "",
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[str]:
     events: queue.Queue[dict[str, Any]] = queue.Queue()
+    cancelled = cancel_event or threading.Event()
 
     def progress(stage: str, detail: dict[str, object]) -> None:
+        if cancelled.is_set():
+            raise SearchReaderError("cancelled", "request was cancelled")
         events.put({"type": "progress", "stage": stage, "detail": detail})
 
     def work() -> None:
@@ -189,6 +260,8 @@ def _answer_events(
             )
             payload = result.to_dict()
             payload["conversation_id"] = identity
+            if cancelled.is_set():
+                return
             store.append_turn(identity, owner, question, payload)
             events.put({"type": "result", "result": payload})
         except SearchReaderError as exc:
@@ -207,11 +280,19 @@ def _answer_events(
             )
 
     threading.Thread(target=work, daemon=True).start()
-    while True:
-        event = events.get()
-        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        if event["type"] in {"result", "error"}:
-            break
+    try:
+        while True:
+            try:
+                event = events.get(timeout=1.0)
+            except queue.Empty:
+                yield ": keep-alive\n\n"
+                continue
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if event["type"] in {"result", "error"}:
+                break
+    finally:
+        cancelled.set()
+        _release_request_slot()
 
 
 @app.get("/", include_in_schema=False)
@@ -231,27 +312,60 @@ def health() -> dict[str, Any]:
 
 @app.get("/readyz")
 def readiness() -> dict[str, Any]:
-    return get_settings().readiness()
+    settings = get_settings()
+    payload = settings.readiness()
+    reader_reachable = _endpoint_reachable(settings.rwkv_base_url)
+    final_reachable = (
+        reader_reachable
+        if settings.final_base_url == settings.rwkv_base_url
+        else _endpoint_reachable(settings.final_base_url)
+    )
+    payload["reader_model_reachable"] = reader_reachable
+    payload["final_model_reachable"] = final_reachable
+    payload["ready"] = bool(payload["ready"] and reader_reachable and final_reachable)
+    return payload
 
 
 @app.post("/v1/answer")
-async def answer(request: AnswerRequest) -> dict[str, Any]:
-    return await _answer(
-        request.question,
-        request.session_id,
-        conversation_id=request.conversation_id,
-        client_id=request.client_id,
+async def answer(payload: AnswerRequest, request: Request) -> dict[str, Any]:
+    _enforce_rate_limit(request)
+    settings = get_settings()
+    acquired = await run_in_threadpool(
+        _acquire_request_slot,
+        settings.api_max_concurrent_requests,
+        settings.api_queue_timeout_seconds,
     )
+    if not acquired:
+        raise HTTPException(status_code=503, detail="当前请求较多，请稍后再试")
+    try:
+        return await _answer(
+            payload.question,
+            payload.session_id,
+            conversation_id=payload.conversation_id,
+            client_id=payload.client_id,
+        )
+    finally:
+        _release_request_slot()
 
 
 @app.post("/v1/answer/stream")
-async def answer_stream(request: AnswerRequest) -> StreamingResponse:
+async def answer_stream(payload: AnswerRequest, request: Request) -> StreamingResponse:
+    _enforce_rate_limit(request)
+    settings = get_settings()
+    acquired = await run_in_threadpool(
+        _acquire_request_slot,
+        settings.api_max_concurrent_requests,
+        settings.api_queue_timeout_seconds,
+    )
+    if not acquired:
+        raise HTTPException(status_code=503, detail="当前请求较多，请稍后再试")
     return StreamingResponse(
         _answer_events(
-            request.question,
-            request.session_id,
-            request.conversation_id,
-            request.client_id,
+            payload.question,
+            payload.session_id,
+            payload.conversation_id,
+            payload.client_id,
+            threading.Event(),
         ),
         media_type="text/event-stream",
         headers={
@@ -281,12 +395,19 @@ def history(
 
 
 @app.post("/v1/session/history")
-def session_history(request: SessionHistoryRequest) -> dict[str, Any]:
+def session_history(payload: SessionHistoryRequest, request: Request) -> dict[str, Any]:
+    host = request.client.host if request.client else ""
+    try:
+        is_local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_local = host.casefold() == "localhost"
+    if not is_local:
+        raise HTTPException(status_code=403, detail="session history is local only")
     settings = get_settings()
     return {
-        "session_id": request.session_id,
+        "session_id": payload.session_id,
         "records": session_records(
-            settings.trace_directory, request.session_id, request.limit
+            settings.trace_directory, payload.session_id, payload.limit
         ),
     }
 
@@ -355,17 +476,20 @@ def list_documents(request: ConversationAccessRequest) -> dict[str, Any]:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest) -> dict[str, Any]:
-    if request.stream:
+async def chat_completions(
+    payload: ChatCompletionRequest, request: Request
+) -> dict[str, Any]:
+    _enforce_rate_limit(request)
+    if payload.stream:
         raise HTTPException(
             status_code=400, detail="streaming is not implemented in v0.1"
         )
     user_indexes = [
         index
-        for index, message in enumerate(request.messages)
+        for index, message in enumerate(payload.messages)
         if message.role.casefold() == "user" and message.content.strip()
     ]
-    question = request.messages[user_indexes[-1]].content if user_indexes else ""
+    question = payload.messages[user_indexes[-1]].content if user_indexes else ""
     if not question:
         raise HTTPException(
             status_code=422, detail="a non-empty user message is required"
@@ -376,7 +500,7 @@ async def chat_completions(request: ChatCompletionRequest) -> dict[str, Any]:
         answer = next(
             (
                 message.content.strip()
-                for message in request.messages[user_index + 1 : next_user_index]
+                for message in payload.messages[user_index + 1 : next_user_index]
                 if message.role.casefold() == "assistant" and message.content.strip()
             ),
             "",
@@ -384,17 +508,28 @@ async def chat_completions(request: ChatCompletionRequest) -> dict[str, Any]:
         if answer:
             history.append(
                 {
-                    "question": request.messages[user_index].content.strip(),
+                    "question": payload.messages[user_index].content.strip(),
                     "answer": answer,
                 }
             )
-    result = await _answer(question, conversation_history=history)
+    settings = get_settings()
+    acquired = await run_in_threadpool(
+        _acquire_request_slot,
+        settings.api_max_concurrent_requests,
+        settings.api_queue_timeout_seconds,
+    )
+    if not acquired:
+        raise HTTPException(status_code=503, detail="当前请求较多，请稍后再试")
+    try:
+        result = await _answer(question, conversation_history=history)
+    finally:
+        _release_request_slot()
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     return {
         "id": completion_id,
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": request.model or get_settings().rwkv_model,
+        "model": payload.model or get_settings().rwkv_model,
         "choices": [
             {
                 "index": 0,

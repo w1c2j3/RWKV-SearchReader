@@ -3,11 +3,38 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 _LOCK = threading.Lock()
+
+
+def _prune_trace_files(
+    directory: Path,
+    current: Path,
+    *,
+    retention_days: int,
+    max_total_bytes: int,
+) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))
+    files = sorted(directory.glob("runs-*.jsonl"), key=lambda item: item.stat().st_mtime)
+    for path in list(files):
+        if path == current:
+            continue
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        if modified < cutoff:
+            path.unlink(missing_ok=True)
+            files.remove(path)
+    total = sum(path.stat().st_size for path in files if path.exists())
+    for path in files:
+        if total <= max_total_bytes:
+            break
+        if path == current or not path.exists():
+            continue
+        size = path.stat().st_size
+        path.unlink(missing_ok=True)
+        total -= size
 
 
 def _compact_trace(row: dict[str, Any]) -> dict[str, Any]:
@@ -33,6 +60,7 @@ def _compact_trace(row: dict[str, Any]) -> dict[str, Any]:
         "degraded": bool(row.get("degraded")),
         "warnings": row.get("warnings") or [],
         "error": row.get("error"),
+        "conversation_state": row.get("conversation_state") or {},
     }
 
 
@@ -48,6 +76,15 @@ def append_trace(directory: Path, payload: dict[str, Any]) -> Path:
         handle.write(line)
         handle.flush()
         os.fsync(handle.fileno())
+        configuration = payload.get("configuration") or {}
+        _prune_trace_files(
+            directory,
+            path,
+            retention_days=int(configuration.get("trace_retention_days") or 30),
+            max_total_bytes=int(
+                configuration.get("trace_max_total_bytes") or 1_000_000_000
+            ),
+        )
     return path
 
 
@@ -109,13 +146,13 @@ def session_records(
 
 def session_turns(
     directory: Path, session_id: str, limit: int = 6
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Return prior successful turns for one opaque browser session, oldest first."""
 
     identity = str(session_id or "").strip()
     if not identity:
         return []
-    turns: list[dict[str, str]] = []
+    turns: list[dict[str, Any]] = []
     paths = sorted(directory.glob("runs-*.jsonl"), reverse=True)
     with _LOCK:
         for path in paths:
@@ -137,7 +174,11 @@ def session_turns(
                 question = str(row.get("question") or "").strip()
                 answer = str(row.get("answer") or "").strip()
                 if question and answer:
-                    turns.append({"question": question, "answer": answer})
+                    turn: dict[str, Any] = {"question": question, "answer": answer}
+                    state = row.get("conversation_state")
+                    if isinstance(state, dict) and state:
+                        turn["state"] = state
+                    turns.append(turn)
                 if len(turns) >= limit:
                     return list(reversed(turns))
     return list(reversed(turns))

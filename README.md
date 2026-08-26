@@ -35,7 +35,7 @@ RWKV SearchReader 是一个“模型规划范围、程序执行检索、模型�
 
 - Tavily、wigolo 和 SearXNG 三种搜索后端；
 - Tavily 直接采用 Advanced Search 已按查询整理的 `results[].content`；普通单问调用一次，明确的多问题按子问题分别调用；
-- 首批材料完成后由 RWKV 做证据充分性审核；只有存在具体缺口时才生成 1–3 个补充检索词，每轮最多新增 10 个去重来源，默认最多补检两轮，因此来源总数不再固定为 10；
+- 每个对象检索词最多保留 10 份去重材料；首批材料完成后先绑定对象字段，再由 RWKV 在严格受限的审核上下文中检查完整性，只有存在具体缺口时才补检；
 - wigolo / SearXNG 仍保留正文抓取、分块和排序作为兼容路径；
 - 基础 SSRF 防护、正文大小与超时限制；
 - 最多 10 路 RWKV 来源阅读并发，且每次调用只负责一个网页；
@@ -43,23 +43,24 @@ RWKV SearchReader 是一个“模型规划范围、程序执行检索、模型�
 - 摘要异步完成后按 Tavily 原始来源编号归位；
 - 每条摘要在代码层固定绑定 `source_id`；漏斗归并后使用 `([source_ids], summary)` 二元组继续绑定完整来源谱系；
 - Tavily 的 `published_date` 有返回时贯穿整条证据链，但检索时不设置时间限制，检索后也不会根据“今天”、“本周”等词删除来源；时间戳只作为材料交给最终 RWKV 阅读；
-- 单网页摘要中出现的数字必须能在该网页材料或发布时间中找到；否则拦截该摘要并回退到 Tavily 原材料；
+- 单网页摘要中出现的数字必须能在该网页材料中找到；只删除包含新增数字的句子，若摘要整体不可用则保留完整的受限长度 Tavily 原材料，不再只截网页开头；
 - 审核后按 `对象 × 字段` 启动多个独立 RWKV 证据选择请求，每个字段最多绑定一个直接支持它的来源；版本更新时间、活动日期和福利采用不同判定要求，缺失或冲突字段不会从其他网页补齐；
 - 归并不是固定两两压缩：每个并发 chunk 同时受字符预算和最多 4 个输入节点约束；如果漏斗末层仍超过 final 材料预算，就继续下一层；
 - 最终 13.3B 阅读器只读取漏斗末层摘要，不读取网页原文、审核过程或重复对话；开放式问题直接自然总结，不生成思维链；
 - `/completions` 的 Assistant 前缀固定为完整的空推理预填 `<think></think>`，所有阅读、审核和最终回答调用都直接续写公开输出；
-- 最终 RWKV 直接输出自然语言答案，不使用固定项目符号渲染；字段与来源的结构化选择只在内部使用，代码不改写模型原文；
+- 最终 RWKV 直接输出自然语言答案；代码会删除无法绑定到原子字段的事实子句和来源，并在最终输出完全不可验证时使用带来源的安全字段渲染；
 - 已知百科、媒体、论坛与商店域名会标记为二手来源，供本地记录与后续分析；
 - 所有 RWKV 用户提示均采用“材料在前、问题和要求在后”；
 - OpenAI 兼容 RWKV `/completions` 或 `/chat/completions`；
 - CLI、FastAPI、带本地历史记录和可折叠过程时间线的聊天 Web UI；
 - 聊天输入框可直接上传 `.md` / `.markdown`：原文保存在本机 SQLite，按 Markdown 标题路径与段落切块，问题相关片段分别交给独立 RWKV 并发阅读；默认单文档不超过 2 MB；
 - 使用 SQLite 持久化一级 `conversation` 对象及其有序 `user` / `assistant` message items；侧栏直接列 conversation，点击后读取其 items，不再从单轮日志临时拼接聊天；
-- 多轮上下文不再只截最后几轮：始终保留最近四轮，并从更早对话中选回与当前问题相关的轮次和明确的用户偏好，再按原始时间顺序交给上下文阅读器；
+- 多轮对话除文本历史外还保存上一轮已验证的对象、字段、事实和来源；“下一个”等追问会把该结构化状态作为基准交给字段整理器，而不是只依赖旧回答文本；
 - 支持独立的最终 RWKV 配置；当前本机使用 g1i-13.3B（16K context）承担最终综合、对话总结和文档成品生成，最终回答 `max_tokens` 统一封顶为 4090；
 - 浏览器保存独立的 client ID 和当前 conversation ID；公网只能列出该 client ID 所属 conversations，不能读取其他浏览器或本机历史；旧 JSONL `session_id` 会在首次打开时一次性迁移为 conversation；
 - 丰富结果接口 `/v1/answer` 和兼容接口 `/v1/chat/completions`；
-- 完整 JSONL 运行 trace（默认位于 `logs/`，不记录 API Key）：成功与失败请求均保存问题、回答、来源、逐来源摘要、阶段 trace、耗时和告警；每次 RWKV 调用的完整输入、原始输出、调用阶段和耗时也保存在 `model_calls` 中，便于离线复盘；聊天数据则保存在 `logs/conversations.sqlite3`；
+- 完整 JSONL 运行 trace（默认位于 `logs/`，不记录 API Key）：成功与失败请求均保存问题、回答、来源、逐来源摘要、阶段 trace、耗时和告警；每次 RWKV 调用的完整输入、原始输出、调用阶段和耗时也保存在 `model_calls` 中；每日文件默认保留 30 天且总量上限 1 GB，聊天数据保存在 `logs/conversations.sqlite3`；
+- 公网回答接口具有每 IP 频率限制、全局并发队列和单请求 RWKV 调用上限；浏览器中止请求后不会继续写入旧对话；
 - 前端通过 `/v1/conversations/list` 与 `/v1/conversations/get` 恢复当前浏览器所属的完整对话；`/v1/history` 仅保留为本机运行 trace 的诊断接口，并拒绝公网读取。
 
 ## 安装
@@ -94,6 +95,9 @@ SEARCH_READER_RWKV_REDUCE_CHUNK_CHARS=6000
 SEARCH_READER_RWKV_REDUCE_FAN_IN=4
 SEARCH_READER_RWKV_FINAL_MATERIAL_CHARS=9000
 SEARCH_READER_RWKV_MAX_TOKENS=4090
+SEARCH_READER_RWKV_MAX_CALLS_PER_REQUEST=600
+SEARCH_READER_API_MAX_CONCURRENT_REQUESTS=4
+SEARCH_READER_API_RATE_LIMIT_PER_MINUTE=20
 
 SEARCH_READER_RWKV_FINAL_BASE_URL=http://127.0.0.1:29610/v1
 SEARCH_READER_RWKV_FINAL_API_KEY=rwkv-skills
@@ -101,7 +105,7 @@ SEARCH_READER_RWKV_FINAL_MODEL=rwkv7-g1i-13.3b-20260805-ctx16384
 SEARCH_READER_RWKV_FINAL_PROTOCOL=completions
 ```
 
-`SUMMARY_WORKERS` 同时控制逐来源阅读、逐字段证据选择和漏斗 chunk 归并的并发。默认先读取 Tavily 前 10 条结果；审核发现证据不足时最多补检两轮，每轮最多新增 10 个来源。材料超过 final 预算时会按 chunk 递归归并，再调用最终 RWKV 输出回答。
+`SUMMARY_WORKERS` 同时控制逐来源阅读、逐字段证据选择和漏斗 chunk 归并的并发。每个对象检索式最多读取 Tavily 前 10 条结果；审核发现证据不足时最多补检两轮。材料超过 final 预算时会按 chunk 递归归并，再调用最终 RWKV 输出回答。
 
 在当前机器上，如果新项目自己的 `.env.local` 没有 Tavily 凭证，程序会只读取相邻 `RWKV-ECRA/.env.local` 中的 `TAVILY_API_KEY` / `TAVILY_API_KEYS`，不会读取或复制其中的其他配置和密钥。密钥池会按顺序故障转移。
 
@@ -182,7 +186,7 @@ curl -s http://127.0.0.1:8790/healthz
 curl -s http://127.0.0.1:8790/readyz
 ```
 
-`readyz` 只验证配置是否齐全，不会消耗搜索或模型额度。
+`readyz` 会检查配置，并通过短时 TCP 连接检查阅读模型和最终模型端点是否可达；不会发起生成或消耗搜索额度。
 
 运行可断点续跑的 natural/normal 100 题测试：
 

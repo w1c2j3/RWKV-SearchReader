@@ -118,6 +118,20 @@ def test_research_plan_parser_requires_a_real_clarification_question() -> None:
     assert plan.clarification == "你说的各个二游具体包括哪些？"
 
 
+def test_planner_cannot_refuse_a_public_set_for_lack_of_named_objects() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: (
+        '{"decision":"clarify","goal":"确定对象","records":[],"queries":[],'
+        '"clarification":"请先列出具体游戏。"}'
+    )
+
+    plan = reader.plan_research("各个二游现在的版本是什么？")
+
+    assert plan.decision == "search"
+    assert plan.scope_mode == "discover"
+    assert plan.queries[0].startswith("各个二游现在的版本是什么？")
+
+
 def test_research_plan_parser_drops_prompt_placeholders() -> None:
     plan = _parse_research_plan_output(
         '{"decision":"search","scope_mode":"fixed","goal":"查版本",'
@@ -376,6 +390,113 @@ def test_source_summaries_run_concurrently_and_keep_input_order() -> None:
     assert warnings == []
 
 
+def test_summary_drops_only_the_sentence_with_an_invented_number() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: (
+        "发行价为150.80元。上市首日价格为999元。公司于8月19日上市。"
+    )
+    chunk = DocumentChunk(
+        "S1",
+        "公司上市资料",
+        "https://example.com/1",
+        "公司于8月19日上市，发行价为150.8元。",
+    )
+
+    evidence = reader._summarize_one("问题", chunk)
+
+    assert "150.80" in evidence.claim
+    assert "8月19日" in evidence.claim
+    assert "999" not in evidence.claim
+
+
+def test_failed_summary_keeps_the_full_bounded_page_material() -> None:
+    settings = replace(Settings(), rwkv_model="test", max_evidence_chars=3000)
+    reader = RWKVReader(settings)
+    reader._complete = lambda *args, **kwargs: "网页声称价格为999元。"
+    material = "正文" * 900 + "末尾关键事实"
+
+    rows, warnings = reader.summarize(
+        "问题", [DocumentChunk("S1", "标题", "https://example.com/1", material)]
+    )
+
+    assert rows[0].claim.endswith("末尾关键事实")
+    assert len(rows[0].claim) > 1200
+    assert warnings
+
+
+def test_audit_material_is_bounded_before_the_model_call() -> None:
+    settings = replace(
+        Settings(), rwkv_model="test", rwkv_reduce_chunk_chars=6000
+    )
+    reader = RWKVReader(settings)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "ENOUGH"
+
+    reader._complete = complete
+    rows = [
+        Evidence(
+            f"S{index}",
+            f"来源{index}",
+            f"https://example.com/{index}",
+            "材料" * 2000,
+            "原文",
+        )
+        for index in range(1, 31)
+    ]
+
+    reader.audit("问题", rows, ["查询"])
+
+    assert len(captured["user"]) < 8000
+
+
+def test_audit_cannot_mark_missing_atomic_fields_as_enough() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "ENOUGH"
+    missing = [
+        FieldEvidenceSelection("对象", "发布日期", "", "missing", "未找到", [])
+    ]
+
+    audit = reader.audit(
+        "对象发布日期是什么？",
+        _evidence(1),
+        ["对象 发布日期"],
+        research_records=[ResearchRecord("对象", "发布日期", ["发布日期"])],
+        field_selections=missing,
+    )
+
+    assert audit.sufficient is False
+    assert audit.queries == ["对象 发布日期 官方资料"]
+
+
+def test_conflict_sources_cannot_endorse_an_invented_final_value() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "对象字段是999。"
+    rows = [
+        Evidence("S1", "记录A", "https://a", "对象字段是100。", "对象字段是100。"),
+        Evidence("S2", "记录B", "https://b", "对象字段是200。", "对象字段是200。"),
+    ]
+    selections = [
+        FieldEvidenceSelection(
+            "对象", "字段", "", "conflict", "材料存在冲突。", ["S1", "S2"]
+        )
+    ]
+
+    answer, warnings = reader.finalize(
+        "对象字段是什么？",
+        rows,
+        research_records=[ResearchRecord("对象", "问题", ["字段"])],
+        evidence_selections=selections,
+    )
+
+    assert "999" not in answer
+    assert "无法确认" in answer
+    assert "[S1][S2]" in answer
+    assert warnings
+
+
 def test_field_selection_maps_one_webpage_per_call_then_resolves_one_record() -> None:
     reader = RWKVReader(
         replace(Settings(), rwkv_model="test", rwkv_summary_workers=4)
@@ -432,6 +553,72 @@ def test_field_selection_maps_one_webpage_per_call_then_resolves_one_record() ->
         ("发行价", "150.8元/股", ["S1"]),
         ("上市首日开盘价", "1100元", ["S2"]),
     ]
+
+
+def test_repeated_audit_round_reuses_page_field_extractions() -> None:
+    reader = RWKVReader(
+        replace(Settings(), rwkv_model="test", rwkv_summary_workers=4)
+    )
+    rows = [
+        Evidence(
+            "S1",
+            "对象版本",
+            "https://example.com/1",
+            "对象版本为2.0。",
+            "对象版本为2.0。",
+        )
+    ]
+    calls: list[str] = []
+
+    def complete(user, **kwargs):
+        calls.append(kwargs["stage"])
+        if kwargs["stage"] == "evidence_extract":
+            return "对象版本为2.0。"
+        return '{"facts":[{"field":"版本","fact":"2.0","source_ids":["S1"]}]}'
+
+    reader._complete = complete
+    records = [ResearchRecord("对象", "当前版本", ["版本"])]
+    reader.select_evidence("对象当前版本是什么？", records, rows)
+    reader.select_evidence("对象当前版本是什么？", records, rows)
+
+    assert calls.count("evidence_extract") == 1
+    assert calls.count("evidence_resolve") == 2
+
+
+def test_next_version_cannot_fall_back_to_a_version_before_prior_state() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    rows = [
+        Evidence(
+            "S1",
+            "对象6.9版本公告",
+            "https://example.com/old",
+            "对象版本为6.9。",
+            "对象版本为6.9。",
+        )
+    ]
+
+    def complete(user, **kwargs):
+        if kwargs["stage"] == "evidence_extract":
+            return "对象版本为6.9。"
+        return '{"facts":[{"field":"版本","fact":"6.9","source_ids":["S1"]}]}'
+
+    reader._complete = complete
+    selections, _ = reader.select_evidence(
+        "对象的下一个版本是什么？",
+        [ResearchRecord("对象", "下一个版本", ["版本"])],
+        rows,
+        prior_facts=[
+            {
+                "subject": "对象",
+                "field": "版本",
+                "status": "supported",
+                "fact": "7.0版本",
+            }
+        ],
+    )
+
+    assert selections[0].status == "missing"
+    assert "晚于" in selections[0].fact
 
 
 def test_summary_prompt_contains_only_material_and_one_short_request() -> None:
@@ -830,6 +1017,58 @@ def test_final_stages_use_the_larger_model_profile_and_4090_cap() -> None:
     assert settings.rwkv_max_tokens == 4090
 
 
+def test_contextualizer_receives_validated_previous_field_state() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "原神在7.0版本之后的下一个版本是什么？"
+
+    reader._complete = complete
+    rewritten = reader.contextualize(
+        "那下一个版本呢？",
+        [
+            {
+                "question": "原神当前版本是什么？",
+                "answer": "原神当前为7.0版本 [S1]。",
+                "state": {
+                    "facts": [
+                        {
+                            "subject": "原神",
+                            "field": "版本",
+                            "status": "supported",
+                            "fact": "7.0版本",
+                            "source_ids": ["S1"],
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    assert "verified_state" in captured["user"]
+    assert "7.0版本" in captured["user"]
+    assert rewritten == "原神在7.0版本之后的下一个版本是什么？"
+
+
+def test_model_call_budget_stops_unbounded_request_amplification() -> None:
+    reader = RWKVReader(
+        replace(Settings(), rwkv_model="test", rwkv_max_calls_per_request=2)
+    )
+
+    class Client:
+        def completion(self, **kwargs):
+            return "ok"
+
+    reader._client = lambda stage: Client()
+    reader._complete("a", max_tokens=8, stage="summarize")
+    reader._complete("b", max_tokens=8, stage="summarize")
+
+    with pytest.raises(SearchReaderError, match="call budget"):
+        reader._complete("c", max_tokens=8, stage="summarize")
+
+
 def test_funnel_reduces_twenty_source_summaries_to_five_lineage_pairs() -> None:
     settings = replace(
         Settings(),
@@ -949,6 +1188,56 @@ def test_field_bound_final_uses_only_atomic_field_records() -> None:
     assert answer == "只使用已绑定字段 [S2]"
 
 
+def test_atomic_material_never_exceeds_the_configured_final_budget() -> None:
+    settings = replace(
+        Settings(), rwkv_model="test", rwkv_final_material_chars=9000
+    )
+    reader = RWKVReader(settings)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "材料不足。"
+
+    reader._complete = complete
+    records = []
+    selections = []
+    rows = []
+    for record_index in range(4):
+        subject = f"对象{record_index}-" + "甲" * 190
+        fields = []
+        for field_index in range(8):
+            field = f"字段{field_index}-" + "乙" * 70
+            fields.append(field)
+            source_id = f"S{record_index * 8 + field_index + 1}"
+            fact = "事实内容" + "丙" * 490
+            selections.append(
+                FieldEvidenceSelection(
+                    subject, field, source_id, "supported", fact, [source_id]
+                )
+            )
+            rows.append(
+                Evidence(
+                    source_id,
+                    subject,
+                    f"https://example.com/{source_id}",
+                    fact,
+                    fact,
+                )
+            )
+        records.append(ResearchRecord(subject, "问题", fields))
+
+    reader.finalize(
+        "请查询这些对象的信息",
+        rows,
+        research_records=records,
+        evidence_selections=selections,
+    )
+
+    material = captured["user"].split("\n\n问题：", 1)[0]
+    assert len(material) <= settings.rwkv_final_material_chars
+
+
 def test_field_bound_final_does_not_reintroduce_unselected_page_summaries() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     rows = _evidence(3)
@@ -982,7 +1271,7 @@ def test_field_bound_final_does_not_reintroduce_unselected_page_summaries() -> N
     assert "原神新增主题活动与奖励说明" not in captured["user"]
     assert "其他游戏更新" not in captured["user"]
     assert "逐字段证据选择" not in captured["user"]
-    assert answer == "原神为7.0版本，并开放了多个主题活动 [S2]。"
+    assert answer == "原神为7.0版本 [S2]。"
 
 
 def test_open_ended_question_keeps_the_summary_funnel() -> None:

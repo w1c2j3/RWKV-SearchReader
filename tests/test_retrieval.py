@@ -111,6 +111,33 @@ def test_reader_ready_results_keep_provider_order_without_extracting() -> None:
     assert warnings == []
 
 
+def test_planned_queries_keep_up_to_ten_materials_per_object() -> None:
+    settings = replace(Settings(), search_max_results=10, fetch_pages=10)
+
+    class PerObjectProvider(MaterialProvider):
+        def search(self, query: str, max_results: int) -> list[SearchHit]:
+            self.received.append(query)
+            prefix = "a" if query == "对象A" else "b"
+            return [
+                SearchHit(
+                    title=f"{query} {index}",
+                    url=f"https://example.com/{prefix}/{index}",
+                    content=f"{query} material {index}",
+                )
+                for index in range(1, max_results + 1)
+            ]
+
+    provider = PerObjectProvider(settings)
+    _, sources, chunks, _ = Retriever(settings, provider).run_queries(
+        ["对象A", "对象B"], question="比较对象A和对象B"
+    )
+
+    assert len(sources) == 20
+    assert len(chunks) == 20
+    assert sum(chunk.title.startswith("对象A") for chunk in chunks) == 10
+    assert sum(chunk.title.startswith("对象B") for chunk in chunks) == 10
+
+
 def test_supplemental_retrieval_excludes_old_urls_and_continues_source_ids() -> None:
     settings = replace(Settings(), search_max_results=4, fetch_pages=4)
     provider = MaterialProvider(settings)

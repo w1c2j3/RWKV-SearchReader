@@ -18,6 +18,8 @@ from .documents import (
 )
 
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+_STORE_LOCKS_GUARD = threading.Lock()
+_STORE_LOCKS: dict[str, threading.RLock] = {}
 
 
 def _now() -> str:
@@ -55,6 +57,7 @@ def _answer_payload(result: dict[str, Any]) -> dict[str, Any]:
             "warnings",
             "timings_ms",
             "trace",
+            "conversation_state",
         )
     }
 
@@ -63,8 +66,10 @@ class ConversationStore:
     """Durable ChatGPT-style conversations with ordered message items."""
 
     def __init__(self, path: Path):
-        self.path = path
-        self._lock = threading.RLock()
+        self.path = path.resolve()
+        lock_key = str(self.path)
+        with _STORE_LOCKS_GUARD:
+            self._lock = _STORE_LOCKS.setdefault(lock_key, threading.RLock())
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -276,6 +281,7 @@ class ConversationStore:
         identity = _identity(conversation_id, "conversation id")
         owner = _identity(client_id, "client id")
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             conversation = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?", (identity,)
             ).fetchone()
@@ -375,7 +381,7 @@ class ConversationStore:
         client_id: str,
         limit: int = 10,
         query: str = "",
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         conversation = self.get(conversation_id, client_id)
         turns: list[dict[str, str]] = []
         pending = ""
@@ -383,7 +389,14 @@ class ConversationStore:
             if item["role"] == "user":
                 pending = item["content"]
             elif item["role"] == "assistant" and pending:
-                turns.append({"question": pending, "answer": item["content"]})
+                turn: dict[str, Any] = {
+                    "question": pending,
+                    "answer": item["content"],
+                }
+                state = item.get("payload", {}).get("conversation_state")
+                if isinstance(state, dict) and state:
+                    turn["state"] = state
+                turns.append(turn)
                 pending = ""
         if len(turns) <= limit:
             return turns

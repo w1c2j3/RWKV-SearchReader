@@ -27,7 +27,7 @@ from .models import (
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 _CONTEXT_REFERENCE_RE = re.compile(
-    r"它|它们|他们|她们|这个|那个|这些|那些|上述|前者|后者|"
+    r"它|它们|他们|她们|这个|那个|这些|那些|这两个|那两个|二者|两者|上述|前者|后者|"
     r"该(?:模型|版本|公司|产品|事件|人物|项目)|"
     r"^(?:那|那么|然后|为什么|什么时候|哪天|具体|价格呢|日期呢|版本呢)"
 )
@@ -140,6 +140,27 @@ def _normalized_numbers(value: str) -> set[str]:
 
 def _unsupported_summary_numbers(summary: str, material: str) -> set[str]:
     return _normalized_numbers(summary) - _normalized_numbers(material)
+
+
+def _remove_unsupported_number_sentences(summary: str, material: str) -> str:
+    """Keep supported parts of a summary instead of discarding the whole page."""
+
+    lines: list[str] = []
+    for raw_line in str(summary or "").splitlines() or [str(summary or "")]:
+        prefix = ""
+        content = raw_line.strip()
+        marker = re.match(r"^\s*((?:[-*+]\s+)|(?:\d{1,3}[.)、]\s+))(.*)$", raw_line)
+        if marker:
+            prefix, content = marker.group(1), marker.group(2).strip()
+        kept = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[。！？!?；;])\s*", content)
+            if sentence.strip()
+            and not _unsupported_summary_numbers(sentence, material)
+        ]
+        if kept:
+            lines.append(f"{prefix}{''.join(kept)}".rstrip())
+    return "\n".join(lines).strip()
 
 
 def _normalized_copy_text(value: str) -> str:
@@ -271,7 +292,8 @@ def _bind_atomic_citations(
     """Bind each answer clause to matching atomic facts, never just the subject."""
 
     supported = [item for item in selections if item.status == "supported"]
-    parts = re.split(r"([。！？!?；;\n]+)", answer)
+    conflicts = [item for item in selections if item.status == "conflict"]
+    parts = re.split(r"([。！？!?；;，,\n]+)", answer)
     for index in range(0, len(parts), 2):
         clause = parts[index]
         plain = re.sub(r"\s*(?:\[S\d+\])+", "", clause, flags=re.IGNORECASE)
@@ -280,7 +302,9 @@ def _bind_atomic_citations(
         matched_ids: list[str] = []
         for selection in supported:
             fact_numbers = _normalized_numbers(selection.fact)
-            fact_terms = _claim_terms(selection.fact)
+            fact_terms = _claim_terms(
+                f"{selection.subject} {selection.field} {selection.fact}"
+            )
             number_match = bool(clause_numbers & fact_numbers)
             term_match = bool(fact_terms) and len(clause_terms & fact_terms) >= max(
                 1, min(3, len(fact_terms) // 3)
@@ -290,10 +314,102 @@ def _bind_atomic_citations(
             for source_id in _selection_source_ids(selection):
                 if source_id not in matched_ids:
                     matched_ids.append(source_id)
+        if not matched_ids and re.search(r"存在冲突|无法确认|不能确定", plain):
+            plain_terms = _claim_terms(plain)
+            for selection in conflicts:
+                identity_terms = _claim_terms(f"{selection.subject} {selection.field}")
+                if identity_terms and not (plain_terms & identity_terms):
+                    continue
+                for source_id in _selection_source_ids(selection):
+                    if source_id not in matched_ids:
+                        matched_ids.append(source_id)
         if matched_ids:
             citations = "".join(f"[{source_id}]" for source_id in matched_ids)
             parts[index] = f"{plain.rstrip()} {citations}"
+        else:
+            # Never retain a model-invented citation.
+            parts[index] = plain
     return "".join(parts)
+
+
+def _filter_unsupported_atomic_clauses(
+    answer: str, selections: list[FieldEvidenceSelection]
+) -> tuple[str, list[str]]:
+    """Remove final clauses that cannot be bound to supported atomic facts."""
+
+    supported = [item for item in selections if item.status == "supported"]
+    allowed_numbers = set().union(
+        *(_normalized_numbers(item.fact) for item in supported), set()
+    )
+    parts = re.split(r"([。！？!?；;，,\n]+)", str(answer or ""))
+    removed: list[str] = []
+    for index in range(0, len(parts), 2):
+        plain = re.sub(r"\s*(?:\[S\d+\])+", "", parts[index], flags=re.IGNORECASE)
+        unsupported = _normalized_numbers(plain) - allowed_numbers
+        clause_numbers = _normalized_numbers(plain)
+        clause_terms = _claim_terms(plain)
+        matched = False
+        for item in supported:
+            fact_numbers = _normalized_numbers(item.fact)
+            fact_terms = _claim_terms(f"{item.subject} {item.field} {item.fact}")
+            number_match = bool(clause_numbers & fact_numbers)
+            term_match = bool(fact_terms) and len(clause_terms & fact_terms) >= max(
+                1, min(3, len(fact_terms) // 3)
+            )
+            if number_match if fact_numbers else term_match:
+                matched = True
+                break
+        uncertainty = bool(
+            re.search(
+                r"无法核实|无法确认|不能确定|未能确认|材料不足|存在冲突|信息缺失",
+                plain,
+            )
+        )
+        unsupported_clause = bool(unsupported) or bool(
+            _normalized_text(plain)
+            and not plain.rstrip().endswith((":", "："))
+            and not uncertainty
+            and not matched
+        )
+        if not unsupported_clause:
+            continue
+        removed.extend(sorted(unsupported) or ["unbound clause"])
+        parts[index] = ""
+        if index + 1 < len(parts):
+            parts[index + 1] = ""
+    cleaned = "".join(parts).strip()
+    cleaned = re.sub(r"[，,；;：:]\s*$", "。", cleaned)
+    warnings = (
+        [
+            "final atomic answer omitted unsupported or unbound clauses: "
+            + ", ".join(dict.fromkeys(removed))
+        ]
+        if removed
+        else []
+    )
+    return cleaned, warnings
+
+
+def _atomic_fallback_answer(selections: list[FieldEvidenceSelection]) -> str:
+    """Provide a source-bound safety answer only when final output is unusable."""
+
+    lines: list[str] = []
+    for item in selections:
+        if item.status == "supported" and item.fact:
+            citations = "".join(
+                f"[{source_id}]" for source_id in _selection_source_ids(item)
+            )
+            lines.append(f"- {item.subject} · {item.field}：{item.fact} {citations}".rstrip())
+        elif item.status == "conflict":
+            citations = "".join(
+                f"[{source_id}]" for source_id in _selection_source_ids(item)
+            )
+            lines.append(
+                f"- {item.subject} · {item.field}：现有材料存在冲突，无法确认。{citations}"
+            )
+        else:
+            lines.append(f"- {item.subject} · {item.field}：现有材料未能确认。")
+    return "\n".join(lines).strip()
 
 
 def _render_source_pairs(evidence: list[Evidence]) -> str:
@@ -312,6 +428,38 @@ def _render_source_pairs(evidence: list[Evidence]) -> str:
         )
         for item in evidence
     )
+
+
+def _bounded_audit_material(
+    evidence: list[Evidence],
+    max_chars: int,
+    selections: list[FieldEvidenceSelection] | None = None,
+) -> str:
+    """Give the reviewer every source/field while enforcing a hard input bound."""
+
+    if selections:
+        return _bounded_field_material(selections, max_chars)[0]
+    if not evidence:
+        return ""
+    overhead = sum(len(item.source_id) + len(item.published_date or "unknown") + 40 for item in evidence)
+    per_claim = max(120, (max_chars - overhead) // max(1, len(evidence)))
+    rows = "\n".join(
+        json.dumps(
+            [
+                item.source_id,
+                {
+                    "published_date": item.published_date or "unknown",
+                    "summary": item.claim[:per_claim],
+                },
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        for item in evidence
+    )
+    if len(rows) <= max_chars:
+        return rows
+    return rows[:max_chars].rsplit("\n", 1)[0]
 
 
 @dataclass(slots=True)
@@ -356,12 +504,20 @@ def _render_field_selections(
 ) -> str:
     """Keep a selected value bound to its subject, field, and source lineage."""
 
-    return "\n".join(
+    subject_ids: dict[str, str] = {}
+    for selection in selections:
+        subject_ids.setdefault(selection.subject, f"R{len(subject_ids) + 1}")
+    header = json.dumps(
+        {"records": [[record_id, subject] for subject, record_id in subject_ids.items()]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    rows = "\n".join(
         json.dumps(
             [
                 _selection_source_ids(selection),
                 {
-                    "subject": selection.subject,
+                    "record": subject_ids[selection.subject],
                     "field": selection.field,
                     "status": selection.status,
                     "fact": (
@@ -372,9 +528,43 @@ def _render_field_selections(
                 },
             ],
             ensure_ascii=False,
+            separators=(",", ":"),
         )
         for selection in selections
     )
+    return f"{header}\n{rows}" if rows else header
+
+
+def _bounded_field_material(
+    selections: list[FieldEvidenceSelection], max_chars: int
+) -> tuple[str, bool]:
+    """Fit every atomic field into the final context without repeating subjects."""
+
+    rendered = _render_field_selections(selections)
+    if len(rendered) <= max_chars:
+        return rendered, False
+    high = max((len(item.fact) for item in selections), default=0)
+    low = 0
+    best = _render_field_selections(selections, fact_chars=0)
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = _render_field_selections(selections, fact_chars=middle)
+        if len(candidate) <= max_chars:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    if len(best) > max_chars:
+        # The configured budget can only be exceeded by adversarially long field
+        # names; keep a syntactically complete prefix rather than a broken JSON row.
+        lines = best.splitlines()
+        kept: list[str] = []
+        for line in lines:
+            if kept and len("\n".join([*kept, line])) > max_chars:
+                break
+            kept.append(line)
+        best = "\n".join(kept)
+    return best, True
 
 
 def _field_binding_applicable(
@@ -457,6 +647,11 @@ def _version_title_fact(value: str) -> str:
     if not match:
         return ""
     return f"{match.group(1)}版本「{match.group(2)}」"
+
+
+def _version_order(value: str) -> tuple[int, ...] | None:
+    match = re.search(r"(?<!\d)(\d+(?:\.\d+)+)(?!\d)", str(value or ""))
+    return tuple(int(part) for part in match.group(1).split(".")) if match else None
 
 
 def _chunk_material_nodes(
@@ -939,11 +1134,19 @@ class RWKVReader:
         self._call_lock = threading.Lock()
         self._call_sequence = 0
         self._call_records: list[dict[str, object]] = []
+        self._field_candidate_cache: dict[
+            tuple[str, str, str], _FieldFactCandidate | None
+        ] = {}
 
     def reset_call_records(self) -> None:
         with self._call_lock:
             self._call_sequence = 0
             self._call_records = []
+            self._field_candidate_cache = {}
+
+    @staticmethod
+    def clarification_required(question: str) -> bool:
+        return _needs_conversation_subject(question)
 
     def call_records(self) -> list[dict[str, object]]:
         with self._call_lock:
@@ -951,6 +1154,11 @@ class RWKVReader:
 
     def _next_call_id(self) -> int:
         with self._call_lock:
+            if self._call_sequence >= self.settings.rwkv_max_calls_per_request:
+                raise SearchReaderError(
+                    "budget",
+                    "request exceeded the configured RWKV call budget",
+                )
             self._call_sequence += 1
             return self._call_sequence
 
@@ -1064,6 +1272,19 @@ class RWKVReader:
             question,
             self.settings.research_plan_max_queries,
         )
+        if plan.decision == "clarify" and not self.clarification_required(question):
+            plan = ResearchPlan(
+                decision="search",
+                goal=plan.goal or question,
+                records=[],
+                queries=[question],
+                scope_mode=(
+                    "discover"
+                    if re.search(r"各个|所有|哪些|有哪些|某类|一类|类别", question)
+                    else "fixed"
+                ),
+                fallback=True,
+            )
         self._anchor_research_queries(question, plan)
         return plan
 
@@ -1281,7 +1502,20 @@ class RWKVReader:
         plan.clarification = ""
         return self._anchor_research_queries(question, plan)
 
-    def contextualize(self, question: str, history: list[dict[str, str]]) -> str:
+    @staticmethod
+    def prior_facts(history: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Return the newest validated atomic state, not prose from an old answer."""
+
+        for turn in reversed(history):
+            state = turn.get("state")
+            if not isinstance(state, dict):
+                continue
+            facts = state.get("facts")
+            if isinstance(facts, list):
+                return [item for item in facts if isinstance(item, dict)]
+        return []
+
+    def contextualize(self, question: str, history: list[dict[str, object]]) -> str:
         """Resolve follow-up references without treating prior answers as evidence."""
 
         if not history:
@@ -1294,17 +1528,33 @@ class RWKVReader:
                     f"{previous_question}；用户补充：公开资料能够确认的代表性对象都需要，"
                     "无需再次询问具体名单。"
                 )[:8000]
+        compact_history = history[-6:]
         material = "\n".join(
             json.dumps(
-                {"user": turn.get("question", ""), "assistant": turn.get("answer", "")},
+                {
+                    "user": str(turn.get("question", ""))[:500],
+                    "assistant": str(turn.get("answer", ""))[:700],
+                },
                 ensure_ascii=False,
             )
-            for turn in history
+            for turn in compact_history
         )
+        prior_facts = self.prior_facts(history)
+        compact_facts = [
+            {
+                "subject": str(item.get("subject") or "")[:200],
+                "field": str(item.get("field") or "")[:80],
+                "status": str(item.get("status") or "")[:20],
+                "fact": str(item.get("fact") or "")[:300],
+            }
+            for item in prior_facts[:32]
+        ]
         user = f"""{material}
 
+verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
+
 当前消息：{question}
-结合此前对话，把当前消息改写成可独立理解的问题。只输出改写后的问题。"""
+结合此前对话和 verified_state，把当前消息改写成可独立理解的问题；“下一个”必须保留此前已确认对象和基准记录。只输出改写后的问题。"""
         output = self._complete(user, max_tokens=160, stage="contextualize")
         rewritten = _clean_standalone_question(output, question)
         previous_answer = str(history[-1].get("answer") or "").strip()
@@ -1318,26 +1568,34 @@ class RWKVReader:
             _normalized_text(rewritten) == _normalized_text(question)
             or _needs_conversation_subject(rewritten)
         ):
+            if prior_facts:
+                anchor = json.dumps(prior_facts, ensure_ascii=False)
+                return f"此前已确认：{anchor}；当前追问：{question}"[:8000]
             previous_question = str(history[-1].get("question") or "").strip()
             if previous_question:
                 previous_question = previous_question.rstrip("。.!！?？")
                 return f"上一问：{previous_question}；当前追问：{question}"[:8000]
         return rewritten
 
-    def answer_from_history(self, question: str, history: list[dict[str, str]]) -> str:
+    def answer_from_history(self, question: str, history: list[dict[str, object]]) -> str:
         """Answer a request about this conversation without external retrieval."""
 
-        material = "\n".join(
-            json.dumps(
+        rows: list[str] = []
+        total = 0
+        for index, turn in reversed(list(enumerate(history, start=1))):
+            row = json.dumps(
                 {
                     "turn": index,
-                    "user": turn.get("question", "")[:1200],
-                    "assistant": turn.get("answer", "")[:1800],
+                    "user": str(turn.get("question", ""))[:500],
+                    "assistant": str(turn.get("answer", ""))[:1000],
                 },
                 ensure_ascii=False,
             )
-            for index, turn in enumerate(history, start=1)
-        )
+            if rows and total + len(row) > self.settings.rwkv_final_material_chars:
+                break
+            rows.append(row)
+            total += len(row)
+        material = "\n".join(reversed(rows))
         user = f"""{material}
 
 请求：{question}
@@ -1368,10 +1626,18 @@ class RWKVReader:
         evidence: list[Evidence],
         tried_queries: list[str],
         research_records: list[ResearchRecord] | None = None,
+        field_selections: list[FieldEvidenceSelection] | None = None,
     ) -> EvidenceAudit:
         """Ask RWKV whether the accumulated material can answer the question."""
 
-        material = _render_source_pairs(evidence)
+        material = _bounded_audit_material(
+            evidence,
+            min(
+                self.settings.rwkv_reduce_chunk_chars,
+                self.settings.rwkv_final_material_chars,
+            ),
+            field_selections,
+        )
         tried = "\n".join(f"- {query}" for query in tried_queries)
         records = _render_research_records(research_records)
         user = f"""{material}
@@ -1381,9 +1647,17 @@ class RWKVReader:
 已检索：{tried}
 当前日期：{_today()}
 
-判断材料是否足以覆盖问题和记录中的字段。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。"""
+        判断材料是否足以覆盖问题和记录中的字段。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。"""
         output = self._complete(user, max_tokens=192, stage="audit")
-        return _parse_audit_output(output, self.settings.review_max_queries)
+        audit = _parse_audit_output(output, self.settings.review_max_queries)
+        missing_queries = [
+            f"{item.subject} {item.field} 官方资料"
+            for item in (field_selections or [])
+            if item.status != "supported"
+        ][: self.settings.review_max_queries]
+        if audit.sufficient and missing_queries:
+            return EvidenceAudit(sufficient=False, queries=missing_queries)
+        return audit
 
     def _extract_one_field(
         self,
@@ -1503,6 +1777,7 @@ class RWKVReader:
         question: str,
         record: ResearchRecord,
         candidates_by_field: dict[str, list[_FieldFactCandidate]],
+        prior_facts: list[dict[str, object]] | None = None,
     ) -> list[FieldEvidenceSelection]:
         all_candidates = [
             candidate
@@ -1533,12 +1808,32 @@ class RWKVReader:
             for candidate in all_candidates
         )
         temporal_rule = ""
-        if re.search(r"下一个|下一版|后续版本", question):
-            temporal_rule = "“下一个”不能选择已经过去的历史记录。"
+        record_subject = _normalized_text(record.subject)
+        relevant_prior = [
+            item
+            for item in (prior_facts or [])
+            if record_subject
+            and (
+                record_subject in _normalized_text(str(item.get("subject") or ""))
+                or _normalized_text(str(item.get("subject") or "")) in record_subject
+            )
+        ]
+        prior_material = json.dumps(relevant_prior[:16], ensure_ascii=False)
+        next_version_requested = bool(re.search(r"下一个|下一版|后续版本", question))
+        prior_versions = [
+            version
+            for item in relevant_prior
+            if (version := _version_order(str(item.get("fact") or "")))
+        ]
+        if next_version_requested:
+            temporal_rule = (
+                "“下一个”必须晚于此前已确认记录；如果没有比此前记录更晚的材料，就标记缺失。"
+            )
         elif _recency_requested(question):
             temporal_rule = "“当前/最新”只选择当前日期前已经生效的同一记录。"
         user = f"""{material}
 
+此前已确认：{prior_material}
 当前日期：{_today()}
 问题：{question}
 整理成一个一致的记录。每个字段只使用该字段下的值，不交换字段。{temporal_rule}
@@ -1594,6 +1889,14 @@ class RWKVReader:
                     if titled:
                         fact = titled
                         break
+            if next_version_requested and re.search(r"版本", field):
+                candidate_version = _version_order(fact)
+                if (
+                    prior_versions
+                    and candidate_version
+                    and candidate_version <= max(prior_versions)
+                ):
+                    continue
             resolved.setdefault(field, []).append(
                 FieldEvidenceSelection(
                     subject=record.subject,
@@ -1609,7 +1912,23 @@ class RWKVReader:
         for field in record.fields:
             options = resolved.get(field, [])
             if not options:
-                selections.append(fallback[field])
+                selected = fallback[field]
+                selected_version = _version_order(selected.fact)
+                if (
+                    next_version_requested
+                    and re.search(r"版本", field)
+                    and prior_versions
+                    and selected_version
+                    and selected_version <= max(prior_versions)
+                ):
+                    selected = FieldEvidenceSelection(
+                        subject=record.subject,
+                        field=field,
+                        source_id="",
+                        status="missing",
+                        fact="材料未给出晚于此前已确认记录的下一个版本。",
+                    )
+                selections.append(selected)
                 continue
             options.sort(
                 key=lambda item: (
@@ -1627,6 +1946,7 @@ class RWKVReader:
         records: list[ResearchRecord],
         evidence: list[Evidence],
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
+        prior_facts: list[dict[str, object]] | None = None,
     ) -> tuple[list[FieldEvidenceSelection], list[str]]:
         """Map one webpage per call, then reduce only within a research record."""
 
@@ -1634,6 +1954,7 @@ class RWKVReader:
             return [], []
         useful = [item for item in evidence if not _is_irrelevant_summary(item.claim)]
         useful = useful or evidence
+        extracted: dict[tuple[int, str], list[_FieldFactCandidate]] = {}
         field_tasks: list[tuple[int, ResearchRecord, str, Evidence, float]] = []
         for record_index, record in enumerate(records):
             alias_keys = [_normalized_text(alias) for alias in _subject_aliases(record.subject)]
@@ -1655,6 +1976,16 @@ class RWKVReader:
                     reverse=True,
                 )[:4]
                 for item in ranked:
+                    cache_key = (
+                        _normalized_text(record.subject),
+                        _normalized_text(field),
+                        item.source_id,
+                    )
+                    if cache_key in self._field_candidate_cache:
+                        cached = self._field_candidate_cache[cache_key]
+                        if cached:
+                            extracted.setdefault((record_index, field), []).append(cached)
+                        continue
                     field_tasks.append(
                         (
                             record_index,
@@ -1664,12 +1995,11 @@ class RWKVReader:
                             _source_relevance(f"{record.subject} {field}", item),
                         )
                     )
-        if not field_tasks:
+        if not field_tasks and not extracted:
             return [], []
 
-        extracted: dict[tuple[int, str], list[_FieldFactCandidate]] = {}
         warnings: list[str] = []
-        workers = min(self.settings.rwkv_summary_workers, len(field_tasks))
+        workers = max(1, min(self.settings.rwkv_summary_workers, len(field_tasks)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -1681,19 +2011,42 @@ class RWKVReader:
                 ): (record_index, record, field, item)
                 for record_index, record, field, item, relevance in field_tasks
             }
-            for future in as_completed(futures):
+            for extracted_completed, future in enumerate(
+                as_completed(futures), start=1
+            ):
                 record_index, record, field, item = futures[future]
+                status = "missing"
                 try:
                     candidate = future.result()
                 except SearchReaderError as exc:
+                    status = "degraded"
+                    candidate = None
                     warnings.append(
                         f"{record.subject}/{field}/{item.source_id} field extraction degraded: {exc}"[
                             :500
                         ]
                     )
-                    continue
+                cache_key = (
+                    _normalized_text(record.subject),
+                    _normalized_text(field),
+                    item.source_id,
+                )
+                self._field_candidate_cache[cache_key] = candidate
                 if candidate:
+                    status = "found"
                     extracted.setdefault((record_index, field), []).append(candidate)
+                if on_progress:
+                    on_progress(
+                        "evidence_page_checked",
+                        {
+                            "completed": extracted_completed,
+                            "total": len(field_tasks),
+                            "subject": record.subject,
+                            "field": field,
+                            "source_id": item.source_id,
+                            "status": status,
+                        },
+                    )
 
         selections_by_record: dict[int, list[FieldEvidenceSelection]] = {}
         resolve_workers = min(self.settings.rwkv_summary_workers, len(records))
@@ -1707,10 +2060,13 @@ class RWKVReader:
                         field: extracted.get((record_index, field), [])
                         for field in record.fields
                     },
+                    prior_facts,
                 ): (record_index, record)
                 for record_index, record in enumerate(records)
             }
-            for future in as_completed(futures):
+            for resolved_completed, future in enumerate(
+                as_completed(futures), start=1
+            ):
                 record_index, record = futures[future]
                 try:
                     selections_by_record[record_index] = future.result()
@@ -1726,6 +2082,15 @@ class RWKVReader:
                         )
                         for field in record.fields
                     ]
+                if on_progress:
+                    on_progress(
+                        "evidence_record_resolved",
+                        {
+                            "completed": resolved_completed,
+                            "total": len(records),
+                            "subject": record.subject,
+                        },
+                    )
 
         selections = [
             selection
@@ -1774,10 +2139,12 @@ class RWKVReader:
             summary, material
         )
         if unsupported:
-            values = ", ".join(sorted(unsupported))
-            raise SearchReaderError(
-                "summarize", f"RWKV introduced unsupported numbers: {values}"
-            )
+            summary = _remove_unsupported_number_sentences(summary, material)
+            if not summary:
+                values = ", ".join(sorted(unsupported))
+                raise SearchReaderError(
+                    "summarize", f"RWKV introduced unsupported numbers: {values}"
+                )
         return Evidence(
             source_id=chunk.source_id,
             title=chunk.title,
@@ -1820,12 +2187,12 @@ class RWKVReader:
                     evidence_by_index[index] = evidence
                     status = "done"
                 except SearchReaderError as exc:
-                    material = chunk.text[: min(self.settings.max_evidence_chars, 1200)]
+                    material = chunk.text[: self.settings.max_evidence_chars]
                     evidence = Evidence(
                         source_id=chunk.source_id,
                         title=chunk.title,
                         url=chunk.url,
-                        claim=f"RWKV 摘要失败；原始材料摘录：{material}",
+                        claim=material,
                         quote=material,
                         score=chunk.score,
                         source_relation="unclear",
@@ -2013,7 +2380,7 @@ class RWKVReader:
         question: str,
         evidence: list[Evidence],
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
-        conversation_history: list[dict[str, str]] | None = None,
+        conversation_history: list[dict[str, object]] | None = None,
         current_message: str = "",
         research_records: list[ResearchRecord] | None = None,
         evidence_sufficient: bool | None = None,
@@ -2030,18 +2397,14 @@ class RWKVReader:
         )
         if use_atomic_records:
             selected_rows = list(evidence_selections or [])
-            reduced_material = _render_field_selections(selected_rows)
-            if len(reduced_material) > self.settings.rwkv_final_material_chars:
-                per_fact = max(
-                    100,
-                    self.settings.rwkv_final_material_chars
-                    // max(1, len(selected_rows))
-                    - 180,
-                )
-                reduced_material = _render_field_selections(
-                    selected_rows, fact_chars=per_fact
-                )
-            reduction_warnings: list[str] = []
+            reduced_material, material_truncated = _bounded_field_material(
+                selected_rows, self.settings.rwkv_final_material_chars
+            )
+            reduction_warnings: list[str] = (
+                ["atomic field material was compacted to fit the final context"]
+                if material_truncated
+                else []
+            )
             group_count = len(
                 {selection.subject for selection in selected_rows}
             )
@@ -2096,9 +2459,19 @@ class RWKVReader:
         if not answer:
             raise SearchReaderError("read", "RWKV returned an empty final answer")
         if use_atomic_records:
+            answer, atomic_warnings = _filter_unsupported_atomic_clauses(
+                answer, list(evidence_selections or [])
+            )
+            reduction_warnings.extend(atomic_warnings)
+            if not answer:
+                answer = _atomic_fallback_answer(list(evidence_selections or []))
+                reduction_warnings.append(
+                    "final atomic answer used the deterministic safety renderer"
+                )
             selected_ids = {
                 source_id
                 for selection in evidence_selections or []
+                if selection.status == "supported"
                 for source_id in _selection_source_ids(selection)
             }
             selected_evidence = [
@@ -2108,6 +2481,11 @@ class RWKVReader:
             answer = _bind_atomic_citations(
                 answer, list(evidence_selections or [])
             )
+            if selected_ids and not re.search(r"\[S\d+\]", answer, flags=re.IGNORECASE):
+                answer = _atomic_fallback_answer(list(evidence_selections or []))
+                reduction_warnings.append(
+                    "final atomic answer had no supportable clause; used safety renderer"
+                )
         else:
             answer = _attach_missing_citations(answer, ordered)
         return answer, reduction_warnings

@@ -30,3 +30,9 @@ def test_funnel_chunk_budgets_are_exposed_in_readiness(monkeypatch) -> None:
     assert readiness["reduce_chunk_chars"] == 6000
     assert readiness["reduce_fan_in"] == 4
     assert readiness["final_material_chars"] == 9000
+
+
+def test_single_page_input_is_capped_below_the_16k_context(monkeypatch) -> None:
+    monkeypatch.setenv("SEARCH_READER_MAX_EVIDENCE_CHARS", "80000")
+
+    assert get_settings().max_evidence_chars == 12000

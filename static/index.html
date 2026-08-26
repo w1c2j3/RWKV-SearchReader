@@ -118,6 +118,7 @@
       .topbar-title { overflow: hidden; font-size: 14px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
       .topbar-subtitle { margin-top: 3px; color: var(--muted); font-size: 10px; }
       .status-pill { display: flex; align-items: center; gap: 7px; margin-left: auto; padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; background: rgb(255 255 255 / 62%); color: var(--muted); font-size: 10px; }
+      .status-pill.offline .status-dot { background: #c47762; box-shadow: 0 0 0 4px rgb(196 119 98 / 12%); }
       .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #46a27f; }
       .messages { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
       .conversation { width: min(900px, calc(100% - 40px)); min-height: 100%; margin: 0 auto; padding: 34px 0 190px; }
@@ -175,7 +176,16 @@
       .trace-source-copy { min-width: 0; }
       .trace-source-title { display: -webkit-box; overflow: hidden; color: #52605d; font-size: 10px; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
       .trace-source-meta { display: block; margin-top: 2px; overflow: hidden; color: #9aa3a0; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-      .assistant-answer { color: #202826; font-size: 15px; line-height: 1.86; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .assistant-answer { color: #202826; font-size: 15px; line-height: 1.86; overflow-wrap: anywhere; }
+      .assistant-answer p { margin: 0 0 10px; white-space: pre-wrap; }
+      .assistant-answer p:last-child { margin-bottom: 0; }
+      .assistant-answer ul, .assistant-answer ol { margin: 5px 0 12px; padding-left: 24px; }
+      .assistant-answer li { margin: 4px 0; }
+      .assistant-answer h1, .assistant-answer h2, .assistant-answer h3 { margin: 14px 0 7px; line-height: 1.45; }
+      .assistant-answer h1 { font-size: 20px; } .assistant-answer h2 { font-size: 18px; } .assistant-answer h3 { font-size: 16px; }
+      .assistant-answer code { padding: 2px 5px; border-radius: 5px; background: #e9eeeb; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
+      .assistant-answer pre { margin: 10px 0 14px; padding: 13px 15px; overflow-x: auto; border-radius: 12px; background: #18211f; color: #e7efec; line-height: 1.55; white-space: pre; }
+      .assistant-answer pre code { padding: 0; background: transparent; color: inherit; }
       .answer-label { margin-bottom: 7px; color: var(--mint); font-size: 10px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
       .source-details { margin-top: 16px; }
       .source-details summary { width: fit-content; color: var(--muted); font-size: 11px; cursor: pointer; user-select: none; }
@@ -253,7 +263,7 @@
             <div class="topbar-title" id="chat-title">新的对话</div>
             <div class="topbar-subtitle">每个回答都附带可展开的查找与阅读过程</div>
           </div>
-          <div class="status-pill"><span class="status-dot"></span><span>可以提问</span></div>
+          <div class="status-pill" id="service-status"><span class="status-dot"></span><span>正在检查</span></div>
         </header>
 
         <main class="messages" id="messages" aria-live="polite">
@@ -302,6 +312,7 @@
       const chatTitle = document.querySelector('#chat-title');
       const sidebar = document.querySelector('#sidebar');
       const scrim = document.querySelector('#scrim');
+      const serviceStatus = document.querySelector('#service-status');
       const conversationStorageKey = 'rwkv-search-reader-session';
       const clientStorageKey = 'rwkv-search-reader-client';
       const randomToken = () => (crypto.randomUUID?.() || `${Date.now()}${Math.random()}`).replace(/[^A-Za-z0-9]/g, '');
@@ -323,6 +334,9 @@
       };
       let pending = false;
       let uploading = false;
+      let activeController = null;
+      let activeUploadController = null;
+      let requestGeneration = 0;
       let conversationId = readConversationId();
       const clientId = readClientId();
       saveConversationIdentity();
@@ -341,6 +355,17 @@
         questionInput.style.height = `${Math.min(questionInput.scrollHeight, 180)}px`;
       };
       const closeSidebar = () => { sidebar.classList.remove('open'); scrim.classList.remove('open'); };
+      const loadReadiness = async () => {
+        try {
+          const response = await fetch('/readyz', { cache: 'no-store' });
+          const data = await response.json();
+          serviceStatus.classList.toggle('offline', !data.ready);
+          serviceStatus.querySelector('span:last-child').textContent = data.ready ? '可以提问' : '暂时不可用';
+        } catch (_) {
+          serviceStatus.classList.add('offline');
+          serviceStatus.querySelector('span:last-child').textContent = '暂时不可用';
+        }
+      };
       const formatBytes = (value) => {
         const bytes = Number(value || 0);
         if (bytes < 1024) return `${bytes} B`;
@@ -424,6 +449,8 @@
         if (stage === 'evidence_group_read') return [`第 ${detail.level || 1} 层已归纳 ${detail.completed || 0}/${detail.total || 0} 组 · ${(detail.source_ids || []).join(' + ')}`, `合并结果：${detail.summary_preview || '重复信息已合并'}`];
         if (stage === 'finalizing') return ['正在形成最终回答', detail.group_count ? `${detail.source_count || 0} 份网页材料已归并为 ${detail.group_count} 份最终材料` : `根据 ${detail.source_count || 0} 份阅读结果直接作答`];
         if (stage === 'evidence_selecting') return ['正在建立回答与来源的对应关系', `逐项核对 ${detail.field_count || 0} 个必答字段`];
+        if (stage === 'evidence_page_checked') return [`已检查网页 ${detail.completed || 0}/${detail.total || 0} · ${detail.subject || '对象'} · ${detail.field || '字段'}`, `${detail.source_id || '材料'}：${detail.status === 'found' ? '找到候选事实' : detail.status === 'degraded' ? '本页读取未完成' : '本页没有该字段'}`];
+        if (stage === 'evidence_record_resolved') return [`已整理对象 ${detail.completed || 0}/${detail.total || 0}`, detail.subject || '字段记录已经整理'];
         if (stage === 'evidence_field_selected') return [`已核对 ${detail.completed || 0}/${detail.total || 0} · ${detail.subject || '对象'} · ${detail.field || '字段'}`, detail.status === 'supported' ? `绑定来源 ${detail.source_id || ''}：${detail.fact_preview || '已有直接证据'}` : `${detail.status === 'conflict' ? '材料存在冲突' : '材料尚未覆盖'}：${detail.fact_preview || ''}`];
         if (stage === 'completed') return ['回答已经完成', '完整记录已写入本机'];
         if (stage === 'failed') return ['本次回答未完成', detail.message || '处理过程中出现错误'];
@@ -618,13 +645,77 @@
         body.appendChild(details);
       };
 
+      const appendInlineMarkdown = (parent, text) => {
+        const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*)/g;
+        let offset = 0;
+        for (const match of text.matchAll(pattern)) {
+          if (match.index > offset) parent.appendChild(document.createTextNode(text.slice(offset, match.index)));
+          const token = match[0];
+          const node = document.createElement(token.startsWith('`') ? 'code' : 'strong');
+          node.textContent = token.startsWith('`') ? token.slice(1, -1) : token.slice(2, -2);
+          parent.appendChild(node);
+          offset = match.index + token.length;
+        }
+        if (offset < text.length) parent.appendChild(document.createTextNode(text.slice(offset)));
+      };
+
+      const renderAnswer = (container, value) => {
+        const text = String(value || '没有生成回答。').replace(/\r\n?/g, '\n');
+        const segments = text.split(/```/);
+        segments.forEach((segment, segmentIndex) => {
+          if (segmentIndex % 2) {
+            const lines = segment.split('\n');
+            if (lines[0] && /^[A-Za-z0-9_+-]+$/.test(lines[0].trim())) lines.shift();
+            const pre = document.createElement('pre');
+            const code = document.createElement('code');
+            code.textContent = lines.join('\n').replace(/^\n|\n$/g, '');
+            pre.appendChild(code);
+            container.appendChild(pre);
+            return;
+          }
+          let activeList = null;
+          let activeType = '';
+          const closeList = () => { activeList = null; activeType = ''; };
+          segment.split('\n').forEach((rawLine) => {
+            const line = rawLine.trimEnd();
+            if (!line.trim()) { closeList(); return; }
+            const heading = line.match(/^(#{1,3})\s+(.+)$/);
+            const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
+            const numbered = line.match(/^\s*\d+[.)、]\s+(.+)$/);
+            if (heading) {
+              closeList();
+              const node = document.createElement(`h${heading[1].length}`);
+              appendInlineMarkdown(node, heading[2]);
+              container.appendChild(node);
+              return;
+            }
+            if (bullet || numbered) {
+              const type = bullet ? 'ul' : 'ol';
+              if (!activeList || activeType !== type) {
+                activeList = document.createElement(type);
+                activeType = type;
+                container.appendChild(activeList);
+              }
+              const item = document.createElement('li');
+              appendInlineMarkdown(item, (bullet || numbered)[1]);
+              activeList.appendChild(item);
+              return;
+            }
+            closeList();
+            const paragraph = document.createElement('p');
+            appendInlineMarkdown(paragraph, line);
+            container.appendChild(paragraph);
+          });
+        });
+      };
+
       const finishAssistant = (body, data) => {
         const label = document.createElement('div');
         label.className = 'answer-label';
         label.textContent = '回答';
         const answer = document.createElement('div');
         answer.className = 'assistant-answer';
-        answer.textContent = data.answer || '没有生成回答。';
+        renderAnswer(answer, data.answer);
         body.append(label, answer);
         appendSources(body, data.sources || []);
         const meta = document.createElement('div');
@@ -641,17 +732,21 @@
         body.appendChild(answer);
       };
 
-      const requestAnswer = async (question, onProgress) => {
+      const requestAnswer = async (question, onProgress, signal) => {
         const response = await fetch('/v1/answer/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal,
           body: JSON.stringify({
             question,
             conversation_id: conversationId,
             client_id: clientId,
           }),
         });
-        if (!response.ok || !response.body) throw new Error('请求失败');
+        if (!response.ok || !response.body) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(typeof error.detail === 'string' ? error.detail : '请求失败');
+        }
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -702,6 +797,18 @@
       };
 
       const showConversation = (record) => {
+        if (pending || uploading) {
+          requestGeneration += 1;
+          activeController?.abort();
+          activeUploadController?.abort();
+          activeController = null;
+          activeUploadController = null;
+          pending = false;
+          uploading = false;
+          submit.disabled = false;
+          attach.disabled = false;
+          questionInput.disabled = false;
+        }
         const turns = conversationTurns(record);
         conversation.querySelectorAll('.message').forEach((node) => node.remove());
         welcome.hidden = Boolean(turns.length);
@@ -791,10 +898,17 @@
       };
 
       const resetChat = () => {
+        requestGeneration += 1;
+        activeController?.abort();
+        activeController = null;
+        activeUploadController?.abort();
+        activeUploadController = null;
         pending = false;
+        uploading = false;
         conversationId = createConversationId();
         saveConversationIdentity();
         submit.disabled = false;
+        attach.disabled = false;
         questionInput.disabled = false;
         questionInput.value = '';
         currentDocuments = [];
@@ -826,6 +940,10 @@
           return;
         }
         uploading = true;
+        const generation = requestGeneration;
+        const uploadController = new AbortController();
+        activeUploadController?.abort();
+        activeUploadController = uploadController;
         attach.disabled = true;
         submit.disabled = true;
         try {
@@ -833,11 +951,13 @@
           await fetch('/v1/conversations/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: uploadController.signal,
             body: JSON.stringify({ client_id: clientId, conversation_id: conversationId }),
           });
           const response = await fetch('/v1/documents/upload', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: uploadController.signal,
             body: JSON.stringify({
               client_id: clientId,
               conversation_id: conversationId,
@@ -849,6 +969,7 @@
             const error = await response.json().catch(() => ({}));
             throw new Error(error.detail || '文档上传失败');
           }
+          if (generation !== requestGeneration) return;
           const uploadedDocument = await response.json();
           if (!currentDocuments.some((item) => item.id === uploadedDocument.id)) currentDocuments.push(uploadedDocument);
           renderDocuments();
@@ -856,9 +977,12 @@
           await loadHistory(false);
           questionInput.focus();
         } catch (error) {
+          if (error.name === 'AbortError' || generation !== requestGeneration) return;
           documentNotice = String(error.message || '文档上传失败');
           renderDocuments();
         } finally {
+          if (generation !== requestGeneration) return;
+          activeUploadController = null;
           uploading = false;
           attach.disabled = pending;
           submit.disabled = pending;
@@ -884,6 +1008,10 @@
         const question = questionInput.value.trim();
         if (!question || pending) return;
         const isNewConversation = !conversation.querySelector('.message.user');
+        const generation = ++requestGeneration;
+        const controller = new AbortController();
+        activeController?.abort();
+        activeController = controller;
         pending = true;
         submit.disabled = true;
         attach.disabled = true;
@@ -898,16 +1026,20 @@
         body.appendChild(trace.details);
         scrollToBottom();
         try {
-          const data = await requestAnswer(question, trace.update);
+          const data = await requestAnswer(question, trace.update, controller.signal);
+          if (generation !== requestGeneration) return;
           finishAssistant(body, data);
           conversationId = data.conversation_id || conversationId;
           saveConversationIdentity();
           await loadHistory(false);
         } catch (error) {
+          if (error.name === 'AbortError' || generation !== requestGeneration) return;
           if (!trace.isTerminal()) trace.update('failed', { message: error.message || '未知错误' });
           appendError(body, error.message || '未知错误');
           loadHistory(false);
         } finally {
+          if (generation !== requestGeneration) return;
+          activeController = null;
           pending = false;
           submit.disabled = false;
           attach.disabled = false;
@@ -919,6 +1051,7 @@
 
       resizeComposer();
       loadHistory();
+      loadReadiness();
     </script>
   </body>
 </html>

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import time
+
 from rwkv_search_reader.tracing import (
     append_trace,
     recent_traces,
@@ -72,3 +75,25 @@ def test_session_turns_returns_only_matching_successful_conversation(tmp_path) -
     records = session_records(tmp_path, "chat-a", 6)
     assert [record["question"] for record in records] == ["第二问", "第一问"]
     assert all(record["session_id"] == "chat-a" for record in records)
+
+
+def test_trace_retention_removes_expired_daily_files(tmp_path) -> None:
+    expired = tmp_path / "runs-2020-01-01.jsonl"
+    expired.write_text("{}\n", encoding="utf-8")
+    old = time.time() - 5 * 86400
+    os.utime(expired, (old, old))
+
+    append_trace(
+        tmp_path,
+        {
+            "status": "ok",
+            "question": "新记录",
+            "answer": "回答",
+            "configuration": {
+                "trace_retention_days": 1,
+                "trace_max_total_bytes": 10_000_000,
+            },
+        },
+    )
+
+    assert not expired.exists()

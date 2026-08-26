@@ -405,6 +405,8 @@ class Retriever:
         question: str,
         excluded_urls: set[str] | None = None,
         start_index: int = 1,
+        results_per_query: int | None = None,
+        max_total_results: int | None = None,
     ) -> tuple[list[str], list[SearchHit], list[DocumentChunk], list[str]]:
         queries = list(
             dict.fromkeys(
@@ -415,12 +417,15 @@ class Retriever:
         )
         if not queries:
             raise SearchReaderError("input", "search query is empty")
+        per_query = max(1, min(10, results_per_query or self.settings.search_max_results))
+        total_limit = max_total_results or per_query * len(queries)
+        total_limit = max(1, min(60, total_limit))
         groups: list[list[SearchHit]] = []
         search_warnings: list[str] = []
         for query in queries:
             try:
                 groups.append(
-                    self.provider.search(query, self.settings.search_max_results)
+                    self.provider.search(query, per_query)
                 )
             except SearchReaderError as exc:
                 search_warnings.append(f"{query}: {exc}"[:500])
@@ -428,7 +433,7 @@ class Retriever:
             raise SearchReaderError("search", "all deterministic search queries failed")
         deduplicated = _balanced_hits(
             groups,
-            self.settings.search_max_results,
+            total_limit,
             excluded_urls=excluded_urls,
         )
         if not deduplicated:
@@ -436,7 +441,11 @@ class Retriever:
         for index, hit in enumerate(deduplicated, start=start_index):
             hit.source_id = f"S{index}"
 
-        selected = deduplicated[: self.settings.fetch_pages]
+        selected = (
+            deduplicated[: self.settings.fetch_pages * len(queries)]
+            if self.provider.results_are_material
+            else deduplicated[: self.settings.fetch_pages]
+        )
         if self.provider.results_are_material:
             chunks = provider_materials(selected)
             if not chunks:

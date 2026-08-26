@@ -106,6 +106,9 @@ class Settings:
     review_max_queries: int = 3
     conversation_turns: int = 10
     request_timeout_seconds: int = 45
+    api_max_concurrent_requests: int = 4
+    api_queue_timeout_seconds: int = 20
+    api_rate_limit_per_minute: int = 20
 
     rwkv_base_url: str = "http://127.0.0.1:29613/v1"
     rwkv_api_key: str = "local"
@@ -123,10 +126,11 @@ class Settings:
     rwkv_final_model: str = ""
     rwkv_final_protocol: str = ""
     model_timeout_seconds: int = 180
+    rwkv_max_calls_per_request: int = 600
 
     chunk_chars: int = 2600
     chunk_overlap_chars: int = 260
-    max_evidence_chars: int = 18000
+    max_evidence_chars: int = 12000
     document_max_bytes: int = 2_000_000
     document_chunk_chars: int = 2400
     document_max_chunks: int = 12
@@ -134,6 +138,8 @@ class Settings:
     api_port: int = 8790
     trace_enabled: bool = True
     trace_directory: Path = PROJECT_ROOT / "logs"
+    trace_retention_days: int = 30
+    trace_max_total_bytes: int = 1_000_000_000
 
     @property
     def rwkv_configured(self) -> bool:
@@ -173,6 +179,8 @@ class Settings:
             "reduce_fan_in": self.rwkv_reduce_fan_in,
             "final_material_chars": self.rwkv_final_material_chars,
             "review_max_rounds": self.review_max_rounds,
+            "max_concurrent_requests": self.api_max_concurrent_requests,
+            "max_model_calls_per_request": self.rwkv_max_calls_per_request,
             "research_plan_enabled": self.research_plan_enabled,
             "research_plan_max_queries": self.research_plan_max_queries,
             "rwkv_configured": self.rwkv_configured,
@@ -212,6 +220,15 @@ def get_settings() -> Settings:
         request_timeout_seconds=_integer(
             "SEARCH_READER_REQUEST_TIMEOUT_SECONDS", 45, 5, 180
         ),
+        api_max_concurrent_requests=_integer(
+            "SEARCH_READER_API_MAX_CONCURRENT_REQUESTS", 4, 1, 32
+        ),
+        api_queue_timeout_seconds=_integer(
+            "SEARCH_READER_API_QUEUE_TIMEOUT_SECONDS", 20, 1, 300
+        ),
+        api_rate_limit_per_minute=_integer(
+            "SEARCH_READER_API_RATE_LIMIT_PER_MINUTE", 20, 1, 600
+        ),
         rwkv_base_url=_text("SEARCH_READER_RWKV_BASE_URL", "http://127.0.0.1:29613/v1"),
         rwkv_api_key=_text("SEARCH_READER_RWKV_API_KEY", "local"),
         rwkv_model=_text("SEARCH_READER_RWKV_MODEL"),
@@ -240,12 +257,15 @@ def get_settings() -> Settings:
         model_timeout_seconds=_integer(
             "SEARCH_READER_MODEL_TIMEOUT_SECONDS", 180, 10, 900
         ),
+        rwkv_max_calls_per_request=_integer(
+            "SEARCH_READER_RWKV_MAX_CALLS_PER_REQUEST", 600, 16, 1000
+        ),
         chunk_chars=chunk_chars,
         chunk_overlap_chars=_integer(
             "SEARCH_READER_CHUNK_OVERLAP_CHARS", 260, 0, max(1, chunk_chars // 2)
         ),
         max_evidence_chars=_integer(
-            "SEARCH_READER_MAX_EVIDENCE_CHARS", 18000, 2000, 80000
+            "SEARCH_READER_MAX_EVIDENCE_CHARS", 12000, 2000, 12000
         ),
         document_max_bytes=_integer(
             "SEARCH_READER_DOCUMENT_MAX_BYTES", 2_000_000, 10_000, 10_000_000
@@ -259,4 +279,16 @@ def get_settings() -> Settings:
         api_host=_text("SEARCH_READER_API_HOST", "0.0.0.0"),
         api_port=_integer("SEARCH_READER_API_PORT", 8790, 1, 65535),
         trace_enabled=_boolean("SEARCH_READER_TRACE_ENABLED", True),
+        trace_directory=Path(
+            _text("SEARCH_READER_TRACE_DIRECTORY", str(PROJECT_ROOT / "logs"))
+        ).expanduser(),
+        trace_retention_days=_integer(
+            "SEARCH_READER_TRACE_RETENTION_DAYS", 30, 1, 3650
+        ),
+        trace_max_total_bytes=_integer(
+            "SEARCH_READER_TRACE_MAX_TOTAL_BYTES",
+            1_000_000_000,
+            10_000_000,
+            20_000_000_000,
+        ),
     )

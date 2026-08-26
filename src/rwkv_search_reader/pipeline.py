@@ -5,12 +5,15 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
+from typing import Any
 
 from .config import Settings, get_settings
 from .documents import MarkdownPassage
 from .models import (
     DocumentChunk,
+    EvidenceAudit,
     PipelineResult,
+    ResearchPlan,
     SearchHit,
     SearchReaderError,
 )
@@ -231,7 +234,7 @@ class SearchReaderPipeline:
         question: str,
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
         session_id: str = "",
-        conversation_history: list[dict[str, str]] | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
         document_passages: list[MarkdownPassage] | None = None,
     ) -> PipelineResult:
         normalized = " ".join(str(question or "").split()).strip()
@@ -261,6 +264,9 @@ class SearchReaderPipeline:
             "final_material_chars": self.settings.rwkv_final_material_chars,
             "max_tokens": self.settings.rwkv_max_tokens,
             "temperature": self.settings.rwkv_temperature,
+            "max_model_calls_per_request": self.settings.rwkv_max_calls_per_request,
+            "trace_retention_days": self.settings.trace_retention_days,
+            "trace_max_total_bytes": self.settings.trace_max_total_bytes,
         }
 
         def emit(stage_name: str, detail: dict[str, object]) -> None:
@@ -349,6 +355,11 @@ class SearchReaderPipeline:
                     warnings=[],
                     timings_ms=timings,
                     trace=trace,
+                    conversation_state=(
+                        history[-1].get("state", {})
+                        if isinstance(history[-1].get("state", {}), dict)
+                        else {}
+                    ),
                 )
                 if self.settings.trace_enabled:
                     append_trace(
@@ -414,6 +425,30 @@ class SearchReaderPipeline:
                         },
                     )
                 else:
+                    if (
+                        research_plan.decision == "clarify"
+                        and (
+                            not self.reader.clarification_required(effective_question)
+                            or bool(self.reader.prior_facts(history))
+                        )
+                    ):
+                        research_plan = ResearchPlan(
+                            decision="search",
+                            goal=effective_question,
+                            queries=[effective_question],
+                            scope_mode=(
+                                "discover"
+                                if re.search(
+                                    r"各个|所有|哪些|有哪些|某类|一类|类别",
+                                    effective_question,
+                                )
+                                else "fixed"
+                            ),
+                            fallback=True,
+                        )
+                        pipeline_warnings.append(
+                            "unnecessary clarification was converted to retrieval"
+                        )
                     emit(
                         "plan_completed",
                         {
@@ -683,6 +718,43 @@ class SearchReaderPipeline:
 
             audit_warnings: list[str] = []
             audit_sufficient: bool | None = None
+            evidence_selections = []
+            selection_warnings: list[str] = []
+            prior_facts = self.reader.prior_facts(history)
+
+            def refresh_field_selections(round_number: int) -> None:
+                nonlocal evidence_selections
+                if not (research_plan and research_plan.records):
+                    return
+                field_count = sum(
+                    max(1, len(record.fields)) for record in research_plan.records
+                )
+                emit(
+                    "evidence_selecting",
+                    {
+                        "round": round_number,
+                        "record_count": len(research_plan.records),
+                        "field_count": field_count,
+                        "message": "正在逐对象逐字段绑定直接来源",
+                    },
+                )
+                selection_started = time.perf_counter()
+                selections, new_warnings = self.reader.select_evidence(
+                    effective_question,
+                    research_plan.records,
+                    evidence,
+                    on_progress=emit,
+                    prior_facts=prior_facts,
+                )
+                evidence_selections = selections
+                selection_warnings.extend(new_warnings)
+                timings["evidence_select"] = round(
+                    timings.get("evidence_select", 0.0)
+                    + (time.perf_counter() - selection_started) * 1000,
+                    1,
+                )
+
+            refresh_field_selections(1)
             audit_started = time.perf_counter()
             for review_index in range(self.settings.review_max_rounds + 1):
                 emit(
@@ -700,21 +772,24 @@ class SearchReaderPipeline:
                             evidence,
                             queries,
                             research_records=research_plan.records,
+                            field_selections=evidence_selections,
                         )
                     else:
                         audit = self.reader.audit(effective_question, evidence, queries)
                 except SearchReaderError as exc:
                     audit_warnings.append(f"evidence audit degraded: {exc}"[:500])
-                    emit(
-                        "audit_completed",
-                        {
-                            "round": review_index + 1,
-                            "sufficient": True,
-                            "degraded": True,
-                            "message": "审核结果不可用，使用现有材料",
-                        },
+                    missing_queries = [
+                        f"{item.subject} {item.field} 官方资料"
+                        for item in evidence_selections
+                        if item.status != "supported"
+                    ][: self.settings.review_max_queries]
+                    audit = EvidenceAudit(
+                        sufficient=bool(evidence_selections)
+                        and all(
+                            item.status == "supported" for item in evidence_selections
+                        ),
+                        queries=missing_queries,
                     )
-                    break
 
                 if audit.sufficient:
                     audit_sufficient = True
@@ -862,33 +937,9 @@ class SearchReaderPipeline:
                 timings["summarize"] += round((time.perf_counter() - stage) * 1000, 1)
                 evidence.extend(new_evidence)
                 summary_warnings.extend(new_summary_warnings)
+                refresh_field_selections(supplement_round + 1)
 
             timings["audit"] = round((time.perf_counter() - audit_started) * 1000, 1)
-
-            evidence_selections = []
-            selection_warnings: list[str] = []
-            if research_plan and research_plan.records:
-                field_count = sum(
-                    max(1, len(record.fields)) for record in research_plan.records
-                )
-                emit(
-                    "evidence_selecting",
-                    {
-                        "record_count": len(research_plan.records),
-                        "field_count": field_count,
-                        "message": "正在逐对象逐字段绑定直接来源",
-                    },
-                )
-                selection_started = time.perf_counter()
-                evidence_selections, selection_warnings = self.reader.select_evidence(
-                    effective_question,
-                    research_plan.records,
-                    evidence,
-                    on_progress=emit,
-                )
-                timings["evidence_select"] = round(
-                    (time.perf_counter() - selection_started) * 1000, 1
-                )
 
             stage = time.perf_counter()
             answer, final_warnings = self.reader.finalize(
@@ -906,6 +957,45 @@ class SearchReaderPipeline:
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)
             emit("completed", {"duration_ms": timings["total"]})
 
+            controlled_citation_ids = {
+                source_id
+                for item in evidence_selections
+                if item.status in {"supported", "conflict"}
+                for source_id in [*item.source_ids, item.source_id]
+                if source_id
+            }
+            citation_evidence = (
+                [
+                    item
+                    for item in evidence
+                    if item.source_id in controlled_citation_ids
+                ]
+                if evidence_selections
+                else evidence
+            )
+            conversation_state = {
+                "resolved_question": effective_question,
+                "records": [
+                    {
+                        "subject": record.subject,
+                        "question": record.question,
+                        "fields": list(record.fields),
+                    }
+                    for record in (research_plan.records if research_plan else [])
+                ],
+                "facts": [
+                    {
+                        "subject": item.subject,
+                        "field": item.field,
+                        "status": item.status,
+                        "fact": item.fact,
+                        "source_ids": list(dict.fromkeys([*item.source_ids, item.source_id]))
+                        if item.source_id
+                        else list(item.source_ids),
+                    }
+                    for item in evidence_selections
+                ],
+            }
             warnings = [
                 *pipeline_warnings,
                 *retrieval_warnings,
@@ -913,7 +1003,7 @@ class SearchReaderPipeline:
                 *audit_warnings,
                 *selection_warnings,
                 *final_warnings,
-                *citation_warnings(answer, evidence),
+                *citation_warnings(answer, citation_evidence),
             ]
             result = PipelineResult(
                 request_id=request_id,
@@ -946,6 +1036,7 @@ class SearchReaderPipeline:
                 warnings=warnings,
                 timings_ms=timings,
                 trace=trace,
+                conversation_state=conversation_state,
             )
             if self.settings.trace_enabled:
                 append_trace(

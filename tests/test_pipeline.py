@@ -304,6 +304,8 @@ def test_model_planner_queries_and_records_reach_audit_and_writer(tmp_path) -> N
     assert received["evidence_sufficient"] is True
     assert len(received.get("writer_records", [])) == 2
     assert result.queries == planned_queries
+    assert result.conversation_state["records"][0]["subject"] == "原神"
+    assert result.conversation_state["facts"][0]["source_ids"] == ["S1"]
 
 
 def test_pipeline_persists_failed_runs_with_trace(tmp_path) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from rwkv_search_reader.conversations import ConversationStore
@@ -161,3 +163,62 @@ def test_conversation_history_keeps_relevant_older_turns(tmp_path) -> None:
         "普通问题 6",
         "普通问题 7",
     ]
+
+
+def test_concurrent_turn_writes_keep_every_message_pair(tmp_path) -> None:
+    path = tmp_path / "conversations.sqlite3"
+    ConversationStore(path).ensure("conv_parallel123", "client_parallel123")
+    barrier = threading.Barrier(12)
+    errors: list[Exception] = []
+
+    def write(index: int) -> None:
+        store = ConversationStore(path)
+        barrier.wait()
+        try:
+            store.append_turn(
+                "conv_parallel123",
+                "client_parallel123",
+                f"问题{index}",
+                {"answer": f"回答{index}"},
+            )
+        except Exception as exc:  # noqa: BLE001 - collect failures from worker thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(index,)) for index in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    conversation = ConversationStore(path).get(
+        "conv_parallel123", "client_parallel123"
+    )
+    assert errors == []
+    assert len(conversation["items"]) == 24
+
+
+def test_history_restores_structured_conversation_state(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    store.ensure("conv_state123", "client_state123")
+    state = {
+        "resolved_question": "原神当前版本是什么？",
+        "facts": [
+            {
+                "subject": "原神",
+                "field": "版本",
+                "status": "supported",
+                "fact": "7.0版本",
+                "source_ids": ["S1"],
+            }
+        ],
+    }
+    store.append_turn(
+        "conv_state123",
+        "client_state123",
+        "原神当前版本是什么？",
+        {"answer": "7.0版本 [S1]", "conversation_state": state},
+    )
+
+    history = store.history("conv_state123", "client_state123")
+
+    assert history[0]["state"] == state
