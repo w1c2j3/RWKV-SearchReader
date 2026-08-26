@@ -938,7 +938,7 @@ class SearchReaderPipeline:
                     else self.provider.name
                 ),
                 reader_mode=(
-                    "rwkv-planned-parallel-funnel-summaries-final-summary"
+                    "rwkv-planned-parallel-atomic-fields-final-summary"
                     if evidence_selections
                     else "rwkv-reviewed-parallel-funnel-final-summary"
                 ),

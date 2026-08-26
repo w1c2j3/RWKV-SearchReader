@@ -12,16 +12,20 @@ from rwkv_search_reader.models import (
     DocumentChunk,
     Evidence,
     FieldEvidenceSelection,
+    ResearchRecord,
     SearchHit,
     SearchReaderError,
 )
 from rwkv_search_reader.reader import (
     RWKVReader,
     _attach_missing_citations,
+    _bind_atomic_citations,
     _bind_subject_citations,
     _clean_final_answer,
     _context_retry_tokens,
+    _copied_fact_supported,
     _eligible_evidence,
+    _field_binding_applicable,
     _final_evidence_order,
     _is_explicit_benefit_fact,
     _narrow_selected_fact,
@@ -372,6 +376,64 @@ def test_source_summaries_run_concurrently_and_keep_input_order() -> None:
     assert warnings == []
 
 
+def test_field_selection_maps_one_webpage_per_call_then_resolves_one_record() -> None:
+    reader = RWKVReader(
+        replace(Settings(), rwkv_model="test", rwkv_summary_workers=4)
+    )
+    rows = [
+        Evidence(
+            "S1",
+            "宇树科技发行价",
+            "https://example.com/issue",
+            "PAGE_ONE 宇树科技发行价为150.8元/股。",
+            "PAGE_ONE 宇树科技发行价为150.8元/股。",
+            score=0.9,
+        ),
+        Evidence(
+            "S2",
+            "宇树科技上市首日行情",
+            "https://example.com/open",
+            "PAGE_TWO 宇树科技上市首日开盘价为1100元。",
+            "PAGE_TWO 宇树科技上市首日开盘价为1100元。",
+            score=0.8,
+        ),
+    ]
+    extraction_prompts: list[str] = []
+
+    def complete(user, **kwargs):
+        if kwargs["stage"] == "evidence_extract":
+            extraction_prompts.append(user)
+            assert ("PAGE_ONE" in user) != ("PAGE_TWO" in user)
+            if "发行价" in user.rsplit("\n\n", 1)[-1] and "PAGE_ONE" in user:
+                return "宇树科技发行价为150.8元/股。"
+            if "开盘价" in user.rsplit("\n\n", 1)[-1] and "PAGE_TWO" in user:
+                return "宇树科技上市首日开盘价为1100元。"
+            return "NONE"
+        assert kwargs["stage"] == "evidence_resolve"
+        assert '"field": "发行价"' in user
+        assert '"field": "上市首日开盘价"' in user
+        return (
+            '{"facts":['
+            '{"field":"发行价","fact":"150.8元/股","source_ids":["S1"]},'
+            '{"field":"上市首日开盘价","fact":"1100元","source_ids":["S2"]}'
+            "]}"
+        )
+
+    reader._complete = complete
+    selections, warnings = reader.select_evidence(
+        "宇树科技发行价和上市首日开盘价分别是多少？",
+        [ResearchRecord("宇树科技", "价格", ["发行价", "上市首日开盘价"])],
+        rows,
+    )
+
+    assert len(extraction_prompts) == 4
+    assert warnings == []
+    assert [(item.field, item.fact, item.source_ids) for item in selections] == [
+        ("发行价", "150.8元/股", ["S1"]),
+        ("上市首日开盘价", "1100元", ["S2"]),
+    ]
+
+
 def test_summary_prompt_contains_only_material_and_one_short_request() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
@@ -551,6 +613,14 @@ def test_summary_numbers_must_exist_in_the_source_material() -> None:
     ) == {"1.1E+3", "2024"}
 
 
+def test_copied_fact_support_normalizes_decimal_zeros_but_not_word_order() -> None:
+    assert _copied_fact_supported("发行价150.8元", "发行价为150.80元/股")
+    assert not _copied_fact_supported(
+        "2025年8月19日上市",
+        "公司在2025年完成融资，随后于8月19日上市",
+    )
+
+
 def test_semantic_version_numbers_support_their_major_version() -> None:
     assert _unsupported_summary_numbers("7.0版本", "版本7.0.0_47144228") == set()
 
@@ -638,6 +708,24 @@ def test_subject_citations_use_all_sources_selected_for_that_subject() -> None:
     )
 
     assert bound == "原神为7.0版本，8月12日更新 [S1][S12]。绝区零为3.1版本 [S2]。"
+
+
+def test_atomic_citations_match_field_values_instead_of_every_subject_source() -> None:
+    selections = [
+        FieldEvidenceSelection(
+            "宇树科技", "发行价", "S2", "supported", "150.8元/股", ["S2"]
+        ),
+        FieldEvidenceSelection(
+            "宇树科技", "上市首日开盘价", "S4", "supported", "1100元", ["S4"]
+        ),
+    ]
+
+    bound = _bind_atomic_citations(
+        "宇树科技发行价为150.8元/股。上市首日开盘价为1100元。",
+        selections,
+    )
+
+    assert bound == "宇树科技发行价为150.8元/股 [S2]。上市首日开盘价为1100元 [S4]。"
 
 
 def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
@@ -833,7 +921,7 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     assert len(captured["prompts"]) == 1
 
 
-def test_field_audit_is_not_sent_to_final_reader_or_used_as_filter() -> None:
+def test_field_bound_final_uses_only_atomic_field_records() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     rows = _evidence(2)
     captured = {}
@@ -851,16 +939,17 @@ def test_field_audit_is_not_sent_to_final_reader_or_used_as_filter() -> None:
                 "对象", "字段", "S2", "supported", "SELECTED ONLY"
             )
         ],
+        research_records=[ResearchRecord("对象", "question", ["字段"])],
     )
 
     assert '"S2"' in captured["user"]
-    assert "Fact 1" in captured["user"]
-    assert "Fact 2" in captured["user"]
-    assert "SELECTED ONLY" not in captured["user"]
+    assert "Fact 1" not in captured["user"]
+    assert "Fact 2" not in captured["user"]
+    assert "SELECTED ONLY" in captured["user"]
     assert answer == "只使用已绑定字段 [S2]"
 
 
-def test_field_bound_final_reads_every_per_page_summary() -> None:
+def test_field_bound_final_does_not_reintroduce_unselected_page_summaries() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     rows = _evidence(3)
     rows[0].title = "原神版本活动"
@@ -885,13 +974,47 @@ def test_field_bound_final_reads_every_per_page_summary() -> None:
         evidence_selections=[
             FieldEvidenceSelection("原神", "版本", "S2", "supported", "7.0版本")
         ],
+        research_records=[ResearchRecord("原神", "当前版本", ["版本"])],
     )
 
     assert "<来源摘要二元组>" not in captured["user"]
-    assert "原神新增主题活动与奖励说明" in captured["user"]
-    assert "其他游戏更新" in captured["user"]
+    assert "7.0版本" in captured["user"]
+    assert "原神新增主题活动与奖励说明" not in captured["user"]
+    assert "其他游戏更新" not in captured["user"]
     assert "逐字段证据选择" not in captured["user"]
-    assert answer == "原神为7.0版本，并开放了多个主题活动 [S1][S2]。"
+    assert answer == "原神为7.0版本，并开放了多个主题活动 [S2]。"
+
+
+def test_open_ended_question_keeps_the_summary_funnel() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    rows = _evidence(2)
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "本周有两项动态 [S1][S2]。"
+
+    reader._complete = complete
+    reader.finalize(
+        "最近一周有哪些科技动态？",
+        rows,
+        evidence_selections=[
+            FieldEvidenceSelection("科技动态", "事件", "S2", "supported", "单条事件")
+        ],
+        research_records=[ResearchRecord("科技动态", "最近动态", ["事件"])],
+    )
+
+    assert "Fact 1" in captured["user"]
+    assert "Fact 2" in captured["user"]
+    assert "单条事件" not in captured["user"]
+
+
+def test_atomic_field_binding_skips_procedural_and_open_ended_questions() -> None:
+    records = [ResearchRecord("对象", "问题", ["字段"])]
+
+    assert _field_binding_applicable("对象的版本号和发布日期是什么？", records)
+    assert not _field_binding_applicable("最近有哪些科技动态？", records)
+    assert not _field_binding_applicable("怎样配置 healthcheck？给出示例。", records)
 
 
 def test_final_reader_receives_resolved_question_without_duplicate_history() -> None:

@@ -71,6 +71,7 @@ class FieldEvidenceSelection:
     source_id: str
     status: str
     fact: str = ""
+    source_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
