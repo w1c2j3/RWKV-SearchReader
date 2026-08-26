@@ -112,7 +112,7 @@ class Settings:
     rwkv_model: str = ""
     rwkv_protocol: str = "completions"
     rwkv_summary_workers: int = 10
-    rwkv_summary_max_tokens: int = 384
+    rwkv_summary_max_tokens: int = 1024
     rwkv_max_tokens: int = 4090
     rwkv_temperature: float = 0.1
     rwkv_final_base_url: str = ""
@@ -165,6 +165,7 @@ class Settings:
             "search_configured": provider_ready,
             "reader_mode": "rwkv-planned-parallel-page-summaries-final-summary",
             "summary_workers": self.rwkv_summary_workers,
+            "summary_max_tokens": self.rwkv_summary_max_tokens,
             "review_max_rounds": self.review_max_rounds,
             "research_plan_enabled": self.research_plan_enabled,
             "research_plan_max_queries": self.research_plan_max_queries,
@@ -213,7 +214,7 @@ def get_settings() -> Settings:
             "SEARCH_READER_RWKV_SUMMARY_WORKERS", 10, 1, 32
         ),
         rwkv_summary_max_tokens=_integer(
-            "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 384, 96, 2048
+            "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 1024, 96, 2048
         ),
         rwkv_max_tokens=_integer("SEARCH_READER_RWKV_MAX_TOKENS", 4090, 128, 4090),
         rwkv_temperature=_number("SEARCH_READER_RWKV_TEMPERATURE", 0.1, 0.0, 2.0),

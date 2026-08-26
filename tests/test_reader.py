@@ -266,6 +266,7 @@ def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
 
     def complete(user, **kwargs):
         captured["user"] = user
+        captured["max_tokens"] = kwargs["max_tokens"]
         return "Relevant fact."
 
     reader._complete = complete
@@ -284,6 +285,7 @@ def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
     assert "绝不能用用户问题里的类别名或泛称代替对象" in prompt
     assert "股价" not in prompt
     assert "本周最重要" not in prompt
+    assert captured["max_tokens"] == 1024
     assert evidence.claim == "Relevant fact."
 
 
