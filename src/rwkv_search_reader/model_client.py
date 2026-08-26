@@ -88,14 +88,14 @@ class OpenAICompatibleClient:
         stage: str,
     ) -> str:
         # Deliberately no tools/function-calling fields in this payload.
+        messages = [{"role": "user", "content": user}]
+        if system.strip():
+            messages.insert(0, {"role": "system", "content": system})
         return self._post(
             "/chat/completions",
             {
                 "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+                "messages": messages,
                 "stream": False,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
@@ -116,9 +116,9 @@ class OpenAICompatibleClient:
         safe_user = _escape_role_headers(user)
         # G1I receives a complete empty reasoning block and continues directly
         # with the public answer. Keep this exact prefill intact.
-        prompt = (
-            f"System: {safe_system}\n\nUser: {safe_user}\n\nAssistant: <think></think>"
-        )
+        prompt = f"User: {safe_user}\n\nAssistant: <think></think>"
+        if safe_system.strip():
+            prompt = f"System: {safe_system}\n\n{prompt}"
         answer = self._post(
             "/completions",
             {

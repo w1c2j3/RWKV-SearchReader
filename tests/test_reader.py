@@ -111,6 +111,19 @@ def test_research_plan_parser_requires_a_real_clarification_question() -> None:
     assert plan.clarification == "你说的各个二游具体包括哪些？"
 
 
+def test_research_plan_parser_drops_prompt_placeholders() -> None:
+    plan = _parse_research_plan_output(
+        '{"decision":"search","scope_mode":"fixed","goal":"查版本",'
+        '"records":[{"subject":"明确对象","question":"该记录需要回答的问题",'
+        '"fields":["字段"]}],"queries":["原神 当前版本"],"clarification":""}',
+        "原神当前版本是什么？",
+        4,
+    )
+
+    assert plan.records == []
+    assert plan.queries == ["原神 当前版本"]
+
+
 def test_research_plan_prompt_puts_question_before_requirements() -> None:
     reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
     captured = {}
@@ -124,8 +137,10 @@ def test_research_plan_prompt_puts_question_before_requirements() -> None:
     plan = reader.plan_research("UNIQUE PLAN QUESTION")
 
     assert captured["user"].index("UNIQUE PLAN QUESTION") < captured["user"].index(
-        "你是资料研究规划器"
+        "把问题转换为检索计划"
     )
+    assert "判定示例" not in captured["user"]
+    assert '"subject":"明确对象"' not in captured["user"]
     assert captured["stage"] == "plan"
     assert plan.queries == ["Python 3.14 发布日期"]
 
@@ -201,6 +216,27 @@ def test_source_summary_removes_material_wrapper() -> None:
     assert _parse_source_summary("<材料>相关事实。</材料>") == "相关事实。"
 
 
+def test_source_summary_removes_generic_intro_and_duplicate_lines() -> None:
+    value = """根据提供的网页内容，以下是总结：
+- 版本3.1已经上线。
+- 活动正在开放。
+- 版本3.1已经上线。"""
+
+    assert _parse_source_summary(value) == "- 版本3.1已经上线。- 活动正在开放。"
+
+
+def test_final_answer_removes_material_preface_and_empty_source_footer() -> None:
+    value = "根据提供的材料，《绝区零》为3.1版本 [S1]。材料来源：、、 [S1]。"
+
+    assert _clean_final_answer(value) == "《绝区零》为3.1版本 [S1]。"
+
+
+def test_final_answer_removes_runaway_material_number_line() -> None:
+    value = "《绝区零》为3.1版本 [S1]。\n- 版本信息来源于材料1、2、3、4、5、6"
+
+    assert _clean_final_answer(value) == "《绝区零》为3.1版本 [S1]。"
+
+
 def test_selected_fact_is_narrowed_to_the_requested_field() -> None:
     fact = "原神版本为7.0版本「无神怜爱的雪国」，更新时间为2026年8月12日，停服维护补偿为原石x300。"
 
@@ -259,7 +295,7 @@ def test_source_summaries_run_concurrently_and_keep_input_order() -> None:
     assert warnings == []
 
 
-def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
+def test_summary_prompt_contains_only_material_and_one_short_request() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
     captured = {}
@@ -280,11 +316,10 @@ def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
     evidence = reader._summarize_one("UNIQUE QUESTION", chunk)
 
     prompt = captured["user"]
-    assert prompt.index("UNIQUE MATERIAL") < prompt.index("UNIQUE QUESTION")
-    assert prompt.index("UNIQUE QUESTION") < prompt.index("阅读这一个来源")
-    assert "绝不能用用户问题里的类别名或泛称代替对象" in prompt
-    assert "股价" not in prompt
-    assert "本周最重要" not in prompt
+    assert prompt == "UNIQUE MATERIAL\n\n总结以上网页内容。"
+    assert "UNIQUE QUESTION" not in prompt
+    assert "来源材料" not in prompt
+    assert "URL" not in prompt
     assert captured["max_tokens"] == 1024
     assert evidence.claim == "Relevant fact."
 
@@ -308,7 +343,9 @@ def test_markdown_summary_keeps_raw_fragment_when_model_marks_it_missing() -> No
 
     evidence = reader._summarize_one("总结文档策略", chunk)
 
-    assert "只覆盖用户问题中的一个方面，也属于相关信息" in captured["user"]
+    assert captured["user"] == (
+        "Markdown 按标题和段落切块，默认只使用文档。\n\n总结以上网页内容。"
+    )
     assert evidence.claim == "Markdown 按标题和段落切块，默认只使用文档。"
 
 
@@ -363,11 +400,9 @@ def test_audit_prompt_stops_rechecking_an_already_supported_answer() -> None:
     )
 
     assert audit.sufficient is True
-    assert "若至少两份相互独立的材料已经明确给出一致的关键答案" in captured["user"]
-    assert "不得仅为了“官方确认”“再次验证”“更多来源”" in captured["user"]
-    assert (
-        "不得把现有材料已经给出的日期、数字或实体答案重新拼进检索词" in captured["user"]
-    )
+    assert "Python 3.14 于 2025 年 10 月 7 日发布" in captured["user"]
+    assert "足够只输出 ENOUGH" in captured["user"]
+    assert "无限增加来源" not in captured["user"]
 
 
 def test_contextualizer_puts_history_before_current_message_and_instruction() -> None:
@@ -441,6 +476,10 @@ def test_summary_numbers_must_exist_in_the_source_material() -> None:
 
 def test_semantic_version_numbers_support_their_major_version() -> None:
     assert _unsupported_summary_numbers("7.0版本", "版本7.0.0_47144228") == set()
+
+
+def test_summary_list_numbers_are_not_treated_as_factual_numbers() -> None:
+    assert _unsupported_summary_numbers("1. 事实一\n6. 事实六", "事实一 事实六") == set()
 
 
 def test_evidence_filter_drops_only_explicitly_irrelevant_summaries() -> None:
@@ -657,18 +696,16 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     prompt = captured["prompts"][0]
     assert '["S2", {' in prompt
     assert prompt.index("BOUND FACT") < prompt.index("UNIQUE QUESTION")
-    assert prompt.index("UNIQUE QUESTION") < prompt.index("根据上面的材料")
+    assert prompt.index("UNIQUE QUESTION") < prompt.index("根据以上材料")
     assert '"facts"' not in prompt
-    assert "不输出 JSON" in prompt
-    assert "充分组织材料中互不重复的信息维度" in prompt
-    assert "不要设置固定字数上限" in prompt
-    assert "约 900 个中文字符" not in prompt
+    assert "逐字段证据选择" not in prompt
+    assert "材料审核状态" not in prompt
     assert answer == "这是综合后的自然回答，不是逐来源清单 [S1][S2]。"
     assert warnings == []
     assert len(captured["prompts"]) == 1
 
 
-def test_field_audit_does_not_filter_page_summaries_from_final_reader() -> None:
+def test_field_audit_is_not_sent_to_final_reader_or_used_as_filter() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     rows = _evidence(2)
     captured = {}
@@ -682,14 +719,16 @@ def test_field_audit_does_not_filter_page_summaries_from_final_reader() -> None:
         "question",
         rows,
         evidence_selections=[
-            FieldEvidenceSelection("对象", "字段", "S2", "supported", "Fact 2")
+            FieldEvidenceSelection(
+                "对象", "字段", "S2", "supported", "SELECTED ONLY"
+            )
         ],
     )
 
     assert '"S2"' in captured["user"]
-    assert "Fact 2" in captured["user"]
     assert "Fact 1" in captured["user"]
-    assert "一个独立 RWKV 阅读一个网页" in captured["user"]
+    assert "Fact 2" in captured["user"]
+    assert "SELECTED ONLY" not in captured["user"]
     assert answer == "只使用已绑定字段 [S2]"
 
 
@@ -720,14 +759,14 @@ def test_field_bound_final_reads_every_per_page_summary() -> None:
         ],
     )
 
-    assert "<来源摘要二元组>" in captured["user"]
+    assert "<来源摘要二元组>" not in captured["user"]
     assert "原神新增主题活动与奖励说明" in captured["user"]
     assert "其他游戏更新" in captured["user"]
-    assert "最多 4090 token" in captured["user"]
+    assert "逐字段证据选择" not in captured["user"]
     assert answer == "原神为7.0版本，并开放了多个主题活动 [S1][S2]。"
 
 
-def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> None:
+def test_final_reader_receives_resolved_question_without_duplicate_history() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
     captured = {}
@@ -748,10 +787,9 @@ def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> N
     )
 
     prompt = captured["prompts"][0]
-    assert prompt.index("Fact 1") < prompt.index("口粮茶有哪些？")
-    assert prompt.index("口粮茶有哪些？") < prompt.index("我喜欢回甘好的")
-    assert prompt.index("我喜欢回甘好的") < prompt.index("此前对话用于保持连续语境")
-    assert "不是本轮事实来源" in prompt
+    assert prompt.index("Fact 1") < prompt.index("适合回甘偏好的口粮茶有哪些？")
+    assert "可以按六大茶类选择" not in prompt
+    assert "我喜欢回甘好的" not in prompt
 
 
 def test_conversation_answer_reads_history_before_request_without_citations() -> None:
@@ -776,7 +814,6 @@ def test_conversation_answer_reads_history_before_request_without_citations() ->
     prompt = captured["user"]
     assert captured["stage"] == "conversation"
     assert prompt.index("口粮茶有哪些？") < prompt.index("总结你现在知道的东西")
-    assert "不要把当前请求里的泛称" in prompt
-    assert "当前用户请求不属于待总结的历史内容" in prompt
-    assert "不要按轮次复述" in prompt
+    assert "根据此前对话完成请求" in prompt
+    assert "<此前对话消息>" not in prompt
     assert answer == "我们讨论了口粮茶，你偏好回甘明显的茶。"
