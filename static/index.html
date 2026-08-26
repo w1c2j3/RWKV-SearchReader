@@ -420,9 +420,9 @@
         if (stage === 'supplemental_searching') return [`第 ${detail.round || 1} 轮补充查找`, '只查找审核发现的缺失部分'];
         if (stage === 'supplemental_sources_found') return [`补充找到 ${detail.source_count || 0} 个新来源`, `排除重复页面后，目前共 ${detail.total_source_count || 0} 个来源`];
         if (stage === 'supplemental_reading') return [`开始阅读 ${detail.source_count || 0} 个补充来源`, `累计 ${detail.total_source_count || 0} 个来源`];
-        if (stage === 'reviewing') return ['正在整理阅读结果', `将 ${detail.source_count || 0} 份材料分为 ${detail.group_count || 0} 组并行归纳`];
-        if (stage === 'evidence_group_read') return [`已归纳 ${detail.completed || 0}/${detail.total || 0} 组 · ${(detail.source_ids || []).join(' + ')}`, `合并结果：${detail.summary_preview || '重复信息已合并'}`];
-        if (stage === 'finalizing') return ['正在形成最终回答', `根据 ${detail.source_count || 0} 份阅读结果直接作答`];
+        if (stage === 'reviewing') return [`正在进行第 ${detail.level || 1} 层材料归并`, `将 ${detail.node_count || detail.source_count || 0} 份材料按上下文预算分为 ${detail.group_count || 0} 组并行总结`];
+        if (stage === 'evidence_group_read') return [`第 ${detail.level || 1} 层已归纳 ${detail.completed || 0}/${detail.total || 0} 组 · ${(detail.source_ids || []).join(' + ')}`, `合并结果：${detail.summary_preview || '重复信息已合并'}`];
+        if (stage === 'finalizing') return ['正在形成最终回答', detail.group_count ? `${detail.source_count || 0} 份网页材料已归并为 ${detail.group_count} 份最终材料` : `根据 ${detail.source_count || 0} 份阅读结果直接作答`];
         if (stage === 'evidence_selecting') return ['正在建立回答与来源的对应关系', `逐项核对 ${detail.field_count || 0} 个必答字段`];
         if (stage === 'evidence_field_selected') return [`已核对 ${detail.completed || 0}/${detail.total || 0} · ${detail.subject || '对象'} · ${detail.field || '字段'}`, detail.status === 'supported' ? `绑定来源 ${detail.source_id || ''}：${detail.fact_preview || '已有直接证据'}` : `${detail.status === 'conflict' ? '材料存在冲突' : '材料尚未覆盖'}：${detail.fact_preview || ''}`];
         if (stage === 'completed') return ['回答已经完成', '完整记录已写入本机'];

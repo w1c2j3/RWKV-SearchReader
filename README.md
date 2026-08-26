@@ -15,7 +15,8 @@ RWKV SearchReader 是一个“模型规划范围、程序执行检索、模型�
   → 一个网页对应一个独立 RWKV 请求，最多 10 路并发摘要
   → RWKV 审核材料是否足够；不足时生成缺口检索词并补充检索、阅读、复审
   → 多个 RWKV 按“对象 × 必答字段”并发选择一个直接来源；缺失字段不跨网页补齐
-  → g1i-13.3B 最终阅读器只读取选中的 `(S#, 网页摘要)` 二元组并回答
+  → 按 chunk 预算把网页摘要并发漏斗归并，例如 20 份先归并为约 5 份
+  → g1i-13.3B 最终阅读器只读取漏斗末层的来源谱系二元组并回答
 ```
 
 这里的联网是后端行为，不是模型行为：
@@ -40,11 +41,12 @@ RWKV SearchReader 是一个“模型规划范围、程序执行检索、模型�
 - 最多 10 路 RWKV 来源阅读并发，且每次调用只负责一个网页；
 - 每个来源阅读调用只接收一个网页的 Tavily 材料，网页之间在摘要阶段完全隔离；
 - 摘要异步完成后按 Tavily 原始来源编号归位；
-- 每条摘要在代码层固定为 `(source_id, {title, url, published_date, summary})` 二元组，所有排序只移动整个二元组；
+- 每条摘要在代码层固定绑定 `source_id`；漏斗归并后使用 `([source_ids], summary)` 二元组继续绑定完整来源谱系；
 - Tavily 的 `published_date` 有返回时贯穿整条证据链，但检索时不设置时间限制，检索后也不会根据“今天”、“本周”等词删除来源；时间戳只作为材料交给最终 RWKV 阅读；
 - 单网页摘要中出现的数字必须能在该网页材料或发布时间中找到；否则拦截该摘要并回退到 Tavily 原材料；
 - 审核后按 `对象 × 字段` 启动多个独立 RWKV 证据选择请求，每个字段最多绑定一个直接支持它的来源；版本更新时间、活动日期和福利采用不同判定要求，缺失或冲突字段不会从其他网页补齐；
-- 最终 13.3B 阅读器只读取被逐字段选中的网页摘要二元组，不再经过任意两两分组压缩，避免跨来源拼接版本号、名称和日期；开放式问题按 4–8 个互不重复的信息维度组织代表性内容，不生成思维链；
+- 归并不是固定两两压缩：每个并发 chunk 同时受字符预算和最多 4 个输入节点约束；如果漏斗末层仍超过 final 材料预算，就继续下一层；
+- 最终 13.3B 阅读器只读取漏斗末层摘要，不读取网页原文、审核过程或重复对话；开放式问题直接自然总结，不生成思维链；
 - `/completions` 的 Assistant 前缀固定为完整的空推理预填 `<think></think>`，所有阅读、审核和最终回答调用都直接续写公开输出；
 - 最终 RWKV 直接输出自然语言答案，不使用固定项目符号渲染；字段与来源的结构化选择只在内部使用，代码不改写模型原文；
 - 已知百科、媒体、论坛与商店域名会标记为二手来源，供本地记录与后续分析；
@@ -88,6 +90,9 @@ SEARCH_READER_RESEARCH_PLAN_MAX_QUERIES=4
 SEARCH_READER_REVIEW_MAX_ROUNDS=2
 SEARCH_READER_REVIEW_MAX_QUERIES=3
 SEARCH_READER_CONVERSATION_TURNS=10
+SEARCH_READER_RWKV_REDUCE_CHUNK_CHARS=6000
+SEARCH_READER_RWKV_REDUCE_FAN_IN=4
+SEARCH_READER_RWKV_FINAL_MATERIAL_CHARS=9000
 SEARCH_READER_RWKV_MAX_TOKENS=4090
 
 SEARCH_READER_RWKV_FINAL_BASE_URL=http://127.0.0.1:29610/v1
@@ -96,7 +101,7 @@ SEARCH_READER_RWKV_FINAL_MODEL=rwkv7-g1i-13.3b-20260805-ctx16384
 SEARCH_READER_RWKV_FINAL_PROTOCOL=completions
 ```
 
-`SUMMARY_WORKERS` 同时控制逐来源阅读和逐字段证据选择的并发。默认先读取 Tavily 前 10 条结果；审核发现证据不足时最多补检两轮，每轮最多新增 10 个来源。审核完成后按对象和字段绑定来源，再调用最终 RWKV 输出回答。
+`SUMMARY_WORKERS` 同时控制逐来源阅读、逐字段证据选择和漏斗 chunk 归并的并发。默认先读取 Tavily 前 10 条结果；审核发现证据不足时最多补检两轮，每轮最多新增 10 个来源。材料超过 final 预算时会按 chunk 递归归并，再调用最终 RWKV 输出回答。
 
 在当前机器上，如果新项目自己的 `.env.local` 没有 Tavily 凭证，程序会只读取相邻 `RWKV-ECRA/.env.local` 中的 `TAVILY_API_KEY` / `TAVILY_API_KEYS`，不会读取或复制其中的其他配置和密钥。密钥池会按顺序故障转移。
 
@@ -206,7 +211,7 @@ uv run rwkv-search-reader-eval \
 src/rwkv_search_reader/
   search.py          搜索 API 适配器
   retrieval.py       Tavily 材料保序与其他后端兼容抓取
-  reader.py          RWKV 逐网页并发阅读和最终汇总输出
+  reader.py          RWKV 逐网页并发阅读、chunk 漏斗归并和最终汇总输出
   pipeline.py        固定执行的主流水线
   conversations.py   Conversation 与有序 Message items 的 SQLite 持久化
   documents.py       Markdown 校验、分块与相关片段排序

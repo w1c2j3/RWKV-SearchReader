@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import replace
@@ -741,17 +742,68 @@ def test_final_stages_use_the_larger_model_profile_and_4090_cap() -> None:
     assert settings.rwkv_max_tokens == 4090
 
 
-def test_final_material_keeps_every_source_pair_without_intermediate_reduction() -> (
+def test_funnel_reduces_twenty_source_summaries_to_five_lineage_pairs() -> None:
+    settings = replace(
+        Settings(),
+        rwkv_model="test",
+        rwkv_summary_workers=10,
+        rwkv_reduce_chunk_chars=6000,
+        rwkv_reduce_fan_in=4,
+        rwkv_final_material_chars=9000,
+    )
+    reader = RWKVReader(settings)
+    prompts: list[str] = []
+
+    def complete(user, **kwargs):
+        assert kwargs["stage"] == "reduce"
+        prompts.append(user)
+        source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
+        return "合并材料 " + "".join(f"[{source_id}]" for source_id in source_ids)
+
+    reader._complete = complete
+
+    material, warnings, group_count = reader._reduce_evidence(
+        "question", _evidence(20)
+    )
+
+    assert group_count == 5
+    assert warnings == []
+    assert len(prompts) == 5
+    assert all(len(re.findall(r'"S\d+"', prompt)) == 4 for prompt in prompts)
+    assert all(f'"S{index}"' in material for index in range(1, 21))
+
+
+def test_funnel_uses_another_parallel_level_when_final_material_is_too_large() -> (
     None
 ):
-    settings = replace(Settings(), rwkv_model="test", rwkv_summary_workers=5)
+    settings = replace(
+        Settings(),
+        rwkv_model="test",
+        rwkv_summary_workers=10,
+        rwkv_reduce_chunk_chars=2400,
+        rwkv_reduce_fan_in=4,
+        rwkv_final_material_chars=1000,
+    )
     reader = RWKVReader(settings)
+    calls: list[str] = []
 
-    material, warnings, group_count = reader._reduce_evidence("question", _evidence(6))
+    def complete(user, **kwargs):
+        assert kwargs["stage"] == "reduce"
+        calls.append(user)
+        source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
+        return ("归并信息" * 80) + "".join(
+            f"[{source_id}]" for source_id in source_ids
+        )
 
-    assert group_count == 0
+    reader._complete = complete
+    material, warnings, group_count = reader._reduce_evidence(
+        "question", _evidence(20)
+    )
+
     assert warnings == []
-    assert all(f'["S{index}", {{' in material for index in range(1, 7))
+    assert group_count < 5
+    assert len(calls) > 5
+    assert len(material) <= settings.rwkv_final_material_chars
 
 
 def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> None:
@@ -770,7 +822,7 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     answer, warnings = reader.finalize("UNIQUE QUESTION", rows)
 
     prompt = captured["prompts"][0]
-    assert '["S2", {' in prompt
+    assert '[["S2"], "BOUND FACT"]' in prompt
     assert prompt.index("BOUND FACT") < prompt.index("UNIQUE QUESTION")
     assert prompt.index("UNIQUE QUESTION") < prompt.index("根据以上材料")
     assert '"facts"' not in prompt

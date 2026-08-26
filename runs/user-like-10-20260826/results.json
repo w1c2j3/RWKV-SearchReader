@@ -36,5 +36,10 @@
   "focused_retries": [
     {"case_id":"U06","request_id":"c7fe4bbff32a4097b746098b88ec2a4c","status":"ok","elapsed_seconds":112.466,"material_sources":20,"answer_chars":83,"quality":"pass","finding":"修复后正确识别 2026-08-21 19:30 的「雪淞幽梦」版本前瞻。"},
     {"case_id":"U10","request_id":"05baea870d0e4944b988b5720bf16a65","status":"ok","elapsed_seconds":89.169,"material_sources":20,"answer_chars":64,"quality":"fail","finding":"502 已修复且对象继承正确，但错误地把旧 2.7 版本当作当前 3.1 的下一版本。"}
+  ],
+  "funnel_validation": [
+    {"case_id":"U06-evidence-replay","material_sources":20,"reduce_levels":1,"reduce_calls":5,"final_nodes":5,"final_calls":1,"final_input_chars":1896,"final_max_tokens":4090,"quality":"pass","finding":"真实 20 份逐网页摘要按 chunk 并发归并为 5 份，再由一个 final RWKV 正确回答。"},
+    {"case_id":"U10-evidence-replay","material_sources":20,"reduce_levels":2,"reduce_calls":8,"final_nodes":3,"final_calls":1,"final_input_chars":5223,"final_max_tokens":4090,"quality":"fail","finding":"漏斗解决上下文预算，但历史/下一版本的时间关系仍选择错误。"},
+    {"case_id":"U06-full-api","request_id":"2b0f323c32214bcfb44ff9948b332588","material_sources":20,"reduce_levels":1,"reduce_calls":5,"final_nodes":5,"final_calls":1,"final_input_chars":5928,"final_max_tokens":4090,"quality":"pass","finding":"正式 API 完整执行 Tavily、20 个逐页摘要、20→5 漏斗和 final；未触发 context 重试，回答正确。"}
   ]
 }

@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
@@ -245,6 +246,45 @@ def _render_source_pairs(evidence: list[Evidence]) -> str:
         )
         for item in evidence
     )
+
+
+@dataclass(slots=True)
+class _MaterialNode:
+    source_ids: tuple[str, ...]
+    summary: str
+
+
+def _render_material_nodes(nodes: list[_MaterialNode]) -> str:
+    """Render each reduced summary as an inseparable lineage-summary pair."""
+
+    return "\n".join(
+        json.dumps([list(node.source_ids), node.summary], ensure_ascii=False)
+        for node in nodes
+    )
+
+
+def _chunk_material_nodes(
+    nodes: list[_MaterialNode], *, max_chars: int, fan_in: int
+) -> list[list[_MaterialNode]]:
+    """Bound every reducer input by both lineage count and rendered size."""
+
+    groups: list[list[_MaterialNode]] = []
+    current: list[_MaterialNode] = []
+    current_chars = 0
+    for node in nodes:
+        rendered_chars = len(_render_material_nodes([node]))
+        exceeds = current and (
+            len(current) >= fan_in or current_chars + rendered_chars > max_chars
+        )
+        if exceeds:
+            groups.append(current)
+            current = []
+            current_chars = 0
+        current.append(node)
+        current_chars += rendered_chars
+    if current:
+        groups.append(current)
+    return groups
 
 
 def _source_relevance(question: str, evidence: Evidence) -> float:
@@ -696,7 +736,7 @@ def _context_retry_tokens(error: str, requested: int) -> int | None:
 
 
 class RWKVReader:
-    """Parallel per-source reading followed by one direct material summary."""
+    """Parallel page reading, chunk-bounded funnel reduction, then final summary."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -1425,17 +1465,158 @@ class RWKVReader:
                     )
         return [evidence_by_index[index] for index in range(len(chunks))], warnings
 
+    def _summarize_group(
+        self,
+        question: str,
+        group: list[_MaterialNode],
+        evidence_by_id: dict[str, Evidence],
+    ) -> _MaterialNode:
+        material = _render_material_nodes(group)
+        user = f"""{material}
+
+问题：{question}
+合并以上材料中能回答问题的内容，删除重复，保留具体名称、日期、数字和 [S1] 来源编号。只输出合并后的材料。"""
+        output = self._complete(
+            user,
+            max_tokens=self.settings.rwkv_summary_max_tokens,
+            stage="reduce",
+        )
+        summary = _clean_final_answer(output)
+        if not summary:
+            raise SearchReaderError("reduce", "RWKV returned an empty group summary")
+        unsupported = _unsupported_summary_numbers(summary, material)
+        if unsupported:
+            values = ", ".join(sorted(unsupported))
+            raise SearchReaderError(
+                "reduce", f"RWKV introduced unsupported numbers: {values}"
+            )
+        source_ids = tuple(
+            dict.fromkeys(
+                source_id for node in group for source_id in node.source_ids
+            )
+        )
+        allowed = set(source_ids)
+        summary = re.sub(
+            r"\[(S\d+)\]",
+            lambda match: match.group(0)
+            if match.group(1).upper() in allowed
+            else "",
+            summary,
+            flags=re.IGNORECASE,
+        )
+        source_evidence = [
+            evidence_by_id[source_id]
+            for source_id in source_ids
+            if source_id in evidence_by_id
+        ]
+        summary = _attach_missing_citations(summary, source_evidence)
+        return _MaterialNode(source_ids=source_ids, summary=summary)
+
     def _reduce_evidence(
         self,
         question: str,
         evidence: list[Evidence],
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
     ) -> tuple[str, list[str], int]:
-        del question, on_progress
-        # The 16K final reader can consume the bounded per-page summaries directly.
-        # Keeping each JSON pair intact prevents an intermediate model from joining
-        # a version number from one page to a name or date from another page.
-        return _render_source_pairs(evidence), [], 0
+        evidence_by_id = {item.source_id: item for item in evidence}
+        nodes = [
+            _MaterialNode(
+                source_ids=(item.source_id,),
+                summary=(
+                    f"{item.claim}\n发布时间：{item.published_date}"
+                    if item.published_date
+                    else item.claim
+                ),
+            )
+            for item in evidence
+        ]
+        warnings: list[str] = []
+        level = 0
+        final_node_target = self.settings.rwkv_reduce_fan_in + 1
+        while (
+            len(nodes) > final_node_target
+            or len(_render_material_nodes(nodes))
+            > self.settings.rwkv_final_material_chars
+        ):
+            level += 1
+            groups = _chunk_material_nodes(
+                nodes,
+                max_chars=self.settings.rwkv_reduce_chunk_chars,
+                fan_in=self.settings.rwkv_reduce_fan_in,
+            )
+            if on_progress:
+                on_progress(
+                    "reviewing",
+                    {
+                        "level": level,
+                        "source_count": len(evidence),
+                        "node_count": len(nodes),
+                        "group_count": len(groups),
+                    },
+                )
+            next_nodes: dict[int, _MaterialNode] = {}
+            completed = 0
+            workers = min(self.settings.rwkv_summary_workers, len(groups))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(
+                        self._summarize_group,
+                        question,
+                        group,
+                        evidence_by_id,
+                    ): (index, group)
+                    for index, group in enumerate(groups)
+                }
+                for future in as_completed(futures):
+                    index, group = futures[future]
+                    source_ids = tuple(
+                        dict.fromkeys(
+                            source_id
+                            for node in group
+                            for source_id in node.source_ids
+                        )
+                    )
+                    try:
+                        node = future.result()
+                        status = "done"
+                    except SearchReaderError as exc:
+                        per_node = max(
+                            240,
+                            self.settings.rwkv_reduce_chunk_chars
+                            // max(1, len(group))
+                            - 80,
+                        )
+                        node = _MaterialNode(
+                            source_ids=source_ids,
+                            summary="\n".join(
+                                item.summary[:per_node] for item in group
+                            ),
+                        )
+                        status = "degraded"
+                        warnings.append(
+                            f"{'/'.join(source_ids)} funnel reduction degraded: {exc}"[
+                                :500
+                            ]
+                        )
+                    next_nodes[index] = node
+                    completed += 1
+                    if on_progress:
+                        on_progress(
+                            "evidence_group_read",
+                            {
+                                "level": level,
+                                "completed": completed,
+                                "total": len(groups),
+                                "source_ids": list(source_ids),
+                                "status": status,
+                                "summary_preview": node.summary[:220],
+                            },
+                        )
+            nodes = [next_nodes[index] for index in range(len(groups))]
+            if level >= 6:
+                warnings.append("funnel reduction reached the six-level safety limit")
+                break
+        return _render_material_nodes(nodes), warnings, len(nodes)
 
     def finalize(
         self,

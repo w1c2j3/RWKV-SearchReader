@@ -82,7 +82,7 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
 
     assert calls == ["retrieve", "summarize", "audit", "finalize"]
     assert result.retrieval_mode == "forced"
-    assert result.reader_mode == "rwkv-reviewed-parallel-read-final-summary"
+    assert result.reader_mode == "rwkv-reviewed-parallel-funnel-final-summary"
     assert result.session_id == "session-test"
     assert result.queries == ["Question"]
     assert result.answer == "Answer [S1]"

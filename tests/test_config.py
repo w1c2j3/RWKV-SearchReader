@@ -18,3 +18,15 @@ def test_per_page_summary_defaults_to_about_one_thousand_tokens(
 
     assert settings.rwkv_summary_max_tokens == 1024
     assert settings.readiness()["summary_max_tokens"] == 1024
+
+
+def test_funnel_chunk_budgets_are_exposed_in_readiness(monkeypatch) -> None:
+    monkeypatch.delenv("SEARCH_READER_RWKV_REDUCE_CHUNK_CHARS", raising=False)
+    monkeypatch.delenv("SEARCH_READER_RWKV_REDUCE_FAN_IN", raising=False)
+    monkeypatch.delenv("SEARCH_READER_RWKV_FINAL_MATERIAL_CHARS", raising=False)
+
+    readiness = get_settings().readiness()
+
+    assert readiness["reduce_chunk_chars"] == 6000
+    assert readiness["reduce_fan_in"] == 4
+    assert readiness["final_material_chars"] == 9000

@@ -256,6 +256,9 @@ class SearchReaderPipeline:
             "protocol": self.settings.rwkv_protocol,
             "summary_workers": self.settings.rwkv_summary_workers,
             "summary_max_tokens": self.settings.rwkv_summary_max_tokens,
+            "reduce_chunk_chars": self.settings.rwkv_reduce_chunk_chars,
+            "reduce_fan_in": self.settings.rwkv_reduce_fan_in,
+            "final_material_chars": self.settings.rwkv_final_material_chars,
             "max_tokens": self.settings.rwkv_max_tokens,
             "temperature": self.settings.rwkv_temperature,
         }
@@ -935,9 +938,9 @@ class SearchReaderPipeline:
                     else self.provider.name
                 ),
                 reader_mode=(
-                    "rwkv-planned-parallel-page-summaries-final-summary"
+                    "rwkv-planned-parallel-funnel-summaries-final-summary"
                     if evidence_selections
-                    else "rwkv-reviewed-parallel-read-final-summary"
+                    else "rwkv-reviewed-parallel-funnel-final-summary"
                 ),
                 degraded=bool(warnings),
                 warnings=warnings,
