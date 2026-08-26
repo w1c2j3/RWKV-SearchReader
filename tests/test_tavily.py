@@ -45,6 +45,7 @@ def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
                         "title": "Result",
                         "url": "https://example.com/result",
                         "content": "Relevant snippet",
+                        "raw_content": "# Result\n\nComplete **Markdown** material: 150.80.",
                         "score": 0.8,
                     }
                 ]
@@ -61,7 +62,9 @@ def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
     assert calls[0]["headers"]["Authorization"] == "Bearer first-key"
     assert calls[1]["headers"]["Authorization"] == "Bearer second-key"
     assert hits[0].url == "https://example.com/result"
-    assert hits[0].content == "Relevant snippet"
+    assert hits[0].snippet == "Relevant snippet"
+    assert hits[0].content == "# Result\n\nComplete **Markdown** material: 150.80."
+    assert calls[0]["json"]["include_raw_content"] == "markdown"
     assert provider.results_are_material is True
 
     calls.clear()
@@ -73,6 +76,66 @@ def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
     provider.search("今天有哪些 AI 新闻", 6)
     assert calls[0]["json"]["topic"] == "news"
     assert "time_range" not in calls[0]["json"]
+    _reset_tavily_health_for_tests()
+
+
+def test_tavily_falls_back_to_ranked_snippet_without_raw_markdown() -> None:
+    _reset_tavily_health_for_tests()
+
+
+def test_tavily_bounds_raw_markdown_to_the_reader_material_limit() -> None:
+    _reset_tavily_health_for_tests()
+    settings = replace(
+        Settings(), tavily_api_keys=("key",), max_evidence_chars=20
+    )
+    provider = TavilyProvider(settings)
+
+    def post(url, **kwargs):
+        del url, kwargs
+        return FakeResponse(
+            200,
+            {
+                "results": [
+                    {
+                        "title": "Result",
+                        "url": "https://example.com/result",
+                        "content": "Relevant snippet",
+                        "raw_content": "# Result\n\n" + "material" * 10,
+                    }
+                ]
+            },
+        )
+
+    provider.session.post = post
+    hits = provider.search("question", 1)
+
+    assert len(hits[0].content) == 20
+    assert hits[0].content.startswith("# Result\n\n")
+    _reset_tavily_health_for_tests()
+    settings = replace(Settings(), tavily_api_keys=("key",))
+    provider = TavilyProvider(settings)
+
+    def post(url, **kwargs):
+        del url, kwargs
+        return FakeResponse(
+            200,
+            {
+                "results": [
+                    {
+                        "title": "Result",
+                        "url": "https://example.com/result",
+                        "content": "Relevant snippet",
+                        "raw_content": None,
+                    }
+                ]
+            },
+        )
+
+    provider.session.post = post
+    hits = provider.search("question", 1)
+
+    assert hits[0].content == "Relevant snippet"
+    assert hits[0].snippet == "Relevant snippet"
     _reset_tavily_health_for_tests()
 
 

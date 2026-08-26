@@ -139,8 +139,8 @@ class SearchProvider(ABC):
 
 class TavilyProvider(SearchProvider):
     name = "tavily"
-    # Advanced Search already returns query-ranked, source-bounded material in
-    # results[].content. Do not fetch or re-chunk those pages locally.
+    # Advanced Search returns query-ranked snippets plus cleaned page Markdown.
+    # Do not fetch those pages again locally.
     results_are_material = True
     endpoint = "https://api.tavily.com"
 
@@ -200,7 +200,7 @@ class TavilyProvider(SearchProvider):
             "search_depth": "advanced",
             "max_results": max_results,
             "include_answer": False,
-            "include_raw_content": False,
+            "include_raw_content": "markdown",
             "include_images": False,
             "topic": _tavily_topic(query),
         }
@@ -220,12 +220,14 @@ class TavilyProvider(SearchProvider):
             url = _clean(item.get("url"))
             if not _valid_public_url_shape(url):
                 continue
-            material = str(item.get("content") or item.get("snippet") or "").strip()
+            snippet = str(item.get("content") or item.get("snippet") or "").strip()
+            raw_content = str(item.get("raw_content") or "").strip()
+            material = (raw_content or snippet)[: self.settings.max_evidence_chars]
             hits.append(
                 SearchHit(
                     title=_clean(item.get("title") or url, 300),
                     url=url,
-                    snippet=_clean(material, 1200),
+                    snippet=_clean(snippet or material, 1200),
                     content=material,
                     provider=self.name,
                     score=float(item.get("score") or 0.0),

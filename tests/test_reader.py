@@ -800,6 +800,37 @@ def test_summary_numbers_must_exist_in_the_source_material() -> None:
     ) == {"1.1E+3", "2024"}
 
 
+def test_summary_numbers_ignore_markdown_latex_and_unicode_formatting() -> None:
+    material = "发行价为 **１５０．８０** 元，开盘价为 $1{,}100$ 元。"
+
+    assert _unsupported_summary_numbers("发行价150.8元，开盘价1\\,100元。", material) == set()
+
+
+def test_summary_numbers_compare_scaled_units_and_percentages() -> None:
+    material = "发行4044.64万股，占比5.74%，估值为1.5亿美元。"
+
+    assert _unsupported_summary_numbers(
+        "发行40,446,400股，占比5.74％，估值150 million美元。",
+        material,
+    ) == set()
+
+    assert _unsupported_summary_numbers("普通数值0.0574。", material) == {"0.0574"}
+
+
+def test_summary_numbers_compare_scientific_and_fraction_latex() -> None:
+    material = r"参数为 $1.5 \times 10^{8}$，比例为 $\frac{3}{4}$。"
+
+    assert _unsupported_summary_numbers("参数150000000，比例0.75。", material) == set()
+
+
+def test_summary_numbers_still_reject_changed_scaled_values() -> None:
+    material = "发行4044.64万股，占比5.74%。"
+
+    assert _unsupported_summary_numbers(
+        "发行40,446,401股，占比5.75%。", material
+    ) == {"40446401", "5.75"}
+
+
 def test_copied_fact_support_normalizes_decimal_zeros_but_not_word_order() -> None:
     assert _copied_fact_supported("发行价150.8元", "发行价为150.80元/股")
     assert not _copied_fact_supported(

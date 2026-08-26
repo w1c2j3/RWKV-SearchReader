@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -26,6 +27,42 @@ from .models import (
 )
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_SCIENTIFIC_RE = re.compile(
+    r"(?P<coefficient>[+-]?\d+(?:\.\d+)?)\s*"
+    r"(?:[eE]\s*|(?:\\(?:times|cdot)|[×*])\s*10\s*\^\s*\{?\s*)"
+    r"(?P<exponent>[+-]?\d+)\s*\}?"
+)
+_LATEX_FRACTION_RE = re.compile(
+    r"\\(?:d?frac)\s*\{\s*(?P<numerator>[+-]?\d+(?:\.\d+)?)\s*\}"
+    r"\s*\{\s*(?P<denominator>[+-]?\d+(?:\.\d+)?)\s*\}"
+)
+_NUMBER_SUFFIX_RE = re.compile(
+    r"\s*(?P<suffix>"
+    r"%|‰|万亿|千万|百万|十万|亿|万(?!分之)|千(?!分之)|百(?!分)|兆|"
+    r"trillions?(?![a-z])|billions?(?![a-z])|"
+    r"millions?(?![a-z])|thousands?(?![a-z])"
+    r")",
+    flags=re.IGNORECASE,
+)
+_NUMBER_SCALES = {
+    "百": Decimal(100),
+    "千": Decimal(1000),
+    "万": Decimal(10000),
+    "十万": Decimal(100000),
+    "百万": Decimal(1000000),
+    "千万": Decimal(10000000),
+    "亿": Decimal(100000000),
+    "兆": Decimal(1000000000000),
+    "万亿": Decimal(1000000000000),
+    "thousand": Decimal(1000),
+    "thousands": Decimal(1000),
+    "million": Decimal(1000000),
+    "millions": Decimal(1000000),
+    "billion": Decimal(1000000000),
+    "billions": Decimal(1000000000),
+    "trillion": Decimal(1000000000000),
+    "trillions": Decimal(1000000000000),
+}
 _CONTEXT_REFERENCE_RE = re.compile(
     r"它|它们|他们|她们|这个|那个|这些|那些|这两个|那两个|二者|两者|上述|前者|后者|"
     r"该(?:模型|版本|公司|产品|事件|人物|项目)|"
@@ -122,24 +159,74 @@ def _is_irrelevant_summary(value: str) -> bool:
     }
 
 
-def _normalized_numbers(value: str) -> set[str]:
+def _decimal_key(value: Decimal) -> str:
+    return str(value.normalize())
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
+def _normalize_numeric_markup(value: str) -> str:
+    """Normalize Unicode and numeric LaTeX without changing prose semantics."""
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace(r"\%", "%")
+    text = re.sub(r"(?<=\d)\s*\{\s*,\s*\}\s*(?=\d{3}(?:\D|$))", ",", text)
+    text = re.sub(r"(?<=\d)\\,\s*(?=\d{3}(?:\D|$))", ",", text)
+
+    def replace_fraction(match: re.Match[str]) -> str:
+        denominator = Decimal(match.group("denominator"))
+        if not denominator:
+            return match.group(0)
+        return _decimal_text(Decimal(match.group("numerator")) / denominator)
+
+    def replace_scientific(match: re.Match[str]) -> str:
+        coefficient = Decimal(match.group("coefficient"))
+        exponent = int(match.group("exponent"))
+        return _decimal_text(coefficient * (Decimal(10) ** exponent))
+
+    text = _LATEX_FRACTION_RE.sub(replace_fraction, text)
+    return _SCIENTIFIC_RE.sub(replace_scientific, text)
+
+
+def _normalized_number_pairs(value: str) -> list[tuple[str, str]]:
+    value = _normalize_numeric_markup(value)
     value = re.sub(r"(?m)^\s*(?:#{1,6}\s*)?\d{1,3}[.)、]\s+", "", value)
-    normalized: set[str] = set()
-    for raw in _NUMBER_RE.findall(value):
+    normalized: list[tuple[str, str]] = []
+    for match in _NUMBER_RE.finditer(value):
+        raw = match.group(0)
         try:
             number = Decimal(raw.replace(",", "")).normalize()
         except InvalidOperation:
             if raw.count(".") > 1:
                 for part in raw.split("."):
                     if part.isdigit():
-                        normalized.add(str(Decimal(part).normalize()))
+                        key = _decimal_key(Decimal(part))
+                        normalized.append((key, key))
             continue
-        normalized.add(str(number))
+        suffix_match = _NUMBER_SUFFIX_RE.match(value, match.end())
+        suffix = suffix_match.group("suffix").casefold() if suffix_match else ""
+        if suffix in {"%", "‰"}:
+            ratio_scale = Decimal("0.01") if suffix == "%" else Decimal("0.001")
+            canonical = f"ratio:{_decimal_key(number * ratio_scale)}"
+        else:
+            canonical = _decimal_key(number * _NUMBER_SCALES.get(suffix, Decimal(1)))
+        normalized.append((canonical, _decimal_key(number)))
     return normalized
 
 
+def _normalized_numbers(value: str) -> set[str]:
+    return {canonical for canonical, _display in _normalized_number_pairs(value)}
+
+
 def _unsupported_summary_numbers(summary: str, material: str) -> set[str]:
-    return _normalized_numbers(summary) - _normalized_numbers(material)
+    material_numbers = _normalized_numbers(material)
+    return {
+        display
+        for canonical, display in _normalized_number_pairs(summary)
+        if canonical not in material_numbers
+    }
 
 
 def _remove_unsupported_number_sentences(summary: str, material: str) -> str:
