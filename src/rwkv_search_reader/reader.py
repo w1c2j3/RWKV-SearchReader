@@ -20,6 +20,7 @@ from .models import (
     FieldEvidenceSelection,
     ResearchPlan,
     ResearchRecord,
+    SearchHit,
     SearchReaderError,
 )
 
@@ -42,6 +43,9 @@ _KNOWN_SECONDARY_HOSTS = (
     "fun-game.online",
 )
 _FINAL_MODEL_STAGES = {"conversation", "document", "finalize", "memory"}
+_SCOPE_ACCEPTANCE_RE = re.compile(
+    r"^(?:都需要|都要|全部|全都要|所有|这些都要|就这些|都可以|都行)[。.!！?？]*$"
+)
 
 
 def _today() -> str:
@@ -183,11 +187,13 @@ def _narrow_selected_fact(field: str, fact: str) -> str:
     value = " ".join(str(fact or "").split()).strip()
     if "版本" in field:
         return re.split(r"[，；。]", value, maxsplit=1)[0].strip()
+    if "主题" in field:
+        match = re.search(r"主题(?:包括|为|是)?\s*[:：]?\s*(.+)", value)
+        if match:
+            return match.group(1).strip(" ，；。")
     if re.search(r"福利|奖励|补偿|赠送|活动", field):
         clauses = [
-            clause.strip()
-            for clause in re.split(r"[，；。]", value)
-            if clause.strip()
+            clause.strip() for clause in re.split(r"[，；。]", value) if clause.strip()
         ]
         selected = [
             clause
@@ -340,7 +346,9 @@ def _final_evidence_order(question: str, evidence: list[Evidence]) -> list[Evide
 
 def _verified_source_relation(url: str, model_relation: str) -> str:
     host = (urlparse(url).hostname or "").casefold().removeprefix("www.")
-    if any(host == value or host.endswith(f".{value}") for value in _KNOWN_SECONDARY_HOSTS):
+    if any(
+        host == value or host.endswith(f".{value}") for value in _KNOWN_SECONDARY_HOSTS
+    ):
         return "secondary"
     return model_relation if model_relation in {"official", "secondary"} else "unclear"
 
@@ -428,6 +436,9 @@ def _parse_research_plan_output(
     decision = str(payload.get("decision") or "").strip().casefold()
     if decision not in {"search", "clarify"}:
         raise SearchReaderError("plan", "RWKV returned an unknown plan decision")
+    scope_mode = str(payload.get("scope_mode") or "fixed").strip().casefold()
+    if scope_mode not in {"fixed", "discover"}:
+        scope_mode = "fixed"
 
     records: list[ResearchRecord] = []
     for raw in payload.get("records") or []:
@@ -458,10 +469,12 @@ def _parse_research_plan_output(
             if " ".join(str(item).split()).strip()
         )
     )[:max_queries]
+    if scope_mode == "discover":
+        queries = queries[:2]
     goal = " ".join(str(payload.get("goal") or fallback_question).split()).strip()
-    clarification = " ".join(
-        str(payload.get("clarification") or "").split()
-    ).strip()[:1200]
+    clarification = " ".join(str(payload.get("clarification") or "").split()).strip()[
+        :1200
+    ]
     if decision == "clarify":
         if not clarification:
             raise SearchReaderError("plan", "RWKV clarification plan has no question")
@@ -469,6 +482,7 @@ def _parse_research_plan_output(
             decision="clarify",
             goal=goal or fallback_question,
             records=records,
+            scope_mode="fixed",
             clarification=clarification,
         )
     return ResearchPlan(
@@ -476,6 +490,7 @@ def _parse_research_plan_output(
         goal=goal or fallback_question,
         records=records,
         queries=queries or [fallback_question],
+        scope_mode=scope_mode,
     )
 
 
@@ -520,9 +535,7 @@ def _attach_missing_citations(answer: str, evidence: list[Evidence]) -> str:
         ):
             continue
         clause_terms = _claim_terms(plain_clause)
-        selected = [
-            item for item in evidence if item.source_id in set(referenced)
-        ]
+        selected = [item for item in evidence if item.source_id in set(referenced)]
         covered_terms = set().union(
             *(
                 clause_terms & _claim_terms(f"{item.title} {item.claim}")
@@ -548,9 +561,7 @@ def _attach_missing_citations(answer: str, evidence: list[Evidence]) -> str:
             covered_numbers = set().union(
                 *(_normalized_numbers(item.claim) for item in selected), set()
             )
-            adds_number = bool(
-                (clause_numbers & candidate_numbers) - covered_numbers
-            )
+            adds_number = bool((clause_numbers & candidate_numbers) - covered_numbers)
             if not selected:
                 if support < 0.08:
                     break
@@ -701,32 +712,41 @@ class RWKVReader:
 {question}
 </用户问题>
 
-你是资料研究规划器，只判断问题范围并生成检索任务，不回答问题，也不选择搜索工具。正常事实问题一定会由系统执行检索；你只决定是现在检索，还是缺失了必须由用户指定的对象、地域或时间范围。
+你是资料研究规划器，只判断研究方式并生成第一轮检索任务，不回答问题，也不选择搜索工具。正常的公开事实问题都必须进入 search；不要因为用户没有列出具体名单就拒绝回答。
 
-使用 decision="clarify" 的条件必须非常严格，只有同时满足以下三项才允许使用：
-1. 用户要求“各个、所有、全部、每个、分别”等逐对象完整回答；
-2. 用户没有给出对象名单，问题本身也没有唯一、明确的对象；
-3. 擅自选择一组对象会实质改变答案。
-此时不得自行发明一个“主流对象”名单；clarification 用一句自然问题请用户给出范围，并提供 2–4 个简短例子方便选择。不得为了询问用户还想知道哪些字段而澄清：用户问了发布日期，就直接查发布日期；用户问了版本和福利，就直接查这两个字段。用户已经列出的专名就是完整对象名单，哪怕句子中有“分别”，也必须 search。
+scope_mode 有两种：
+- fixed：问题已经给出了一个或多个明确对象，直接为这些对象建立 records 和 queries。
+- discover：用户问的是一个公开类别、群体或范围，但没有逐个点名。此时先生成 1–2 个宽检索式，由后续步骤从当轮真实材料中发现 2–4 个有资料支撑的代表对象，再逐对象补充检索。此阶段 records 可以为空；不得凭模型记忆预填对象名单。
 
-其他情况使用 decision="search"：单一事实直接生成一个自足检索式；用户明确列出多个对象时，每个对象生成一个检索式；新闻、推荐、盘点等本来就允许代表性结果的开放集合不需要澄清，可拆成最多 {self.settings.research_plan_max_queries} 个互补检索式。包含“最新、当前、今天”时，在检索式中保留时间要求和当前年月。不要把已知答案写进检索式，不要为了“官方确认”重复搜索一个已经给出的答案。
+decision="clarify" 只用于公共检索无法解决的缺失指代，例如没有任何此前上下文却说“比较这两个”、询问未提供的私人文件或用户自定义名单。公开类别没有列名单不是澄清理由；“各个、所有、全部、每个、分别”也不是澄清理由。无法穷举时仍然 search + discover，最终明确说明回答覆盖的是当轮材料中可确认的代表对象。
+
+decision="search"：单一事实或明确对象使用 fixed；未点名的公开集合使用 discover；新闻、推荐、盘点等开放集合也直接 search。discover 只生成 1–2 个互补的宽检索式。检索式要消除口语简称的歧义，例如“二游”应展开为“二次元游戏”或“二次元手游”，不能只复制简称。包含“最新、当前、今天”时，在检索式中保留时间要求和当前年月。严格保留用户实际询问的字段，不要把“主题”改成“福利”等其他字段，不要把已知答案写进检索式。
 
 判定示例：
 - “Python 3.14 正式发布于什么时候？”对象和字段都明确，decision 必须是 search，检索发布日期。
-- “原神、绝区零当前版本和福利分别是什么？”已经列出两个对象，decision 必须是 search，为两个游戏分别生成检索式。
-- “二游中各个最新版本和福利分别是什么？”“各个二游”没有边界，也没有对象名单，decision 应为 clarify，请用户指定游戏范围。
-- “最近有哪些值得关注的二游更新？”这是允许代表性结果的开放问题，decision 必须是 search，不澄清。
+- “原神、绝区零当前版本和福利分别是什么？”decision=search、scope_mode=fixed，为两个游戏分别生成记录和检索式。
+- “二游中各个最新版本和福利分别是什么？”decision=search、scope_mode=discover，先检索当前二游版本与福利的公开资料，不追问名单。
+- “二游现在的版本是什么，各个主题是什么？”decision=search、scope_mode=discover，字段是版本和主题，不得改成福利。
+- 没有此前上下文时只说“比较这两个哪个好？”无法通过公开检索知道“这两个”是什么，才使用 clarify。
 
 records 表示最终答案必须覆盖的对象或集合记录。每条记录包含 subject、question、fields；同一对象需要的版本号、更新时间、福利、有效期等字段应放在同一条记录中。queries 必须与 records 对齐，最多 {self.settings.research_plan_max_queries} 条。
 
 只输出一个 JSON 对象，不要 Markdown，不要解释：
-{{"decision":"search|clarify","goal":"用户真正要得到的答案","records":[{{"subject":"对象或集合","question":"该记录需要回答的问题","fields":["字段"]}}],"queries":["自足检索式"],"clarification":"仅 clarify 时填写，否则为空字符串"}}"""
+{{"decision":"search|clarify","scope_mode":"fixed|discover","goal":"用户真正要得到的答案","records":[{{"subject":"明确对象","question":"该记录需要回答的问题","fields":["字段"]}}],"queries":["自足检索式"],"clarification":"仅 clarify 时填写，否则为空字符串"}}"""
         output = self._complete(user, max_tokens=768, stage="plan")
         plan = _parse_research_plan_output(
             output,
             question,
             self.settings.research_plan_max_queries,
         )
+        self._anchor_research_queries(question, plan)
+        return plan
+
+    def _anchor_research_queries(
+        self, question: str, plan: ResearchPlan
+    ) -> ResearchPlan:
+        """Add current-time terms without changing the model-selected scope."""
+
         if plan.decision == "search" and _recency_requested(question):
             current = datetime.now().astimezone()
             anchor = f"{current.year}年{current.month}月"
@@ -740,13 +760,226 @@ records 表示最终答案必须覆盖的对象或集合记录。每条记录包
             plan.queries = anchored
         return plan
 
-    def contextualize(
-        self, question: str, history: list[dict[str, str]]
-    ) -> str:
+    def discover_research_scope(
+        self, question: str, sources: list[SearchHit]
+    ) -> ResearchPlan:
+        """Map each page concurrently, then organize only verified subjects."""
+
+        usable = [
+            source
+            for source in sources[: self.settings.search_max_results]
+            if (source.content or source.snippet).strip()
+        ]
+        if not usable:
+            raise SearchReaderError("scope_discovery", "no discovery material")
+
+        def extract_candidates(source: SearchHit) -> tuple[SearchHit, list[str]]:
+            material = (source.content or source.snippet).strip()[:3200]
+            user = f"""<单页检索材料>
+{json.dumps({"source_id": source.source_id, "title": source.title, "published_date": source.published_date, "material": material}, ensure_ascii=False)}
+</单页检索材料>
+
+<用户问题>
+{question}
+</用户问题>
+
+只根据这一页材料，找出材料明确表明属于用户所问公开类别的具体对象。对象的类型必须与用户所问类别完全一致，并与用户要求查询的字段值严格分开：如果问的是一组游戏，subject 只能是游戏本体名称，版本名、版本主题、活动、皮肤、角色、道具和栏目名都不是游戏对象；其他类别同理。若本页是排行榜、推荐或名单页面，必须从正文中抽取具体条目，绝不能把“二次元手游排行榜前十名”等页面标题或类别名当成对象。对象不能是同页广告、推荐链接或顺带出现的名称。问当前状态时优先已运营、能继续查询的对象，不选只有预告且尚未发布的对象。name 必须逐字使用材料中的完整名称，禁止改写、翻译、拼接或纠错。最多 4 个；没有就输出空数组。只输出 JSON：
+{{"subjects":["材料中的精确对象名"]}}"""
+            output = self._complete(user, max_tokens=256, stage="scope_candidate")
+            payload = _json_object_from_output(output, "scope_candidate")
+            material_key = _normalized_text(f"{source.title} {material}")
+            subjects: list[str] = []
+            for item in payload.get("subjects") or []:
+                subject = " ".join(str(item).split()).strip()[:160]
+                titled = re.match(r"^(《[^》]{1,80}》)", subject)
+                if titled:
+                    subject = titled.group(1)
+                subject_key = _normalized_text(subject)
+                if (
+                    not subject_key
+                    or subject_key
+                    in {
+                        "二游",
+                        "二次元游戏",
+                        "二次元手游",
+                        "二次元手机游戏",
+                    }
+                    or re.search(r"排行榜|推荐列表|游戏列表", subject)
+                    or subject_key not in material_key
+                ):
+                    continue
+                if subject not in subjects:
+                    subjects.append(subject)
+                if len(subjects) >= 4:
+                    break
+            return source, subjects
+
+        raw_candidate_rows: list[dict[str, object]] = []
+        candidate_warnings: list[str] = []
+        workers = min(self.settings.rwkv_summary_workers, len(usable))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(extract_candidates, source): source for source in usable
+            }
+            completed: dict[str, tuple[SearchHit, list[str]]] = {}
+            for future in as_completed(futures):
+                source = futures[future]
+                try:
+                    completed[source.source_id] = future.result()
+                except SearchReaderError as exc:
+                    candidate_warnings.append(
+                        f"{source.source_id or source.title}: {exc}"[:500]
+                    )
+            for source in usable:
+                row = completed.get(source.source_id)
+                if not row:
+                    continue
+                for subject in row[1]:
+                    material = (source.content or source.snippet).strip()
+                    needle = subject.strip("《》")
+                    position = material.find(needle)
+                    start = max(0, position - 240) if position >= 0 else 0
+                    raw_candidate_rows.append(
+                        {
+                            "subject": subject,
+                            "source_id": source.source_id,
+                            "source_title": source.title[:240],
+                            "source_rank": usable.index(source),
+                            "direct_title": _normalized_text(subject)
+                            in _normalized_text(source.title),
+                            "category_title": bool(
+                                re.search(r"二次元|二游", source.title)
+                            ),
+                            "context": material[start : start + 720],
+                        }
+                    )
+        if not raw_candidate_rows:
+            detail = "; ".join(candidate_warnings[:3])
+            raise SearchReaderError(
+                "scope_discovery",
+                f"RWKV found no material-backed subjects{': ' + detail if detail else ''}",
+            )
+
+        grouped: dict[str, dict[str, object]] = {}
+        for row in raw_candidate_rows:
+            subject = str(row["subject"])
+            key = _normalized_text(subject)
+            entry = grouped.setdefault(
+                key,
+                {
+                    "subject": subject,
+                    "source_ids": [],
+                    "source_titles": [],
+                    "contexts": [],
+                    "source_rank": int(row["source_rank"]),
+                    "direct_title_count": 0,
+                    "category_title_count": 0,
+                },
+            )
+            if len(subject) < len(str(entry["subject"])):
+                entry["subject"] = subject
+            source_id = str(row["source_id"])
+            if source_id not in entry["source_ids"]:
+                entry["source_ids"].append(source_id)
+                entry["source_titles"].append(str(row["source_title"]))
+                entry["contexts"].append(str(row["context"]))
+                entry["direct_title_count"] = int(entry["direct_title_count"]) + int(
+                    bool(row["direct_title"])
+                )
+                entry["category_title_count"] = int(
+                    entry["category_title_count"]
+                ) + int(bool(row["category_title"]))
+            entry["source_rank"] = min(
+                int(entry["source_rank"]), int(row["source_rank"])
+            )
+        trusted_category_rows = [
+            row
+            for row in grouped.values()
+            if len(row["source_ids"]) >= 2 or int(row["category_title_count"]) >= 1
+        ]
+        credible_rows = [
+            row
+            for row in grouped.values()
+            if int(row["direct_title_count"]) >= 1
+            or int(row["category_title_count"]) >= 1
+        ]
+        candidate_rows = sorted(
+            trusted_category_rows or credible_rows or grouped.values(),
+            key=lambda row: (
+                -len(row["source_ids"]),
+                -int(row["direct_title_count"]),
+                -int(row["category_title_count"]),
+                int(row["source_rank"]),
+                len(str(row["subject"])),
+            ),
+        )[:16]
+
+        candidates_json = json.dumps(candidate_rows, ensure_ascii=False)
+        user = f"""<逐页提取并按来源可信度排序的候选对象>
+{candidates_json}
+</逐页提取并按来源可信度排序的候选对象>
+
+<当前日期>
+{_today()}
+</当前日期>
+
+<用户问题>
+{question}
+</用户问题>
+
+你是研究范围整理器。候选对象已经由多个 RWKV 分别逐页提取，且附有来源标题、出现位置上下文和可信度信号。只能从候选对象的 subject 中原样选择最多 {self.settings.research_plan_max_queries} 个具体对象，建立下一轮逐对象研究计划；禁止改名或新增对象。对象类型必须与用户所问类别一致，并与要查询的字段值分开：问游戏时只能选游戏本体名，不能选版本名、主题名、活动、赛事、展会、皮肤、角色或道具。结合 contexts 判断它究竟是什么，不要仅凭名称猜测。不要声称覆盖“全部”；优先选择已运营、与用户问题直接相关、被多个独立 source_ids 提及或来源标题直接对应的对象。不要选择类别名称、版本短语、文章标题或尚未发行的新作。
+
+严格从用户原问题提取所需字段，不得替换、扩写或臆测字段。例如用户问“版本和主题”，fields 就是“版本”“主题”，不能改成“版本”“福利”。每个对象一条 record 和一条自足 query；query 只搜索该对象与所需字段，不写入猜测的答案。只输出 JSON，不要 Markdown，不要解释：
+{{"decision":"search","scope_mode":"fixed","goal":"基于材料确定后的回答目标","records":[{{"subject":"材料中出现的具体对象","question":"该对象需要回答的问题","fields":["用户要求的字段"]}}],"queries":["逐对象自足检索式"],"clarification":""}}"""
+        output = self._complete(user, max_tokens=1024, stage="scope_discovery")
+        plan = _parse_research_plan_output(
+            output,
+            question,
+            self.settings.research_plan_max_queries,
+        )
+        canonical_subjects = {
+            _normalized_text(row["subject"]): row["subject"] for row in candidate_rows
+        }
+        records: list[ResearchRecord] = []
+        queries: list[str] = []
+        seen_subjects: set[str] = set()
+        for index, record in enumerate(plan.records):
+            key = _normalized_text(record.subject)
+            if key not in canonical_subjects or key in seen_subjects:
+                continue
+            seen_subjects.add(key)
+            record.subject = canonical_subjects[key]
+            records.append(record)
+            query = (
+                plan.queries[index]
+                if index < len(plan.queries)
+                else f"{record.subject} {record.question}"
+            )
+            queries.append(query)
+        if not records:
+            raise SearchReaderError(
+                "scope_discovery", "RWKV found no material-backed subjects"
+            )
+        plan.decision = "search"
+        plan.scope_mode = "fixed"
+        plan.records = records
+        plan.queries = queries
+        plan.clarification = ""
+        return self._anchor_research_queries(question, plan)
+
+    def contextualize(self, question: str, history: list[dict[str, str]]) -> str:
         """Resolve follow-up references without treating prior answers as evidence."""
 
         if not history:
             return question
+        if _SCOPE_ACCEPTANCE_RE.fullmatch(str(question or "").strip()):
+            previous_question = str(history[-1].get("question") or "").strip()
+            if previous_question:
+                previous_question = previous_question.rstrip("。.!！?？")
+                return (
+                    f"{previous_question}；用户补充：公开资料能够确认的代表性对象都需要，"
+                    "无需再次询问具体名单。"
+                )[:8000]
         material = "\n".join(
             json.dumps(
                 {"user": turn.get("question", ""), "assistant": turn.get("answer", "")},
@@ -762,9 +995,16 @@ records 表示最终答案必须覆盖的对象或集合记录。每条记录包
 {question}
 </当前消息>
 
-把当前消息改写成一条可以脱离上下文理解的完整问题，只补全“它、这个、那次、前者”等指代和省略的信息。此前回答仅用于理解指代，不是事实证据，不得把其中的事实直接加入问题。若当前消息已经完整或与此前话题无关，原样返回。只输出改写后的一个问题，不回答问题，不解释。"""
+把当前消息改写成一条可以脱离上下文理解的完整问题，只补全“它、这个、那次、前者”等指代和省略的信息。优先延续此前用户提出的任务；助手回答仅用于理解指代，不是新的用户要求，也不是事实证据。禁止把助手的提问或回答原样改写成当前问题。若当前消息已经完整或与此前话题无关，原样返回。只输出改写后的一个问题，不回答问题，不解释。"""
         output = self._complete(user, max_tokens=160, stage="contextualize")
         rewritten = _clean_standalone_question(output, question)
+        previous_answer = str(history[-1].get("answer") or "").strip()
+        if previous_answer and _normalized_text(rewritten) == _normalized_text(
+            previous_answer
+        ):
+            previous_question = str(history[-1].get("question") or "").strip()
+            if previous_question:
+                return f"上一问：{previous_question}；当前追问：{question}"[:8000]
         if _needs_conversation_subject(question) and (
             _normalized_text(rewritten) == _normalized_text(question)
             or _needs_conversation_subject(rewritten)
@@ -775,9 +1015,7 @@ records 表示最终答案必须覆盖的对象或集合记录。每条记录包
                 return f"上一问：{previous_question}；当前追问：{question}"[:8000]
         return rewritten
 
-    def answer_from_history(
-        self, question: str, history: list[dict[str, str]]
-    ) -> str:
+    def answer_from_history(self, question: str, history: list[dict[str, str]]) -> str:
         """Answer a request about this conversation without external retrieval."""
 
         material = "\n".join(
@@ -918,11 +1156,16 @@ fact 只能摘录当前这个字段，禁止复制来源摘要中的其他字段
             )
         if status != "supported":
             source_id = ""
-        fact = _narrow_selected_fact(
-            field, str(payload.get("fact") or "")
-        )[:500]
+        fact = _narrow_selected_fact(field, str(payload.get("fact") or ""))[:500]
         if status == "supported":
             source = allowed[source_id]
+            if _normalized_text(record.subject) not in _normalized_text(
+                f"{source.title} {source.quote}"
+            ):
+                raise SearchReaderError(
+                    "evidence_select",
+                    "selected source does not explicitly name the research subject",
+                )
             if re.search(r"福利|奖励|补偿|赠送|活动", field) and not (
                 _is_explicit_benefit_fact(fact)
             ):
@@ -978,14 +1221,14 @@ fact 只能摘录当前这个字段，禁止复制来源摘要中的其他字段
                 item
                 for item in useful
                 if subject_key
-                and subject_key in _normalized_text(f"{item.title} {item.claim}")
+                and subject_key in _normalized_text(f"{item.title} {item.quote}")
             ]
-            candidates = matching or sorted(
-                useful,
+            candidates = sorted(
+                matching,
                 key=lambda item: _source_relevance(record.question, item),
                 reverse=True,
             )[:8]
-            for field in (record.fields or [record.question]):
+            for field in record.fields or [record.question]:
                 tasks.append((record, field, candidates))
         if not tasks:
             return [], []
@@ -1049,9 +1292,7 @@ fact 只能摘录当前这个字段，禁止复制来源摘要中的其他字段
     def _summarize_one(self, question: str, chunk: DocumentChunk) -> Evidence:
         material = chunk.text[: self.settings.max_evidence_chars].strip()
         source_kind = (
-            "Markdown 文档片段"
-            if chunk.url.startswith("document://")
-            else "网页材料"
+            "Markdown 文档片段" if chunk.url.startswith("document://") else "网页材料"
         )
         document_instruction = (
             "这是用户主动上传文档中的一个片段，标题路径与正文都属于待综合材料。"
@@ -1093,7 +1334,9 @@ URL：{chunk.url}
         )
         summary = _parse_source_summary(output)
         if not summary:
-            raise SearchReaderError("summarize", "RWKV returned an empty source summary")
+            raise SearchReaderError(
+                "summarize", "RWKV returned an empty source summary"
+            )
         if chunk.url.startswith("document://"):
             summary = material
         else:
@@ -1126,9 +1369,13 @@ URL：{chunk.url}
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
     ) -> tuple[list[Evidence], list[str]]:
         if not self.settings.rwkv_configured:
-            raise SearchReaderError("summarize", "RWKV endpoint or model is not configured")
+            raise SearchReaderError(
+                "summarize", "RWKV endpoint or model is not configured"
+            )
         if not chunks:
-            raise SearchReaderError("summarize", "there is no material for RWKV to read")
+            raise SearchReaderError(
+                "summarize", "there is no material for RWKV to read"
+            )
 
         evidence_by_index: dict[int, Evidence] = {}
         warnings: list[str] = []
@@ -1160,7 +1407,9 @@ URL：{chunk.url}
                     evidence_by_index[index] = evidence
                     status = "degraded"
                     warnings.append(
-                        f"{chunk.source_id} summary degraded to original material: {exc}"[:500]
+                        f"{chunk.source_id} summary degraded to original material: {exc}"[
+                            :500
+                        ]
                     )
                 completed += 1
                 if on_progress:
@@ -1179,9 +1428,7 @@ URL：{chunk.url}
                     )
         return [evidence_by_index[index] for index in range(len(chunks))], warnings
 
-    def _summarize_group(
-        self, question: str, group: list[Evidence]
-    ) -> str:
+    def _summarize_group(self, question: str, group: list[Evidence]) -> str:
         material = _render_source_pairs(group)
         allowed = "、".join(item.source_id for item in group)
         user = f"""<来源摘要二元组>
@@ -1232,18 +1479,29 @@ URL：{chunk.url}
         research_records: list[ResearchRecord] | None = None,
         evidence_sufficient: bool | None = None,
         evidence_selections: list[FieldEvidenceSelection] | None = None,
+        representative_scope: bool = False,
     ) -> tuple[str, list[str]]:
         if not evidence:
             raise SearchReaderError("read", "there are no source summaries to combine")
         if evidence_selections:
             selection_material = _render_evidence_selections(evidence_selections)
-            allowed = "、".join(
-                dict.fromkeys(
-                    item.source_id
-                    for item in evidence_selections
-                    if item.status == "supported" and item.source_id
+            allowed = (
+                "、".join(
+                    dict.fromkeys(
+                        item.source_id
+                        for item in evidence_selections
+                        if item.status == "supported" and item.source_id
+                    )
                 )
-            ) or "无"
+                or "无"
+            )
+            scope_instruction = (
+                "本轮对象是从公开范围中主动发现的代表对象，不表示已经穷举整个类别。"
+                "回答开头用一句自然短句说明‘先列出目前公开信息较完整的代表对象’，"
+                "不要提检索、模型、材料或技术过程。"
+                if representative_scope
+                else ""
+            )
             user = f"""<逐字段证据材料>
 {selection_material}
 </逐字段证据材料>
@@ -1253,6 +1511,7 @@ URL：{chunk.url}
 </用户问题>
 
 直接把逐字段证据材料整理成一份自然、简洁的最终回答。它是唯一事实来源，不使用模型记忆，也不添加材料中没有的内容。
+{scope_instruction}
 每个 status=supported 的字段都必须回答，只能复述该项 fact，并原样保留 fact 末尾的 [S#]；每个 status=missing 或 conflict 的字段只说明该字段缺失或冲突。某对象只缺一个字段时，不能把该对象其他已支持字段也说成无法核实。按 subject 合并组织，但版本号、更新时间、福利仍保持各自绑定，不互相替代。
 不要写“根据材料审核状态”、阅读过程、搜索过程或思维链。只能使用这些来源编号：{allowed}。"""
             if on_progress:

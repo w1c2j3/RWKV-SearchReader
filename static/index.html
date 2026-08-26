@@ -403,10 +403,14 @@
         if (stage === 'contextualizing') return [`正在衔接此前 ${detail.turn_count || 0} 轮对话`, '补全当前问题中的上下文指代'];
         if (stage === 'context_resolved') return ['已理解当前追问', detail.resolved_question || '已形成完整问题'];
         if (stage === 'planning') return ['正在理解问题范围', '判断需要回答的对象、字段和检索任务'];
-        if (stage === 'plan_completed') return [detail.decision === 'clarify' ? '需要先确认回答范围' : `已拆分为 ${(detail.queries || []).length || 1} 个检索任务`, detail.decision === 'clarify' ? (detail.clarification || '范围不同会改变答案') : (detail.goal || '已形成本轮资料计划')];
+        if (stage === 'plan_completed') return [detail.decision === 'clarify' ? '需要先确认问题指代' : (detail.scope_mode === 'discover' ? '将先从资料中确定具体范围' : `已拆分为 ${(detail.queries || []).length || 1} 个检索任务`), detail.decision === 'clarify' ? (detail.clarification || '缺少无法从公开资料确定的指代') : (detail.goal || '已形成本轮资料计划')];
         if (stage === 'clarifying') return ['正在等待你补充范围', detail.message || '补充范围后可以继续'];
         if (stage === 'searching') return ['开始查找相关资料', detail.query ? `围绕“${detail.query}”查找` : '正在理解问题并发起检索'];
         if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, `使用了 ${(detail.queries || []).length || 1} 个检索式`];
+        if (stage === 'scope_discovering') return ['正在从资料中确定具体对象', `阅读首轮 ${detail.source_count || 0} 份资料后再确定本轮覆盖范围`];
+        if (stage === 'scope_discovered') return [detail.success === false ? '未能稳定拆分具体对象' : `已确定 ${(detail.subjects || []).length} 个代表性对象`, detail.success === false ? (detail.message || '将直接使用现有资料回答') : ((detail.subjects || []).join('、') || detail.message || '范围已经确定')];
+        if (stage === 'scope_searching') return [`开始逐对象补充查找`, `并行覆盖 ${detail.subject_count || 0} 个具体对象`];
+        if (stage === 'scope_sources_found') return [`逐对象补充找到 ${detail.source_count || 0} 个新来源`, `目前共 ${detail.total_source_count || 0} 个来源`];
         if (stage === 'document_searching') return [`正在阅读 ${detail.document_count || 0} 份文档`, '定位与当前问题相关的章节和段落'];
         if (stage === 'documents_found') return [`选出 ${detail.source_count || 0} 个文档片段`, '下面是本轮实际选中的文档位置'];
         if (stage === 'reading') return [`开始逐篇阅读 ${detail.source_count || 0} 个来源`, '每个来源独立阅读，互不混合'];
@@ -428,7 +432,7 @@
 
       const traceQueries = (stage, detail) => {
         if (stage === 'searching' && detail.query) return [detail.query];
-        if (['plan_completed', 'sources_found', 'audit_completed', 'supplemental_searching', 'supplemental_sources_found'].includes(stage)) return detail.queries || [];
+        if (['plan_completed', 'sources_found', 'scope_discovered', 'scope_searching', 'scope_sources_found', 'audit_completed', 'supplemental_searching', 'supplemental_sources_found'].includes(stage)) return detail.queries || [];
         return [];
       };
 
@@ -444,7 +448,7 @@
 
       const appendTraceDetails = (copy, stage, detail) => {
         const queries = traceQueries(stage, detail);
-        const sources = ['sources_found', 'documents_found', 'supplemental_sources_found'].includes(stage) ? (detail.sources || []) : [];
+        const sources = ['sources_found', 'scope_sources_found', 'documents_found', 'supplemental_sources_found'].includes(stage) ? (detail.sources || []) : [];
         if (!queries.length && !sources.length) return;
         const extra = document.createElement('span');
         extra.className = 'trace-extra';

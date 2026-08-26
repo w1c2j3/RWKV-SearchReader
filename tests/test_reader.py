@@ -4,11 +4,14 @@ import threading
 import time
 from dataclasses import replace
 
+import pytest
+
 from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import (
     DocumentChunk,
     Evidence,
     FieldEvidenceSelection,
+    SearchHit,
 )
 from rwkv_search_reader.reader import (
     RWKVReader,
@@ -74,6 +77,19 @@ def test_research_plan_parser_keeps_records_and_queries() -> None:
     ]
 
 
+def test_research_plan_parser_supports_material_scope_discovery() -> None:
+    plan = _parse_research_plan_output(
+        '{"decision":"search","scope_mode":"discover","goal":"查询公开集合",'
+        '"records":[],"queries":["当前二游版本与主题"],"clarification":""}',
+        "各个二游版本和主题是什么？",
+        4,
+    )
+
+    assert plan.decision == "search"
+    assert plan.scope_mode == "discover"
+    assert plan.records == []
+
+
 def test_research_plan_parser_requires_a_real_clarification_question() -> None:
     plan = _parse_research_plan_output(
         '{"decision":"clarify","goal":"逐个回答","records":[],"queries":[],"clarification":"你说的各个二游具体包括哪些？"}',
@@ -117,6 +133,50 @@ def test_current_version_plan_adds_time_and_announcement_terms() -> None:
     assert "活动" in plan.queries[0]
 
 
+def test_scope_discovery_uses_first_pass_material_for_concrete_records() -> None:
+    reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured.setdefault("calls", []).append((user, kwargs))
+        if kwargs["stage"] == "scope_candidate":
+            return '{"subjects":["原神"]}'
+        return (
+            '{"decision":"search","scope_mode":"fixed","goal":"逐个回答",'
+            '"records":[{"subject":"原神","question":"当前版本和主题",'
+            '"fields":["版本","主题"]}],'
+            '"queries":["原神 当前版本 主题"],"clarification":""}'
+        )
+
+    reader._complete = complete
+    plan = reader.discover_research_scope(
+        "UNIQUE DISCOVERY QUESTION：二游当前版本和主题是什么？",
+        [
+            SearchHit(
+                "原神版本新闻",
+                "https://example.com/genshin",
+                source_id="S1",
+                content="原神发布了新版本及其主题活动。",
+            )
+        ],
+    )
+
+    candidate_prompt, candidate_kwargs = captured["calls"][0]
+    organizer_prompt, organizer_kwargs = captured["calls"][1]
+    assert candidate_prompt.index("原神发布了新版本") < candidate_prompt.index(
+        "UNIQUE DISCOVERY QUESTION"
+    )
+    assert candidate_kwargs["stage"] == "scope_candidate"
+    assert organizer_prompt.index("原神") < organizer_prompt.index(
+        "UNIQUE DISCOVERY QUESTION"
+    )
+    assert organizer_kwargs["stage"] == "scope_discovery"
+    assert plan.scope_mode == "fixed"
+    assert [record.subject for record in plan.records] == ["原神"]
+    assert plan.records[0].fields == ["版本", "主题"]
+    assert "更新公告" in plan.queries[0]
+
+
 def test_source_summary_cannot_copy_current_claim_from_question() -> None:
     assert (
         _remove_copied_temporal_qualifiers(
@@ -134,8 +194,16 @@ def test_source_summary_removes_material_wrapper() -> None:
 def test_selected_fact_is_narrowed_to_the_requested_field() -> None:
     fact = "原神版本为7.0版本「无神怜爱的雪国」，更新时间为2026年8月12日，停服维护补偿为原石x300。"
 
-    assert _narrow_selected_fact("版本号", fact) == "原神版本为7.0版本「无神怜爱的雪国」"
+    assert (
+        _narrow_selected_fact("版本号", fact) == "原神版本为7.0版本「无神怜爱的雪国」"
+    )
     assert _narrow_selected_fact("福利", fact) == "停服维护补偿为原石x300"
+    assert (
+        _narrow_selected_fact(
+            "主题", "二游现在的版本是3.1版本，主题包括商城上新、限时活动。"
+        )
+        == "商城上新、限时活动"
+    )
     assert _is_explicit_benefit_fact("停服维护补偿为原石x300")
     assert not _is_explicit_benefit_fact("新增角色、区域、玩法和剧情")
 
@@ -284,7 +352,9 @@ def test_audit_prompt_stops_rechecking_an_already_supported_answer() -> None:
     assert audit.sufficient is True
     assert "若至少两份相互独立的材料已经明确给出一致的关键答案" in captured["user"]
     assert "不得仅为了“官方确认”“再次验证”“更多来源”" in captured["user"]
-    assert "不得把现有材料已经给出的日期、数字或实体答案重新拼进检索词" in captured["user"]
+    assert (
+        "不得把现有材料已经给出的日期、数字或实体答案重新拼进检索词" in captured["user"]
+    )
 
 
 def test_contextualizer_puts_history_before_current_message_and_instruction() -> None:
@@ -323,12 +393,34 @@ def test_contextualizer_falls_back_to_previous_question_if_pronoun_remains() -> 
     assert question == "上一问：RWKV 最新版本是什么；当前追问：它是什么时候发布的？"
 
 
+def test_contextualizer_merges_scope_acceptance_with_previous_user_task() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: pytest.fail(
+        "deterministic scope acceptance should not call the model"
+    )
+
+    question = reader.contextualize(
+        "都需要",
+        [
+            {
+                "question": "二游现在的版本是什么，各个主题是什么。",
+                "answer": "请问您想了解哪些二游？",
+            }
+        ],
+    )
+
+    assert question.startswith("二游现在的版本是什么，各个主题是什么")
+    assert "无需再次询问具体名单" in question
+    assert "请问您想了解哪些二游" not in question
+
+
 def test_summary_numbers_must_exist_in_the_source_material() -> None:
     material = "公司于2026年8月19日上市，发行价150.80元。"
 
-    assert _unsupported_summary_numbers(
-        "2026年8月19日上市，发行价150.8元。", material
-    ) == set()
+    assert (
+        _unsupported_summary_numbers("2026年8月19日上市，发行价150.8元。", material)
+        == set()
+    )
     assert _unsupported_summary_numbers(
         "2024年8月19日上市，最新价1100元。", material
     ) == {"1.1E+3", "2024"}
@@ -386,7 +478,9 @@ def test_citation_binding_prefers_exact_version_and_date_support() -> None:
 
     bound = _attach_missing_citations(answer, rows)
 
-    assert bound == "RWKV-7 的最新模型是 RWKV-7-G1，发布日期为 2025 年 3 月 18 日 [S1]。"
+    assert (
+        bound == "RWKV-7 的最新模型是 RWKV-7-G1，发布日期为 2025 年 3 月 18 日 [S1]。"
+    )
 
 
 def test_citation_binding_skips_a_missing_field_notice() -> None:
@@ -422,7 +516,9 @@ def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
         _verified_source_relation("https://zh.wikipedia.org/wiki/Apex", "official")
         == "secondary"
     )
-    assert _verified_source_relation("https://www.ea.com/apex", "official") == "official"
+    assert (
+        _verified_source_relation("https://www.ea.com/apex", "official") == "official"
+    )
 
 
 def test_final_answer_cleanup_preserves_natural_answer() -> None:
@@ -441,7 +537,9 @@ def test_missing_citations_are_bound_without_rewriting_answer() -> None:
 
     bound = _attach_missing_citations(answer, rows)
 
-    assert bound == "量子芯片取得新进展 [S1]；美光将投资100亿美元建设AI内存实验室 [S2]。"
+    assert (
+        bound == "量子芯片取得新进展 [S1]；美光将投资100亿美元建设AI内存实验室 [S2]。"
+    )
 
 
 def test_one_clause_can_bind_two_sources_with_distinct_facts() -> None:
@@ -452,7 +550,10 @@ def test_one_clause_can_bind_two_sources_with_distinct_facts() -> None:
 
     bound = _attach_missing_citations(answer, rows)
 
-    assert bound == "项目目标是建立一个连续多轮的资料阅读助手，最终回答最多生成 4090 token [S1][S2]。"
+    assert (
+        bound
+        == "项目目标是建立一个连续多轮的资料阅读助手，最终回答最多生成 4090 token [S1][S2]。"
+    )
 
 
 def test_answer_lead_ending_in_colon_does_not_receive_a_fake_citation() -> None:
@@ -512,13 +613,13 @@ def test_final_stages_use_the_larger_model_profile_and_4090_cap() -> None:
     assert settings.rwkv_max_tokens == 4090
 
 
-def test_final_material_keeps_every_source_pair_without_intermediate_reduction() -> None:
+def test_final_material_keeps_every_source_pair_without_intermediate_reduction() -> (
+    None
+):
     settings = replace(Settings(), rwkv_model="test", rwkv_summary_workers=5)
     reader = RWKVReader(settings)
 
-    material, warnings, group_count = reader._reduce_evidence(
-        "question", _evidence(6)
-    )
+    material, warnings, group_count = reader._reduce_evidence("question", _evidence(6))
 
     assert group_count == 0
     assert warnings == []

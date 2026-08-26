@@ -81,9 +81,7 @@ def _history_only_request(question: str) -> bool:
 
     text = " ".join(str(question or "").split()).strip()
     return bool(
-        text
-        and _HISTORY_REFERENCE_RE.search(text)
-        and _HISTORY_SUMMARY_RE.search(text)
+        text and _HISTORY_REFERENCE_RE.search(text) and _HISTORY_SUMMARY_RE.search(text)
     )
 
 
@@ -129,9 +127,7 @@ def _rechecks_supported_fact(
     terms = set(re.findall(r"[a-z][a-z0-9_.+-]{1,}", reduced))
     for segment in re.findall(r"[\u3400-\u9fff]{2,}", reduced):
         terms.add(segment)
-        terms.update(
-            segment[index : index + 2] for index in range(len(segment) - 1)
-        )
+        terms.update(segment[index : index + 2] for index in range(len(segment) - 1))
     evidence_text = "\n".join(
         str(getattr(item, "claim", "")).casefold() for item in evidence
     )
@@ -332,12 +328,8 @@ class SearchReaderPipeline:
                 )
                 stage = time.perf_counter()
                 answer = self.reader.answer_from_history(normalized, history)
-                timings["conversation"] = round(
-                    (time.perf_counter() - stage) * 1000, 1
-                )
-                timings["total"] = round(
-                    (time.perf_counter() - started) * 1000, 1
-                )
+                timings["conversation"] = round((time.perf_counter() - stage) * 1000, 1)
+                timings["total"] = round((time.perf_counter() - started) * 1000, 1)
                 emit("completed", {"duration_ms": timings["total"]})
                 result = PipelineResult(
                     request_id=request_id,
@@ -376,7 +368,9 @@ class SearchReaderPipeline:
                 try:
                     effective_question = self.reader.contextualize(normalized, history)
                 except SearchReaderError as exc:
-                    pipeline_warnings.append(f"conversation context degraded: {exc}"[:500])
+                    pipeline_warnings.append(
+                        f"conversation context degraded: {exc}"[:500]
+                    )
                 emit(
                     "context_resolved",
                     {
@@ -385,8 +379,11 @@ class SearchReaderPipeline:
                     },
                 )
 
-            web_enabled = not local_passages or bool(_EXPLICIT_WEB_RE.search(normalized))
+            web_enabled = not local_passages or bool(
+                _EXPLICIT_WEB_RE.search(normalized)
+            )
             research_plan = None
+            representative_scope = False
             if (
                 web_enabled
                 and not local_passages
@@ -418,6 +415,7 @@ class SearchReaderPipeline:
                         "plan_completed",
                         {
                             "decision": research_plan.decision,
+                            "scope_mode": research_plan.scope_mode,
                             "goal": research_plan.goal,
                             "queries": research_plan.queries,
                             "clarification": research_plan.clarification,
@@ -436,13 +434,9 @@ class SearchReaderPipeline:
                             ),
                         },
                     )
-                timings["plan"] = round(
-                    (time.perf_counter() - stage) * 1000, 1
-                )
+                timings["plan"] = round((time.perf_counter() - stage) * 1000, 1)
                 if research_plan and research_plan.decision == "clarify":
-                    timings["total"] = round(
-                        (time.perf_counter() - started) * 1000, 1
-                    )
+                    timings["total"] = round((time.perf_counter() - started) * 1000, 1)
                     emit(
                         "clarifying",
                         {
@@ -499,9 +493,11 @@ class SearchReaderPipeline:
                     },
                 )
                 if research_plan and research_plan.decision == "search":
-                    queries, sources, chunks, retrieval_warnings = self.retriever.run_queries(
-                        planned_queries,
-                        question=effective_question,
+                    queries, sources, chunks, retrieval_warnings = (
+                        self.retriever.run_queries(
+                            planned_queries,
+                            question=effective_question,
+                        )
                     )
                 else:
                     queries, sources, chunks, retrieval_warnings = self.retriever.run(
@@ -526,6 +522,117 @@ class SearchReaderPipeline:
                         ],
                     },
                 )
+                if (
+                    research_plan
+                    and research_plan.decision == "search"
+                    and research_plan.scope_mode == "discover"
+                ):
+                    representative_scope = True
+                    emit(
+                        "scope_discovering",
+                        {
+                            "source_count": len(chunks),
+                            "message": "正在从当前资料中确定具体对象",
+                        },
+                    )
+                    scope_started = time.perf_counter()
+                    try:
+                        discovered_plan = self.reader.discover_research_scope(
+                            effective_question, sources
+                        )
+                    except SearchReaderError as exc:
+                        pipeline_warnings.append(
+                            f"research scope discovery degraded: {exc}"[:500]
+                        )
+                        emit(
+                            "scope_discovered",
+                            {
+                                "success": False,
+                                "subjects": [],
+                                "message": "未能稳定拆分具体对象，将直接使用现有资料回答",
+                            },
+                        )
+                        research_plan = None
+                    else:
+                        research_plan = discovered_plan
+                        emit(
+                            "scope_discovered",
+                            {
+                                "success": True,
+                                "subjects": [
+                                    record.subject for record in discovered_plan.records
+                                ],
+                                "records": [
+                                    {
+                                        "subject": record.subject,
+                                        "question": record.question,
+                                        "fields": record.fields,
+                                    }
+                                    for record in discovered_plan.records
+                                ],
+                                "queries": discovered_plan.queries,
+                                "message": "已从资料中确定本轮代表性对象",
+                            },
+                        )
+                        emit(
+                            "scope_searching",
+                            {
+                                "queries": discovered_plan.queries,
+                                "subject_count": len(discovered_plan.records),
+                                "message": "正在逐对象补充资料",
+                            },
+                        )
+                        try:
+                            (
+                                scope_queries,
+                                scope_sources,
+                                scope_chunks,
+                                scope_warnings,
+                            ) = self.retriever.run_queries(
+                                discovered_plan.queries,
+                                question=effective_question,
+                                excluded_urls={source.url for source in sources},
+                                start_index=len(sources) + 1,
+                            )
+                        except SearchReaderError as exc:
+                            pipeline_warnings.append(
+                                f"per-subject retrieval degraded: {exc}"[:500]
+                            )
+                            emit(
+                                "scope_sources_found",
+                                {
+                                    "source_count": 0,
+                                    "total_source_count": len(sources),
+                                    "message": "没有找到新的逐对象资料，保留第一轮材料",
+                                },
+                            )
+                        else:
+                            queries.extend(scope_queries)
+                            sources.extend(scope_sources)
+                            chunks.extend(scope_chunks)
+                            retrieval_warnings.extend(scope_warnings)
+                            emit(
+                                "scope_sources_found",
+                                {
+                                    "queries": scope_queries,
+                                    "source_count": len(scope_chunks),
+                                    "total_source_count": len(sources),
+                                    "sources": [
+                                        {
+                                            "source_id": source.source_id,
+                                            "title": source.title,
+                                            "url": source.url,
+                                            "score": source.score,
+                                            "published_date": source.published_date,
+                                        }
+                                        for source in scope_sources[: len(scope_chunks)]
+                                    ],
+                                    "message": "逐对象资料已加入本轮阅读",
+                                },
+                            )
+                    timings["scope_discovery"] = round(
+                        (time.perf_counter() - scope_started) * 1000, 1
+                    )
             if local_passages:
                 emit(
                     "document_searching",
@@ -592,9 +699,7 @@ class SearchReaderPipeline:
                             research_records=research_plan.records,
                         )
                     else:
-                        audit = self.reader.audit(
-                            effective_question, evidence, queries
-                        )
+                        audit = self.reader.audit(effective_question, evidence, queries)
                 except SearchReaderError as exc:
                     audit_warnings.append(f"evidence audit degraded: {exc}"[:500])
                     emit(
@@ -639,9 +744,7 @@ class SearchReaderPipeline:
                 supplemental_queries = [
                     query
                     for query in candidate_queries
-                    if not _rechecks_supported_fact(
-                        query, effective_question, evidence
-                    )
+                    if not _rechecks_supported_fact(query, effective_question, evidence)
                 ]
                 if raw_candidate_queries and not supplemental_queries:
                     audit_sufficient = True
@@ -718,9 +821,7 @@ class SearchReaderPipeline:
                         },
                     )
                     break
-                timings["retrieve"] += round(
-                    (time.perf_counter() - stage) * 1000, 1
-                )
+                timings["retrieve"] += round((time.perf_counter() - stage) * 1000, 1)
                 queries.extend(new_queries)
                 sources.extend(new_sources)
                 retrieval_warnings.extend(new_retrieval_warnings)
@@ -755,15 +856,11 @@ class SearchReaderPipeline:
                 new_evidence, new_summary_warnings = self.reader.summarize(
                     effective_question, new_chunks, on_progress=emit
                 )
-                timings["summarize"] += round(
-                    (time.perf_counter() - stage) * 1000, 1
-                )
+                timings["summarize"] += round((time.perf_counter() - stage) * 1000, 1)
                 evidence.extend(new_evidence)
                 summary_warnings.extend(new_summary_warnings)
 
-            timings["audit"] = round(
-                (time.perf_counter() - audit_started) * 1000, 1
-            )
+            timings["audit"] = round((time.perf_counter() - audit_started) * 1000, 1)
 
             evidence_selections = []
             selection_warnings: list[str] = []
@@ -797,11 +894,10 @@ class SearchReaderPipeline:
                 on_progress=emit,
                 conversation_history=history,
                 current_message=normalized,
-                research_records=(
-                    research_plan.records if research_plan else None
-                ),
+                research_records=(research_plan.records if research_plan else None),
                 evidence_sufficient=audit_sufficient,
                 evidence_selections=evidence_selections,
+                representative_scope=representative_scope,
             )
             timings["finalize"] = round((time.perf_counter() - stage) * 1000, 1)
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)
@@ -862,7 +958,9 @@ class SearchReaderPipeline:
             return result
         except Exception as exc:
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)
-            error_stage = exc.stage if isinstance(exc, SearchReaderError) else "unexpected"
+            error_stage = (
+                exc.stage if isinstance(exc, SearchReaderError) else "unexpected"
+            )
             emit(
                 "failed",
                 {

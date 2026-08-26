@@ -59,6 +59,7 @@ class ResearchPlan:
     goal: str
     records: list[ResearchRecord] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
+    scope_mode: str = "fixed"
     clarification: str = ""
     fallback: bool = False
 
