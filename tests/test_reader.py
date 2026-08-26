@@ -27,6 +27,7 @@ from rwkv_search_reader.reader import (
     _parse_source_summary,
     _remove_copied_temporal_qualifiers,
     _unsupported_summary_numbers,
+    _valid_discovered_subject,
     _verified_source_relation,
     citation_warnings,
 )
@@ -88,6 +89,15 @@ def test_research_plan_parser_supports_material_scope_discovery() -> None:
     assert plan.decision == "search"
     assert plan.scope_mode == "discover"
     assert plan.records == []
+
+
+def test_game_scope_rejects_events_and_field_values_as_subjects() -> None:
+    question = "二游现在的版本是什么，各个主题是什么？"
+
+    assert _valid_discovered_subject(question, "绝区零")
+    assert not _valid_discovered_subject(question, "2026动漫游戏节")
+    assert not _valid_discovered_subject(question, "夏日版本")
+    assert not _valid_discovered_subject(question, "周年庆活动")
 
 
 def test_research_plan_parser_requires_a_real_clarification_question() -> None:
@@ -271,6 +281,7 @@ def test_summary_prompt_is_generic_and_puts_material_before_request() -> None:
     prompt = captured["user"]
     assert prompt.index("UNIQUE MATERIAL") < prompt.index("UNIQUE QUESTION")
     assert prompt.index("UNIQUE QUESTION") < prompt.index("阅读这一个来源")
+    assert "绝不能用用户问题里的类别名或泛称代替对象" in prompt
     assert "股价" not in prompt
     assert "本周最重要" not in prompt
     assert evidence.claim == "Relevant fact."
@@ -647,13 +658,15 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     assert prompt.index("UNIQUE QUESTION") < prompt.index("根据上面的材料")
     assert '"facts"' not in prompt
     assert "不输出 JSON" in prompt
-    assert "组织 4–8 个互不重复的信息维度" in prompt
+    assert "充分组织材料中互不重复的信息维度" in prompt
+    assert "不要设置固定字数上限" in prompt
+    assert "约 900 个中文字符" not in prompt
     assert answer == "这是综合后的自然回答，不是逐来源清单 [S1][S2]。"
     assert warnings == []
     assert len(captured["prompts"]) == 1
 
 
-def test_final_reader_only_receives_sources_selected_for_answer_fields() -> None:
+def test_field_audit_does_not_filter_page_summaries_from_final_reader() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     rows = _evidence(2)
     captured = {}
@@ -673,8 +686,43 @@ def test_final_reader_only_receives_sources_selected_for_answer_fields() -> None
 
     assert '"S2"' in captured["user"]
     assert "Fact 2" in captured["user"]
-    assert "Fact 1" not in captured["user"]
+    assert "Fact 1" in captured["user"]
+    assert "一个独立 RWKV 阅读一个网页" in captured["user"]
     assert answer == "只使用已绑定字段 [S2]"
+
+
+def test_field_bound_final_reads_every_per_page_summary() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    rows = _evidence(3)
+    rows[0].title = "原神版本活动"
+    rows[0].quote = "原神在该版本开放了多个主题活动。"
+    rows[0].claim = "原神新增主题活动与奖励说明。"
+    rows[1].title = "原神版本公告"
+    rows[1].quote = "原神7.0版本公告。"
+    rows[1].claim = "原神当前为7.0版本。"
+    rows[2].title = "无关游戏公告"
+    rows[2].quote = "其他游戏的活动，页面底部推荐原神。"
+    rows[2].claim = "其他游戏更新。"
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "原神为7.0版本，并开放了多个主题活动 [S1][S2]。"
+
+    reader._complete = complete
+    answer, _ = reader.finalize(
+        "原神当前版本和主题是什么？",
+        rows,
+        evidence_selections=[
+            FieldEvidenceSelection("原神", "版本", "S2", "supported", "7.0版本")
+        ],
+    )
+
+    assert "<来源摘要二元组>" in captured["user"]
+    assert "原神新增主题活动与奖励说明" in captured["user"]
+    assert "其他游戏更新" in captured["user"]
+    assert "最多 4090 token" in captured["user"]
+    assert answer == "原神为7.0版本，并开放了多个主题活动 [S1][S2]。"
 
 
 def test_final_reader_receives_prior_conversation_as_context_not_evidence() -> None:

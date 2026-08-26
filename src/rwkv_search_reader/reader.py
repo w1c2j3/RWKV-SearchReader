@@ -311,6 +311,25 @@ def _broad_question(question: str) -> bool:
     )
 
 
+def _valid_discovered_subject(question: str, subject: str) -> bool:
+    """Reject field values and public events masquerading as set members."""
+
+    value = " ".join(str(subject or "").split()).strip()
+    if not value:
+        return False
+    game_set_question = bool(
+        re.search(r"二游|二次元(?:游戏|手游)|游戏(?:本体|版本|主题)", question)
+    )
+    event_or_field = bool(
+        re.search(
+            r"(?:动漫|动画|游戏)(?:节|展|展会|大会)$|"
+            r"(?:发布会|见面会|赛事|比赛|活动|版本|主题|排行榜)$",
+            value,
+        )
+    )
+    return not (game_set_question and event_or_field)
+
+
 def _published_timestamp(value: str) -> float | None:
     text = str(value or "").strip()
     if not text:
@@ -806,6 +825,7 @@ records 表示最终答案必须覆盖的对象或集合记录。每条记录包
                     }
                     or re.search(r"排行榜|推荐列表|游戏列表", subject)
                     or subject_key not in material_key
+                    or not _valid_discovered_subject(question, subject)
                 ):
                     continue
                 if subject not in subjects:
@@ -1139,7 +1159,7 @@ records 表示最终答案必须覆盖的对象或集合记录。每条记录包
 
 你是单对象、单字段证据选择器，不回答整道题。当前日期为 {_today()}。{field_instruction}
 必须由一个来源二元组独立、直接、完整支持这个字段，不得跨来源补齐。来源之间冲突且无法判断时判 conflict，没有直接材料时判 missing。只可使用上面实际存在的来源编号。
-fact 只能摘录当前这个字段，禁止复制来源摘要中的其他字段。只输出一个 JSON 对象，fact 不超过 80 个汉字：
+fact 只能摘录当前这个字段，禁止复制来源摘要中的其他字段；但字段本身包含多项并列内容时应完整保留，不要只留第一项。只输出一个 JSON 对象，fact 最多 300 个汉字：
 {{"source_id":"材料编号或空字符串","status":"supported|missing|conflict","fact":"所选来源直接写出的事实或缺失原因"}}"""
         output = self._complete(user, max_tokens=320, stage="evidence_select")
         payload = _json_object_from_output(output, "evidence_select")
@@ -1217,14 +1237,20 @@ fact 只能摘录当前这个字段，禁止复制来源摘要中的其他字段
         tasks: list[tuple[ResearchRecord, str, list[Evidence]]] = []
         for record in records:
             subject_key = _normalized_text(record.subject)
-            matching = [
+            direct = [
+                item
+                for item in useful
+                if subject_key
+                and subject_key in _normalized_text(item.title)
+            ]
+            contextual = [
                 item
                 for item in useful
                 if subject_key
                 and subject_key in _normalized_text(f"{item.title} {item.quote}")
             ]
             candidates = sorted(
-                matching,
+                direct or contextual,
                 key=lambda item: _source_relevance(record.question, item),
                 reverse=True,
             )[:8]
@@ -1326,6 +1352,7 @@ URL：{chunk.url}
 
 {document_instruction}
 {web_instruction}
+摘要中的每个事实都必须写出本页材料明确对应的具体对象名，绝不能用用户问题里的类别名或泛称代替对象。例如用户问“二游”，网页写的是“绝区零”，摘要必须写“绝区零”，不能写“二游版本为……”。如果本页无法确定事实属于哪个具体对象，不要保留该事实。
 阅读这一个来源，把与用户问题有关的信息直接总结成一段材料。只能保留来源明确写出的名称、日期、数字、事件和限定条件；用户问题中的“今天”、“当前”、“最新”或日期不是来源事实，不得抄进摘要。时间表述只能来自来源正文或上面的发布时间。某项信息没有出现时就省略，不得猜测，不得拿另一个数值填充，不要为了让答案看起来完整而补齐字段。合并来源内的重复内容，忽略导航、网站介绍和其他模板文字。不复述用户问题，不评论来源，不写阅读过程。来源无关时只输出“无相关信息”。"""
         output = self._complete(
             user,
@@ -1483,96 +1510,12 @@ URL：{chunk.url}
     ) -> tuple[str, list[str]]:
         if not evidence:
             raise SearchReaderError("read", "there are no source summaries to combine")
-        if evidence_selections:
-            selection_material = _render_evidence_selections(evidence_selections)
-            allowed = (
-                "、".join(
-                    dict.fromkeys(
-                        item.source_id
-                        for item in evidence_selections
-                        if item.status == "supported" and item.source_id
-                    )
-                )
-                or "无"
-            )
-            scope_instruction = (
-                "本轮对象是从公开范围中主动发现的代表对象，不表示已经穷举整个类别。"
-                "回答开头用一句自然短句说明‘先列出目前公开信息较完整的代表对象’，"
-                "不要提检索、模型、材料或技术过程。"
-                if representative_scope
-                else ""
-            )
-            user = f"""<逐字段证据材料>
-{selection_material}
-</逐字段证据材料>
-
-<用户问题>
-{question}
-</用户问题>
-
-直接把逐字段证据材料整理成一份自然、简洁的最终回答。它是唯一事实来源，不使用模型记忆，也不添加材料中没有的内容。
-{scope_instruction}
-每个 status=supported 的字段都必须回答，只能复述该项 fact，并原样保留 fact 末尾的 [S#]；每个 status=missing 或 conflict 的字段只说明该字段缺失或冲突。某对象只缺一个字段时，不能把该对象其他已支持字段也说成无法核实。按 subject 合并组织，但版本号、更新时间、福利仍保持各自绑定，不互相替代。
-不要写“根据材料审核状态”、阅读过程、搜索过程或思维链。只能使用这些来源编号：{allowed}。"""
-            if on_progress:
-                on_progress(
-                    "finalizing",
-                    {
-                        "source_count": len(
-                            {
-                                item.source_id
-                                for item in evidence_selections
-                                if item.source_id
-                            }
-                        ),
-                        "field_count": len(evidence_selections),
-                        "group_count": 0,
-                    },
-                )
-            answer = _clean_final_answer(
-                self._complete(
-                    user,
-                    max_tokens=self.settings.rwkv_max_tokens,
-                    stage="finalize",
-                )
-            )
-            if not answer:
-                raise SearchReaderError("read", "RWKV returned an empty final answer")
-            selected_facts = [
-                Evidence(
-                    source_id=item.source_id,
-                    title=f"{item.subject} {item.field}",
-                    url="",
-                    claim=item.fact,
-                    quote=item.fact,
-                )
-                for item in evidence_selections
-                if item.status == "supported" and item.source_id and item.fact
-            ]
-            bound = _attach_missing_citations(answer, selected_facts)
-            return _bind_subject_citations(bound, evidence_selections), []
         eligible = _eligible_evidence(question, evidence)
-        if evidence_selections:
-            selected_ids = {
-                item.source_id
-                for item in evidence_selections
-                if item.status == "supported" and item.source_id
-            }
-            eligible = [item for item in evidence if item.source_id in selected_ids]
         ordered = _final_evidence_order(question, eligible)
-        if evidence_selections:
-            source_index = "\n".join(
-                json.dumps([item.source_id, {"url": item.url}], ensure_ascii=False)
-                for item in ordered
-            )
-            reduced_material = "[]"
-            reduction_warnings: list[str] = []
-            group_count = 0
-        else:
-            source_index = _render_source_index(ordered)
-            reduced_material, reduction_warnings, group_count = self._reduce_evidence(
-                question, ordered, on_progress=on_progress
-            )
+        source_index = _render_source_index(ordered)
+        reduced_material, reduction_warnings, group_count = self._reduce_evidence(
+            question, ordered, on_progress=on_progress
+        )
         allowed = "、".join(item.source_id for item in ordered) or "无"
         conversation = "\n".join(
             json.dumps(
@@ -1599,20 +1542,19 @@ URL：{chunk.url}
         )
         records = _render_research_records(research_records)
         selections = _render_evidence_selections(evidence_selections)
-        if evidence_selections:
-            audit_status = (
-                "逐字段证据选择已覆盖全部必答字段。"
-                if all(item.status == "supported" for item in evidence_selections)
-                else "逐字段证据选择发现部分字段缺失或冲突；在对应字段如实说明即可。"
-            )
-        else:
-            audit_status = (
-                "材料审核通过。"
-                if evidence_sufficient is True
-                else "材料审核仍有实质缺口；只能回答已经得到来源支持的部分。"
-                if evidence_sufficient is False
-                else "材料审核结果不可用；必须保守回答，不能把不确定内容写成事实。"
-            )
+        audit_status = (
+            "材料审核通过。"
+            if evidence_sufficient is True
+            else "材料审核仍有实质缺口；只能回答已经得到来源支持的部分。"
+            if evidence_sufficient is False
+            else "材料审核结果不可用；必须保守回答，不能把不确定内容写成事实。"
+        )
+        scope_instruction = (
+            "本轮对象是从公开范围中主动发现的代表对象，不表示已经穷举整个类别。"
+            "回答开头自然说明这是目前公开信息较完整的代表对象，不要提检索、模型或技术过程。"
+            if representative_scope
+            else ""
+        )
         user = f"""<来源索引>
 {source_index}
 </来源索引>
@@ -1639,10 +1581,13 @@ URL：{chunk.url}
 </用户问题>
 
 此前对话用于保持连续语境、用户偏好和指代关系，不是本轮事实来源；所有事实仍必须由来源材料支持。
-根据上面的材料直接回答用户问题。若“逐字段证据选择”不是空数组，它就是本轮唯一可用的事实材料：每个 subject/field 只能复述该项 fact；fact 末尾已有与它绑定的 [S#]，必须原样保留，不能删除、移动或改成“来自 S#”的说明。status=missing 或 conflict 的字段必须如实说明缺失或冲突，不得从来源索引、其他字段、模型记忆或其他网页补齐。此时“来源摘要二元组”为空是正常的。若逐字段证据选择为空，每一行来源材料才是不可拆开的 `(source_id, source_summary)` 二元组。若“需要覆盖的记录与字段”不是空数组，按记录核对覆盖情况；同一对象的多个字段应合并回答，不能把一个对象的版本与另一个对象的福利拼在一起。版本号、版本名称、更新时间和福利若要写在同一项中，必须来自同一个二元组，或多个二元组明确写的是同一版本；不得把 S2 的版本号与 S8 的版本名称或日期拼成一个新事实。合并重复信息，不要按网页逐条复述，也不要重复用户的问法。
+{scope_instruction}
+根据上面的材料直接回答用户问题。“来源摘要二元组”是最终阅读阶段唯一的事实材料：前一步已经由一个独立 RWKV 阅读一个网页并生成一条 `(source_id, source_summary)`，现在必须整体阅读全部二元组后重新总结和回答。不要读取网页原文，不使用模型记忆。
+“逐字段证据选择”只是证据审核提示，用于提醒哪些核心字段已有直接支持、缺失或冲突；它不能取代、过滤或缩短来源摘要，也不能限制最终回答只能复述 fact。最终内容仍必须来自来源摘要二元组。每一行二元组不可拆开，事实和它的 source_id 必须始终绑定；不得把一个来源的对象与另一个来源的版本、日期、主题或福利拼成新事实。若“需要覆盖的记录与字段”不是空数组，按记录核对覆盖情况；同一对象的多个字段应合并回答，不能拿一个对象的材料回答另一个对象。合并重复信息，但保留互不重复、直接相关的细节，不要按网页逐条复述，也不要重复用户的问法。
+若“需要覆盖的记录与字段”不是空数组，最终答案只回答 records 中列出的 subject；其他对象的摘要仅用于识别冲突和排除误配，不得另设“其他对象”“背景信息”或扩展推荐。若某个 record 没有足够摘要，如实说明该对象缺失，不能用 records 之外的对象补足篇幅。
 “福利”只包括材料明确写出的赠送、奖励、补偿、兑换码、签到所得、免费领取或价格优惠；新玩法、新区域、战斗机制、角色介绍和挑战攻略不是福利，除非同一二元组明确写出对应奖励。
 若材料审核状态为“仍有实质缺口”，不要伪装成完整答案：先用一句自然的话说明目前能核实到的范围，只回答有材料支持的对象和字段，并明确哪些对象或字段尚无法核实；不得拿旧活动、旧版本或发布时间不明的页面回答“当前、最新”。
-根据问题范围决定篇幅：针对单一事实的问题简洁回答；“有哪些、推荐、比较、总结、动态”等开放式问题先给直接结论，再组织 4–8 个互不重复的信息维度，每个维度选择 1–3 个有代表性的具体例子。维度可以包括定义、类别、具体对象、关键差异、数字、适用条件和选择标准，以实际材料为准。不要把网页标题、用户问题、搜索词或“有哪些/推荐”等标签文字当成答案内容；相同名称和相同事实只出现一次。全文控制在约 900 个中文字符内。综合相同结论时优先合并多个来源引用。
+根据问题范围决定篇幅：针对单一事实的问题简洁回答；“有哪些、推荐、比较、总结、动态”等开放式问题先给直接结论，再充分组织材料中互不重复的信息维度，每个维度给出有代表性的具体例子。维度可以包括定义、类别、具体对象、关键差异、数字、适用条件和选择标准，以实际材料为准。不要把网页标题、用户问题、搜索词或“有哪些/推荐”等标签文字当成答案内容；相同名称和相同事实只出现一次。不要设置固定字数上限；材料充足时应充分使用最多 4090 token 的输出预算，材料有限时自然缩短，不能重复或凑字数。综合相同结论时优先合并多个来源引用。
 严格区分来源发布时间、事件发生时间和用户询问的时间范围。age_days 的含义是：0 代表来源今天发布，1 代表昨天，unknown 代表时间不明。只有材料中的日期明确支持时，才能将事件说成“今天”、“当前”或“最新”；日期不明或过时材料可作背景，不得冒充当期事实。不得把一个指标的数值当成另一个指标。有冲突时说明冲突；材料不足时如实说明。当前日期是 {_today()}，这个日期只用于判断材料新旧，不是任何事件的发生日期，不得把其中的年份替换进来源事实。
 在有事实依据的句子末尾标注来源编号，格式如 [S1]；一句由多个来源支持时可写 [S1][S2]。只能使用这些编号：{allowed}。
 若材料审核状态写明“仍有实质缺口”，这条要求优先于上面的完整性和篇幅要求：答案第一句必须先说明当前问题尚未被材料完整核实；随后只能把有明确日期的旧材料标为历史信息或背景，绝不能把它放在“当前版本”“最新福利”标题下。若没有任何当前事实可核实，直接说明无法核实，不要用旧资料凑答案。
@@ -1660,27 +1605,7 @@ URL：{chunk.url}
         answer = _clean_final_answer(output)
         if not answer:
             raise SearchReaderError("read", "RWKV returned an empty final answer")
-        if evidence_selections:
-            selected_facts = [
-                Evidence(
-                    source_id=item.source_id,
-                    title=f"{item.subject} {item.field}",
-                    url=next(
-                        (
-                            source.url
-                            for source in evidence
-                            if source.source_id == item.source_id
-                        ),
-                        "",
-                    ),
-                    claim=item.fact,
-                    quote=item.fact,
-                )
-                for item in evidence_selections
-                if item.status == "supported" and item.source_id and item.fact
-            ]
-            answer = _attach_missing_citations(answer, selected_facts)
-        return answer, reduction_warnings
+        return _attach_missing_citations(answer, ordered), reduction_warnings
 
 
 def citation_warnings(answer: str, evidence: list[Evidence]) -> list[str]:

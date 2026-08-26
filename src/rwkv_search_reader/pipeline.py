@@ -935,7 +935,7 @@ class SearchReaderPipeline:
                     else self.provider.name
                 ),
                 reader_mode=(
-                    "rwkv-planned-field-bound-final-summary"
+                    "rwkv-planned-parallel-page-summaries-final-summary"
                     if evidence_selections
                     else "rwkv-reviewed-parallel-read-final-summary"
                 ),
