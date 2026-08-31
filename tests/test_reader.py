@@ -20,6 +20,7 @@ from rwkv_search_reader.reader import (
     RWKVReader,
     _attach_missing_citations,
     _bind_atomic_citations,
+    _bind_retrieval_point_citations,
     _bind_subject_citations,
     _chunk_material_nodes_by_retrieval_point,
     _clean_final_answer,
@@ -1184,6 +1185,48 @@ def test_answer_lead_ending_in_colon_does_not_receive_a_fake_citation() -> None:
     assert bound == "以下是主要变化：\n性能得到提升 [S1]。"
 
 
+def test_retrieval_point_citations_cannot_cross_plain_answer_branches() -> None:
+    rows = _evidence(2)
+    rows[0].source_id = "S1"
+    rows[0].retrieval_point = "原神"
+    rows[0].claim = "原神当前为7.0版本。"
+    rows[1].source_id = "S10"
+    rows[1].retrieval_point = "崩坏：星穹铁道"
+    rows[1].claim = "崩坏：星穹铁道当前为4.5版本。"
+
+    bound, rebound = _bind_retrieval_point_citations(
+        "原神：当前为7.0版本 [S1]。\n"
+        "崩坏：星穹铁道：当前为4.5版本 [S1][S10]。",
+        rows,
+    )
+
+    assert rebound is True
+    assert bound == (
+        "原神：当前为7.0版本 [S1]。\n"
+        "崩坏：星穹铁道：当前为4.5版本 [S10]。"
+    )
+
+
+def test_retrieval_point_heading_binds_following_lines_to_its_sources() -> None:
+    rows = _evidence(2)
+    rows[0].source_id = "S2"
+    rows[0].retrieval_point = "原神"
+    rows[0].claim = "当前版本主题为无神怜爱的雪国。"
+    rows[1].source_id = "S8"
+    rows[1].retrieval_point = "绝区零"
+    rows[1].claim = "当前版本主题为昨日金墟。"
+
+    bound, rebound = _bind_retrieval_point_citations(
+        "### 原神\n当前版本主题为无神怜爱的雪国 [S8]。\n"
+        "### 绝区零\n当前版本主题为昨日金墟 [S2]。",
+        rows,
+    )
+
+    assert rebound is True
+    assert "无神怜爱的雪国 [S2]" in bound
+    assert "昨日金墟 [S8]" in bound
+
+
 def test_model_calls_keep_full_local_analysis_record() -> None:
     settings = replace(Settings(), rwkv_model="test", rwkv_protocol="completions")
     reader = RWKVReader(settings)
@@ -1404,6 +1447,16 @@ def test_point_branches_are_aggregated_once_before_the_final_summary() -> None:
     assert warnings == []
     assert [stage for stage, _ in calls].count("branch_finalize") == 2
     assert [stage for stage, _ in calls][-2:] == ["aggregate", "finalize"]
+    cues = {
+        "branch_finalize": "分支最终总结：",
+        "aggregate": "汇总材料：",
+        "finalize": "最终回答：",
+    }
+    for stage, prompt in calls:
+        if stage != "finalize":
+            assert prompt.startswith('[["S')
+        assert prompt.index("事实") < prompt.index("问题：比较两个游戏")
+        assert prompt.rstrip().endswith(cues[stage])
 
 
 def test_field_bound_final_uses_only_atomic_field_records() -> None:

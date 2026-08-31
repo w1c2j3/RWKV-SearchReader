@@ -1286,6 +1286,90 @@ def _attach_missing_citations(answer: str, evidence: list[Evidence]) -> str:
     return "".join(parts)
 
 
+def _bind_retrieval_point_citations(
+    answer: str,
+    evidence: list[Evidence],
+) -> tuple[str, bool]:
+    """Keep each answer branch bound to sources from the same retrieval point."""
+
+    points: list[str] = []
+    evidence_by_point: dict[str, list[Evidence]] = {}
+    for item in evidence:
+        point = " ".join(str(item.retrieval_point or "").split()).strip()
+        if not point:
+            continue
+        if point not in evidence_by_point:
+            points.append(point)
+            evidence_by_point[point] = []
+        evidence_by_point[point].append(item)
+    if len(points) < 2:
+        return _attach_missing_citations(answer, evidence), False
+
+    source_point = {
+        item.source_id.upper(): point
+        for point, rows in evidence_by_point.items()
+        for item in rows
+    }
+    parts = re.split(r"(```[\s\S]*?```)", answer)
+    rebound = False
+    rendered: list[str] = []
+    current_point = ""
+    for block in parts:
+        if block.lstrip().startswith("```"):
+            cleaned = re.sub(r"\s*\[S\d+\]", "", block, flags=re.IGNORECASE)
+            rebound = rebound or cleaned != block
+            rendered.append(cleaned)
+            continue
+        clauses = re.split(r"([。！？!?；;\n]+)", block)
+        for index in range(0, len(clauses), 2):
+            clause = clauses[index]
+            clause_key = _normalized_text(
+                re.sub(r"\[(?:S\d+)\]", "", clause, flags=re.IGNORECASE)
+            )
+            mentioned = [
+                point
+                for point in points
+                if _normalized_text(point)
+                and _normalized_text(point) in clause_key
+            ]
+            if len(mentioned) == 1:
+                current_point = mentioned[0]
+            applicable_points = mentioned or ([current_point] if current_point else [])
+            if not applicable_points:
+                clauses[index] = _attach_missing_citations(clause, evidence)
+                continue
+            allowed_rows = [
+                item
+                for point in applicable_points
+                for item in evidence_by_point.get(point, [])
+            ]
+            allowed_ids = {item.source_id.upper() for item in allowed_rows}
+            cited_ids = {
+                source_id.upper()
+                for source_id in re.findall(
+                    r"\[(S\d+)\]", clause, flags=re.IGNORECASE
+                )
+            }
+            if any(
+                source_id in source_point and source_id not in allowed_ids
+                for source_id in cited_ids
+            ):
+                rebound = True
+            filtered = re.sub(
+                r"\s*\[(S\d+)\]",
+                lambda match, allowed_ids=allowed_ids: (
+                    f" [{match.group(1).upper()}]"
+                    if match.group(1).upper() in allowed_ids
+                    else ""
+                ),
+                clause,
+                flags=re.IGNORECASE,
+            )
+            clauses[index] = _attach_missing_citations(filtered, allowed_rows)
+        rendered.append("".join(clauses))
+    return "".join(rendered), rebound
+
+
 def _context_retry_tokens(error: str, requested: int) -> int | None:
     """Recover when a compatible endpoint rejects input + requested output."""
 
@@ -2624,10 +2708,10 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         )
         user = f"""{material}
 
-问题：{question}
 当前日期：{_today()}
 当前检索点：{retrieval_point or '未指定'}
-{instruction}，删除重复，保留具体名称、日期、数字和 [S1] 来源编号。只写当前检索点，不写其他对象；问题询问当前状态时，区分已生效、旧版本和前瞻信息，无法确认就保留冲突。只输出合并后的材料。
+问题：{question}
+{instruction}。删除重复，保留名称、日期、数字和 [S1] 来源编号。只写当前检索点；当前状态只采用已生效信息，冲突则保留。只输出合并后的材料。
 分支总结："""
         output = self._complete(
             user,
@@ -2704,10 +2788,10 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         material = _render_material_nodes([node])
         user = f"""{material}
 
-问题：{question}
 当前日期：{_today()}
 当前检索点：{node.retrieval_point}
-形成这个检索点的最终分支总结，不超过 {target_chars} 个字符。问题询问当前状态时，选择当前日期前已上线且生效时间最晚的信息；旧版本与未上线前瞻不作为当前版本，无法确认就说明冲突。只写当前检索点，不写其他对象；[S1] 只是来源编号，不是版本号。保留事实后的来源编号。
+问题：{question}
+把以上材料总结为这个检索点的最终分支，不超过 {target_chars} 个字符。当前状态选择已经生效且时间最晚的信息；旧信息和未来预告不算当前状态。只写当前检索点并保留事实后的 [S1] 来源编号。
 分支最终总结："""
         output = self._complete(
             user,
@@ -2971,8 +3055,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     ): (index, node)
                     for index, node in enumerate(nodes)
                 }
-                completed = 0
-                for future in as_completed(futures):
+                for completed, future in enumerate(as_completed(futures), start=1):
                     index, original = futures[future]
                     try:
                         finalized = future.result()
@@ -2986,7 +3069,6 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                             ]
                         )
                     finalized_nodes[index] = finalized
-                    completed += 1
                     if on_progress:
                         on_progress(
                             "branch_finalized",
@@ -3269,7 +3351,13 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     "final atomic answer had no supportable clause; used safety renderer"
                 )
         else:
-            answer = _attach_missing_citations(answer, ordered)
+            answer, citations_rebound = _bind_retrieval_point_citations(
+                answer, ordered
+            )
+            if citations_rebound:
+                reduction_warnings.append(
+                    "final answer cross-point citations were rebound"
+                )
         return answer, reduction_warnings
 
 
