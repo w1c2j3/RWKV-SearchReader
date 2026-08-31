@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -56,6 +57,48 @@ def test_conversation_store_persists_ordered_message_items(tmp_path) -> None:
         {"question": "第一问", "answer": "第一答"},
         {"question": "第二问", "answer": "第二答"},
     ]
+
+
+def test_restored_conversation_omits_large_source_bodies(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    store.ensure("conv_compact123", "client_compact123")
+    source = {
+        "source_id": "S1",
+        "title": "Source",
+        "url": "https://example.com/source",
+        "content": "网页全文" * 100_000,
+        "snippet": "搜索摘要" * 10_000,
+        "retrieval_point": "对象",
+    }
+    store.append_turn(
+        "conv_compact123",
+        "client_compact123",
+        "问题",
+        {
+            "request_id": "request-compact",
+            "answer": "回答 [S1]",
+            "sources": [source],
+            "trace": [
+                {"stage": "sources_found", "detail": {"sources": [source]}}
+            ],
+            "conversation_state": {"facts": [{"fact": "保留状态"}]},
+        },
+    )
+
+    restored = store.get("conv_compact123", "client_compact123")
+    payload = restored["items"][1]["payload"]
+
+    assert payload["sources"] == [
+        {
+            "source_id": "S1",
+            "title": "Source",
+            "url": "https://example.com/source",
+            "retrieval_point": "对象",
+        }
+    ]
+    assert payload["trace"][0]["detail"]["sources"] == payload["sources"]
+    assert payload["conversation_state"]["facts"][0]["fact"] == "保留状态"
+    assert len(json.dumps(restored, ensure_ascii=False)) < 10_000
 
 
 def test_conversation_store_imports_legacy_session_once(tmp_path) -> None:

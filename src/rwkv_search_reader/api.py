@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import __version__
 from .config import PROJECT_ROOT, get_settings
@@ -71,6 +72,7 @@ app = FastAPI(
     version=__version__,
     description="Deterministic small-talk bypass plus retrieve-then-read answers.",
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 _STORE_GUARD = threading.Lock()
 _STORES: dict[str, ConversationStore] = {}

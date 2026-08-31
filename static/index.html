@@ -95,6 +95,9 @@
         transition: background .15s ease;
       }
       .history-item:hover, .history-item.active { background: rgb(255 255 255 / 9%); }
+      .history-item:disabled { cursor: wait; opacity: .72; }
+      .history-item.loading .history-time { color: #b7d8cf; }
+      .history-item.error .history-time { color: #f2a7a7; }
       .history-question { display: block; overflow: hidden; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
       .history-time { display: block; margin-top: 4px; color: #718a84; font-size: 10px; }
       .storage-card { margin-top: auto; padding: 13px 12px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 13px; background: rgb(0 0 0 / 10%); }
@@ -337,6 +340,7 @@
       let activeController = null;
       let activeUploadController = null;
       let requestGeneration = 0;
+      let historyRequestGeneration = 0;
       let conversationId = readConversationId();
       const clientId = readClientId();
       saveConversationIdentity();
@@ -808,6 +812,15 @@
         return turns;
       };
 
+      const markActiveHistory = () => {
+        historyList.querySelectorAll('.history-item').forEach((item) => {
+          const active = item.dataset.conversationId === conversationId;
+          item.classList.toggle('active', active);
+          if (active) item.setAttribute('aria-current', 'true');
+          else item.removeAttribute('aria-current');
+        });
+      };
+
       const showConversation = (record) => {
         if (pending || uploading) {
           requestGeneration += 1;
@@ -827,7 +840,9 @@
         conversationId = record.id;
         currentDocuments = record.documents || [];
         documentNotice = '';
+        questionInput.value = '';
         renderDocuments();
+        resizeComposer();
         saveConversationIdentity();
         turns.forEach((turn) => {
           appendUser(turn.question || '');
@@ -838,17 +853,26 @@
           else finishAssistant(body, turn);
         });
         chatTitle.textContent = record.title || (turns[0]?.question || currentDocuments[0]?.filename || '历史记录').slice(0, 42);
+        submit.disabled = false;
+        attach.disabled = false;
+        questionInput.disabled = false;
+        markActiveHistory();
         closeSidebar();
         scrollToBottom();
+        requestAnimationFrame(() => questionInput.focus());
       };
 
       const fetchConversation = async (identity) => {
         const response = await fetch('/v1/conversations/get', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
           body: JSON.stringify({ client_id: clientId, conversation_id: identity }),
         });
-        if (!response.ok) throw new Error('conversation unavailable');
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(typeof error.detail === 'string' ? error.detail : '历史对话暂时无法打开');
+        }
         return response.json();
       };
 
@@ -866,6 +890,11 @@
           const button = document.createElement('button');
           button.className = 'history-item';
           button.type = 'button';
+          button.dataset.conversationId = record.id;
+          if (record.id === conversationId) {
+            button.classList.add('active');
+            button.setAttribute('aria-current', 'true');
+          }
           const question = document.createElement('span');
           question.className = 'history-question';
           question.textContent = record.title || '未命名对话';
@@ -876,8 +905,26 @@
           time.textContent = `${Math.floor(Number(record.message_count || 0) / 2)} 轮${documentCopy} · ${savedTime}`;
           button.append(question, time);
           button.addEventListener('click', async () => {
-            try { showConversation(await fetchConversation(record.id)); }
-            catch (_) {}
+            const historyGeneration = ++historyRequestGeneration;
+            button.disabled = true;
+            button.classList.remove('error');
+            button.classList.add('loading');
+            time.textContent = '正在打开…';
+            try {
+              const restored = await fetchConversation(record.id);
+              if (historyGeneration !== historyRequestGeneration) return;
+              showConversation(restored);
+              renderHistory();
+            } catch (error) {
+              if (historyGeneration !== historyRequestGeneration) return;
+              button.classList.remove('loading');
+              button.classList.add('error');
+              time.textContent = `打开失败 · ${String(error.message || '请重试')}`;
+              console.error('Failed to restore conversation', error);
+            } finally {
+              button.disabled = false;
+              button.classList.remove('loading');
+            }
           });
           historyList.appendChild(button);
         });

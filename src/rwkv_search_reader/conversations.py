@@ -45,8 +45,75 @@ def _context_terms(value: str) -> set[str]:
     return terms
 
 
-def _answer_payload(result: dict[str, Any]) -> dict[str, Any]:
+def _compact_source(source: object) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
     return {
+        key: source.get(key)
+        for key in (
+            "source_id",
+            "title",
+            "url",
+            "provider",
+            "score",
+            "published_date",
+            "error",
+            "retrieval_point",
+            "retrieval_query",
+        )
+        if source.get(key) not in (None, "")
+    }
+
+
+def _compact_trace(trace: object) -> list[dict[str, Any]]:
+    if not isinstance(trace, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for event in trace:
+        if not isinstance(event, dict):
+            continue
+        row = dict(event)
+        detail = row.get("detail")
+        if isinstance(detail, dict):
+            detail = dict(detail)
+            if isinstance(detail.get("sources"), list):
+                detail["sources"] = [
+                    compact_source
+                    for source in detail["sources"]
+                    if (compact_source := _compact_source(source))
+                ]
+            row["detail"] = detail
+        compact.append(row)
+    return compact
+
+
+def _compact_answer_payload(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    compact = {
+        key: payload.get(key)
+        for key in (
+            "request_id",
+            "queries",
+            "reader_mode",
+            "degraded",
+            "warnings",
+            "timings_ms",
+            "conversation_state",
+        )
+        if key in payload
+    }
+    compact["sources"] = [
+        compact_source
+        for source in payload.get("sources") or []
+        if (compact_source := _compact_source(source))
+    ]
+    compact["trace"] = _compact_trace(payload.get("trace"))
+    return compact
+
+
+def _answer_payload(result: dict[str, Any]) -> dict[str, Any]:
+    return _compact_answer_payload({
         key: result.get(key)
         for key in (
             "request_id",
@@ -59,7 +126,7 @@ def _answer_payload(result: dict[str, Any]) -> dict[str, Any]:
             "trace",
             "conversation_state",
         )
-    }
+    })
 
 
 class ConversationStore:
@@ -176,6 +243,7 @@ class ConversationStore:
             payload = json.loads(row["payload_json"] or "{}")
         except json.JSONDecodeError:
             payload = {}
+        payload = _compact_answer_payload(payload)
         return {
             "id": row["id"],
             "object": "conversation.message",
