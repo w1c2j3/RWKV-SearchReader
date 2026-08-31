@@ -414,36 +414,93 @@ def _bind_atomic_citations(
     answer: str,
     selections: list[FieldEvidenceSelection],
 ) -> str:
-    """Bind each answer clause to matching atomic facts, never just the subject."""
+    """Bind each clause to one primary source for its current subject and field."""
 
     supported = [item for item in selections if item.status == "supported"]
     conflicts = [item for item in selections if item.status == "conflict"]
+    subjects = list(dict.fromkeys(item.subject for item in selections if item.subject))
     parts = re.split(r"([。！？!?；;，,\n]+)", answer)
+    current_subject = ""
     for index in range(0, len(parts), 2):
         clause = parts[index]
         plain = re.sub(r"\s*(?:\[S\d+\])+", "", clause, flags=re.IGNORECASE)
+        plain_key = _normalized_text(plain)
+        mentioned_subjects = [
+            subject
+            for subject in subjects
+            if _normalized_text(subject) in plain_key
+        ]
+        if len(mentioned_subjects) == 1:
+            current_subject = mentioned_subjects[0]
+        active_subjects = mentioned_subjects or (
+            [current_subject] if current_subject else []
+        )
+        subject_pool = [
+            selection
+            for selection in supported
+            if not active_subjects or selection.subject in active_subjects
+        ]
+        explicit_fields = {
+            selection.field
+            for selection in subject_pool
+            if _normalized_text(selection.field)
+            and _normalized_text(selection.field) in plain_key
+        }
+        candidate_pool = [
+            selection
+            for selection in subject_pool
+            if not explicit_fields or selection.field in explicit_fields
+        ]
         clause_numbers = _normalized_numbers(plain)
         clause_terms = _claim_terms(plain)
-        matched_ids: list[str] = []
-        for selection in supported:
+        matches: list[tuple[float, FieldEvidenceSelection]] = []
+        for selection in candidate_pool:
+            fact_key = _normalized_text(selection.fact)
             fact_numbers = _normalized_numbers(selection.fact)
-            fact_terms = _claim_terms(
-                f"{selection.subject} {selection.field} {selection.fact}"
+            fact_terms = _claim_terms(selection.fact)
+            exact_match = bool(fact_key and fact_key in plain_key)
+            number_match = bool(
+                fact_numbers and fact_numbers.issubset(clause_numbers)
             )
-            number_match = bool(clause_numbers & fact_numbers)
             term_match = bool(fact_terms) and len(clause_terms & fact_terms) >= max(
                 1, min(3, len(fact_terms) // 3)
             )
-            if not (number_match if fact_numbers else term_match):
+            if not (exact_match or number_match or term_match):
                 continue
-            for source_id in _selection_source_ids(selection):
-                if source_id not in matched_ids:
-                    matched_ids.append(source_id)
+            score = (
+                float(exact_match) * 10
+                + float(number_match) * 6
+                + len(clause_terms & fact_terms)
+                + float(selection.field in explicit_fields) * 4
+            )
+            matches.append((score, selection))
+        selected_matches: list[FieldEvidenceSelection] = []
+        if explicit_fields:
+            for field in explicit_fields:
+                field_matches = [
+                    item for item in matches if item[1].field == field
+                ]
+                if field_matches:
+                    selected_matches.append(max(field_matches, key=lambda item: item[0])[1])
+        elif matches:
+            selected_matches.append(max(matches, key=lambda item: item[0])[1])
+        matched_ids = list(
+            dict.fromkeys(
+                selection.source_id
+                or next(iter(_selection_source_ids(selection)), "")
+                for selection in selected_matches
+            )
+        )
+        matched_ids = [source_id for source_id in matched_ids if source_id]
         if not matched_ids and re.search(r"存在冲突|无法确认|不能确定", plain):
-            plain_terms = _claim_terms(plain)
-            for selection in conflicts:
+            conflict_pool = [
+                selection
+                for selection in conflicts
+                if not active_subjects or selection.subject in active_subjects
+            ]
+            for selection in conflict_pool:
                 identity_terms = _claim_terms(f"{selection.subject} {selection.field}")
-                if identity_terms and not (plain_terms & identity_terms):
+                if identity_terms and not (clause_terms & identity_terms):
                     continue
                 for source_id in _selection_source_ids(selection):
                     if source_id not in matched_ids:
@@ -454,6 +511,104 @@ def _bind_atomic_citations(
         else:
             # Never retain a model-invented citation.
             parts[index] = plain
+    return "".join(parts)
+
+
+def _merge_duplicate_atomic_fields(
+    answer: str,
+    selections: list[FieldEvidenceSelection],
+) -> str:
+    """Merge adjacent fields only when their selected fact text is identical."""
+
+    grouped: dict[tuple[str, str], list[FieldEvidenceSelection]] = {}
+    for selection in selections:
+        if selection.status != "supported" or not selection.fact:
+            continue
+        grouped.setdefault(
+            (selection.subject, _normalized_text(selection.fact)), []
+        ).append(selection)
+    duplicate_groups = [
+        rows
+        for rows in grouped.values()
+        if len({row.field for row in rows}) > 1
+    ]
+    if not duplicate_groups:
+        return answer
+
+    lines = str(answer or "").splitlines(keepends=True)
+    current_subject = ""
+    rendered: list[str] = []
+    for raw_line in lines:
+        newline = "\n" if raw_line.endswith("\n") else ""
+        line = raw_line.removesuffix("\n")
+        line_key = _normalized_text(line)
+        mentioned = list(
+            dict.fromkeys(
+                rows[0].subject
+                for rows in duplicate_groups
+                if _normalized_text(rows[0].subject) in line_key
+            )
+        )
+        if len(mentioned) == 1:
+            current_subject = mentioned[0]
+        active_subjects = mentioned or ([current_subject] if current_subject else [])
+        for rows in duplicate_groups:
+            if rows[0].subject not in active_subjects:
+                continue
+            matches: list[tuple[int, int, FieldEvidenceSelection]] = []
+            for selection in rows:
+                fact_pattern = re.escape(selection.fact).replace(r"\ ", r"\s+")
+                match = re.search(
+                    rf"(?:\*\*)?{re.escape(selection.field)}(?:\*\*)?\s*"
+                    rf"(?:均?为|是|也是|[:：])\s*{fact_pattern}",
+                    line,
+                )
+                if match:
+                    matches.append((match.start(), match.end(), selection))
+            matches.sort(key=lambda item: item[0])
+            runs: list[list[tuple[int, int, FieldEvidenceSelection]]] = []
+            current_run: list[tuple[int, int, FieldEvidenceSelection]] = []
+            for match in matches:
+                if current_run:
+                    bridge = line[current_run[-1][1] : match[0]]
+                    if not re.fullmatch(
+                        r"\s*(?:\[S\d+\]\s*)*[，,；;]\s*", bridge
+                    ):
+                        if len(current_run) > 1:
+                            runs.append(current_run)
+                        current_run = []
+                current_run.append(match)
+            if len(current_run) > 1:
+                runs.append(current_run)
+            for run in reversed(runs):
+                fields = "及".join(item[2].field for item in run)
+                replacement = f"{fields}均为{run[0][2].fact}"
+                line = line[: run[0][0]] + replacement + line[run[-1][1] :]
+        rendered.append(line + newline)
+    return "".join(rendered)
+
+
+def _coalesce_adjacent_identical_citations(answer: str) -> str:
+    """Keep one citation at the end of adjacent facts backed by the same source."""
+
+    parts = re.split(r"([，,；;])", str(answer or ""))
+    for index in range(0, len(parts) - 2, 2):
+        current_ids = tuple(
+            source_id.upper()
+            for source_id in re.findall(
+                r"\[(S\d+)\]", parts[index], flags=re.IGNORECASE
+            )
+        )
+        next_ids = tuple(
+            source_id.upper()
+            for source_id in re.findall(
+                r"\[(S\d+)\]", parts[index + 2], flags=re.IGNORECASE
+            )
+        )
+        if current_ids and current_ids == next_ids:
+            parts[index] = re.sub(
+                r"\s*(?:\[S\d+\])+\s*$", "", parts[index], flags=re.IGNORECASE
+            )
     return "".join(parts)
 
 
@@ -3381,7 +3536,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         user = f"""{reduced_material}
 
 问题：{question}
-{material_request}，只回答所问内容，合并重复内容，不推断材料没有的信息；不同检索点的对象和事实不得混用；材料不足就说明。事实后只用 [S1] 格式标注来源。{final_point_scope}{scope_note}
+{material_request}，只回答所问内容；值相同的字段合并表达，每个独立事实只标一个最直接的 [S1] 来源。不要推断材料没有的信息，不同对象的事实不得混用；材料不足就说明。{final_point_scope}{scope_note}
 最终回答："""
         if on_progress:
             on_progress(
@@ -3411,6 +3566,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         if not answer:
             raise SearchReaderError("read", "RWKV returned an empty final answer")
         if use_atomic_records:
+            answer = _merge_duplicate_atomic_fields(
+                answer, list(evidence_selections or [])
+            )
             answer, atomic_warnings = _filter_unsupported_atomic_clauses(
                 answer, list(evidence_selections or [])
             )
@@ -3426,13 +3584,10 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 if selection.status == "supported"
                 for source_id in _selection_source_ids(selection)
             }
-            selected_evidence = [
-                item for item in ordered if item.source_id in selected_ids
-            ]
-            answer = _attach_missing_citations(answer, selected_evidence)
             answer = _bind_atomic_citations(
                 answer, list(evidence_selections or [])
             )
+            answer = _coalesce_adjacent_identical_citations(answer)
             if selected_ids and not re.search(r"\[S\d+\]", answer, flags=re.IGNORECASE):
                 answer = _atomic_fallback_answer(list(evidence_selections or []))
                 reduction_warnings.append(

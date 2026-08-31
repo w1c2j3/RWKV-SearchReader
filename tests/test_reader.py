@@ -24,6 +24,7 @@ from rwkv_search_reader.reader import (
     _bind_subject_citations,
     _chunk_material_nodes_by_retrieval_point,
     _clean_final_answer,
+    _coalesce_adjacent_identical_citations,
     _context_retry_tokens,
     _copied_fact_supported,
     _eligible_evidence,
@@ -32,6 +33,7 @@ from rwkv_search_reader.reader import (
     _is_explicit_benefit_fact,
     _latest_effective_material_timestamp,
     _MaterialNode,
+    _merge_duplicate_atomic_fields,
     _narrow_selected_fact,
     _parse_audit_output,
     _parse_research_plan_output,
@@ -1166,6 +1168,105 @@ def test_atomic_citations_match_field_values_instead_of_every_subject_source() -
     assert bound == "宇树科技发行价为150.8元/股 [S2]。上市首日开盘价为1100元 [S4]。"
 
 
+def test_atomic_citations_inherit_subject_and_use_one_primary_field_source() -> None:
+    selections = [
+        FieldEvidenceSelection(
+            "原神", "当前版本", "S7", "supported", "无神怜爱的雪国", ["S7"]
+        ),
+        FieldEvidenceSelection(
+            "原神",
+            "版本主题",
+            "S7",
+            "supported",
+            "无神怜爱的雪国",
+            ["S7", "S10"],
+        ),
+        FieldEvidenceSelection(
+            "原神", "上线时间", "S1", "supported", "2026-08-12", ["S1", "S22"]
+        ),
+        FieldEvidenceSelection(
+            "崩坏：星穹铁道",
+            "当前版本",
+            "S8",
+            "supported",
+            "4.5版本「挥掷千星的筹码」",
+            ["S8"],
+        ),
+        FieldEvidenceSelection(
+            "崩坏：星穹铁道", "上线时间", "S11", "supported", "2026年8月", ["S11"]
+        ),
+    ]
+    answer = (
+        "原神：当前版本为无神怜爱的雪国，版本主题为无神怜爱的雪国，"
+        "上线时间为2026-08-12。\n"
+        "崩坏：星穹铁道：当前版本为4.5版本「挥掷千星的筹码」，"
+        "上线时间为2026年8月。"
+    )
+
+    bound = _bind_atomic_citations(answer, selections)
+
+    assert bound == (
+        "原神：当前版本为无神怜爱的雪国 [S7]，"
+        "版本主题为无神怜爱的雪国 [S7]，上线时间为2026-08-12 [S1]。\n"
+        "崩坏：星穹铁道：当前版本为4.5版本「挥掷千星的筹码」 [S8]，"
+        "上线时间为2026年8月 [S11]。"
+    )
+
+
+def test_atomic_citations_merge_identical_fields_into_one_source() -> None:
+    selections = [
+        FieldEvidenceSelection(
+            "原神", "当前版本", "S7", "supported", "无神怜爱的雪国"
+        ),
+        FieldEvidenceSelection(
+            "原神", "版本主题", "S7", "supported", "无神怜爱的雪国", ["S10"]
+        ),
+    ]
+
+    bound = _bind_atomic_citations(
+        "原神：当前版本及版本主题均为无神怜爱的雪国。", selections
+    )
+
+    assert bound == "原神：当前版本及版本主题均为无神怜爱的雪国 [S7]。"
+
+
+def test_identical_adjacent_atomic_fields_are_merged_before_citation_binding() -> None:
+    selections = [
+        FieldEvidenceSelection(
+            "原神", "当前版本", "S7", "supported", "无神怜爱的雪国"
+        ),
+        FieldEvidenceSelection(
+            "原神", "版本主题", "S7", "supported", "无神怜爱的雪国"
+        ),
+        FieldEvidenceSelection(
+            "原神", "上线时间", "S1", "supported", "2026-08-12"
+        ),
+    ]
+
+    merged = _merge_duplicate_atomic_fields(
+        "原神：当前版本为无神怜爱的雪国，版本主题为无神怜爱的雪国，"
+        "上线时间为2026-08-12。",
+        selections,
+    )
+
+    assert merged == (
+        "原神：当前版本及版本主题均为无神怜爱的雪国，"
+        "上线时间为2026-08-12。"
+    )
+
+
+def test_adjacent_facts_with_the_same_source_share_one_citation() -> None:
+    compact = _coalesce_adjacent_identical_citations(
+        "绝区零：当前版本为3.2版本 [S18]，"
+        "版本主题为她与她的隐秘往事 [S18]，上线时间为8月28日 [S3]。"
+    )
+
+    assert compact == (
+        "绝区零：当前版本为3.2版本，"
+        "版本主题为她与她的隐秘往事 [S18]，上线时间为8月28日 [S3]。"
+    )
+
+
 def test_known_secondary_host_cannot_be_promoted_to_official() -> None:
     assert (
         _verified_source_relation("https://zh.wikipedia.org/wiki/Apex", "official")
@@ -1504,7 +1605,7 @@ def test_field_bound_final_uses_only_atomic_field_records() -> None:
 
     def complete(user, **kwargs):
         captured["user"] = user
-        return "只使用已绑定字段 [S2]"
+        return "对象字段为 SELECTED ONLY [S2]"
 
     reader._complete = complete
     answer, _ = reader.finalize(
@@ -1522,7 +1623,7 @@ def test_field_bound_final_uses_only_atomic_field_records() -> None:
     assert "Fact 1" not in captured["user"]
     assert "Fact 2" not in captured["user"]
     assert "SELECTED ONLY" in captured["user"]
-    assert answer == "只使用已绑定字段 [S2]"
+    assert answer == "对象字段为 SELECTED ONLY [S2]"
 
 
 def test_atomic_material_never_exceeds_the_configured_final_budget() -> None:
