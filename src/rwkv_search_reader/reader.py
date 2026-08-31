@@ -124,6 +124,12 @@ def _parse_source_summary(value: str) -> str:
         "",
         text,
     )
+    text = re.sub(
+        r"^\s*根据(?:提供的|以上|上述)?网页(?:内容|摘要)[，,]?\s*"
+        r"(?:与|关于)?[^\n：:]{0,240}(?:相关的)?(?:内容|信息)?(?:如下)?\s*[:：]\s*",
+        "",
+        text,
+    )
     lines: list[str] = []
     seen_lines: set[str] = set()
     for line in text.splitlines():
@@ -588,6 +594,42 @@ class _MaterialNode:
     retrieval_point: str = ""
 
 
+def _branch_requirement(
+    source_ids: tuple[str, ...],
+    evidence_by_id: dict[str, Evidence],
+    retrieval_point: str,
+) -> str:
+    queries = list(
+        dict.fromkeys(
+            evidence_by_id[source_id].retrieval_query
+            for source_id in source_ids
+            if source_id in evidence_by_id
+            and evidence_by_id[source_id].retrieval_query
+        )
+    )
+    return min(queries, key=len) if queries else retrieval_point
+
+
+def _without_foreign_points(
+    summary: str,
+    foreign_points: set[str],
+) -> str:
+    """Drop foreign-branch clauses instead of discarding the useful output."""
+
+    parts = re.split(r"([。！？!?；;\n]+)", summary)
+    for index in range(0, len(parts), 2):
+        clause_key = _normalized_text(parts[index])
+        if any(
+            _normalized_text(point)
+            and _normalized_text(point) in clause_key
+            for point in foreign_points
+        ):
+            parts[index] = ""
+            if index + 1 < len(parts):
+                parts[index + 1] = ""
+    return _clean_final_answer("".join(parts)).strip()
+
+
 @dataclass(slots=True)
 class _FieldFactCandidate:
     subject: str
@@ -894,6 +936,31 @@ def _published_timestamp(value: str) -> float | None:
         except ValueError:
             return None
     return parsed.timestamp()
+
+
+def _latest_effective_material_timestamp(value: str) -> float:
+    """Read the newest already-effective date mentioned in a source summary."""
+
+    local_now = datetime.now().astimezone()
+    today = local_now.date()
+    timestamps: list[float] = []
+    for match in re.finditer(
+        r"(?<!\d)(20\d{2})\s*(?:年|[-/.])\s*(1[0-2]|0?[1-9])"
+        r"(?:\s*(?:月|[-/.])\s*(3[01]|[12]\d|0?[1-9])\s*日?)?",
+        str(value or ""),
+    ):
+        year, month, raw_day = match.groups()
+        try:
+            day = int(raw_day) if raw_day else 1
+            parsed_at = datetime(
+                int(year), int(month), day, tzinfo=local_now.tzinfo
+            )
+            parsed = parsed_at.date()
+        except ValueError:
+            continue
+        if parsed <= today:
+            timestamps.append(parsed_at.timestamp())
+    return max(timestamps, default=0.0)
 
 
 def _final_evidence_order(question: str, evidence: list[Evidence]) -> list[Evidence]:
@@ -2694,25 +2761,33 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 
     def _summarize_group(
         self,
-        question: str,
+        _question: str,
         group: list[_MaterialNode],
         evidence_by_id: dict[str, Evidence],
         target_chars: int | None = None,
     ) -> _MaterialNode:
         material = _render_material_nodes(group)
         retrieval_point = _combined_retrieval_point(group)
+        source_ids = tuple(
+            dict.fromkeys(
+                source_id for node in group for source_id in node.source_ids
+            )
+        )
+        requirement = _branch_requirement(
+            source_ids, evidence_by_id, retrieval_point
+        )
         instruction = (
             f"压缩以上同一检索点的材料，不超过 {target_chars} 个字符"
             if target_chars
-            else "合并以上材料中能回答问题的内容"
+            else "合并以上同一检索点的材料"
         )
         user = f"""{material}
 
 当前日期：{_today()}
 当前检索点：{retrieval_point or '未指定'}
-问题：{question}
+检索要求：{requirement}
 {instruction}。删除重复，保留名称、日期、数字和 [S1] 来源编号。只写当前检索点；当前状态只采用已生效信息，冲突则保留。只输出合并后的材料。
-分支总结："""
+{retrieval_point or '分支'}："""
         output = self._complete(
             user,
             max_tokens=(
@@ -2728,23 +2803,19 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         summary = _clean_final_answer(output)
         if not summary:
             raise SearchReaderError("reduce", "RWKV returned an empty group summary")
+        if summary.lstrip().startswith("[[") or summary.count("检索点：") > 1:
+            raise SearchReaderError("reduce", "RWKV copied reducer input")
         if retrieval_point:
-            summary_key = _normalized_text(summary)
             foreign_points = {
                 item.retrieval_point
                 for item in evidence_by_id.values()
                 if item.retrieval_point
                 and item.retrieval_point != retrieval_point
             }
-            crossed = [
-                point
-                for point in foreign_points
-                if _normalized_text(point) in summary_key
-            ]
-            if crossed:
+            summary = _without_foreign_points(summary, foreign_points)
+            if not summary:
                 raise SearchReaderError(
-                    "reduce",
-                    "RWKV crossed retrieval points: " + ", ".join(sorted(crossed)),
+                    "reduce", "RWKV returned only foreign retrieval points"
                 )
         unsupported = _unsupported_summary_numbers(summary, material)
         if unsupported:
@@ -2752,11 +2823,6 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             raise SearchReaderError(
                 "reduce", f"RWKV introduced unsupported numbers: {values}"
             )
-        source_ids = tuple(
-            dict.fromkeys(
-                source_id for node in group for source_id in node.source_ids
-            )
-        )
         allowed = set(source_ids)
         summary = re.sub(
             r"\[(S\d+)\]",
@@ -2780,19 +2846,46 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 
     def _finalize_branch(
         self,
-        question: str,
+        _question: str,
         node: _MaterialNode,
         evidence_by_id: dict[str, Evidence],
         target_chars: int,
     ) -> _MaterialNode:
-        material = _render_material_nodes([node])
+        branch_sources = [
+            evidence_by_id[source_id]
+            for source_id in node.source_ids
+            if source_id in evidence_by_id
+        ]
+        direct_anchors = sorted(
+            branch_sources,
+            key=lambda item: (
+                _latest_effective_material_timestamp(
+                    f"{item.published_date} {item.claim}"
+                ),
+                item.source_relation == "official",
+                item.score,
+            ),
+        )[-4:]
+        anchor_nodes = [
+            _MaterialNode(
+                source_ids=(item.source_id,),
+                summary=item.claim[:1200],
+                retrieval_point=node.retrieval_point,
+            )
+            for item in direct_anchors
+            if len(node.source_ids) > 1
+        ]
+        material = _render_material_nodes([node, *anchor_nodes])
+        requirement = _branch_requirement(
+            node.source_ids, evidence_by_id, node.retrieval_point
+        )
         user = f"""{material}
 
 当前日期：{_today()}
 当前检索点：{node.retrieval_point}
-问题：{question}
+检索要求：{requirement}
 把以上材料总结为这个检索点的最终分支，不超过 {target_chars} 个字符。当前状态选择已经生效且时间最晚的信息；旧信息和未来预告不算当前状态。只写当前检索点并保留事实后的 [S1] 来源编号。
-分支最终总结："""
+{node.retrieval_point}："""
         output = self._complete(
             user,
             max_tokens=min(
@@ -2813,21 +2906,16 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 "branch_finalize",
                 f"RWKV introduced unsupported numbers: {values}",
             )
-        summary_key = _normalized_text(summary)
-        crossed = [
-            point
-            for point in {
-                item.retrieval_point
-                for item in evidence_by_id.values()
-                if item.retrieval_point
-                and item.retrieval_point != node.retrieval_point
-            }
-            if _normalized_text(point) in summary_key
-        ]
-        if crossed:
+        foreign_points = {
+            item.retrieval_point
+            for item in evidence_by_id.values()
+            if item.retrieval_point
+            and item.retrieval_point != node.retrieval_point
+        }
+        summary = _without_foreign_points(summary, foreign_points)
+        if not summary:
             raise SearchReaderError(
-                "branch_finalize",
-                "RWKV crossed retrieval points: " + ", ".join(sorted(crossed)),
+                "branch_finalize", "RWKV returned only foreign retrieval points"
             )
         allowed = set(node.source_ids)
         summary = re.sub(

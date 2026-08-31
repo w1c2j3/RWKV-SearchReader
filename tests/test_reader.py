@@ -30,6 +30,7 @@ from rwkv_search_reader.reader import (
     _field_binding_applicable,
     _final_evidence_order,
     _is_explicit_benefit_fact,
+    _latest_effective_material_timestamp,
     _MaterialNode,
     _narrow_selected_fact,
     _parse_audit_output,
@@ -39,6 +40,7 @@ from rwkv_search_reader.reader import (
     _unsupported_summary_numbers,
     _valid_discovered_subject,
     _verified_source_relation,
+    _without_foreign_points,
     citation_warnings,
 )
 
@@ -780,6 +782,38 @@ def test_source_summary_only_cleans_wrappers_and_exact_duplicates() -> None:
     assert _parse_source_summary("摘要：事实一。事实一。事实二。") == "事实一。事实二。"
 
 
+def test_source_summary_removes_repeated_search_prompt_boilerplate() -> None:
+    value = (
+        "根据提供的网页摘要，与检索词“对象 当前版本”相关的内容如下：\n"
+        "- 当前版本为4.5版本。"
+    )
+
+    assert _parse_source_summary(value) == "- 当前版本为4.5版本。"
+
+
+def test_foreign_branch_clauses_are_removed_without_losing_current_branch() -> None:
+    summary = (
+        "原神当前为7.0版本。"
+        "崩坏：星穹铁道当前为4.5版本。"
+        "原神主题为无神怜爱的雪国。"
+    )
+
+    cleaned = _without_foreign_points(summary, {"崩坏：星穹铁道"})
+
+    assert cleaned == "原神当前为7.0版本。原神主题为无神怜爱的雪国。"
+
+
+def test_material_date_ranking_ignores_future_dates() -> None:
+    old = _latest_effective_material_timestamp("2024年3月27日更新")
+    current = _latest_effective_material_timestamp("2026年8月26日发布")
+    current_with_future = _latest_effective_material_timestamp(
+        "2026年8月26日发布，2099年9月23日预告"
+    )
+
+    assert old < current
+    assert current_with_future == current
+
+
 def test_audit_output_is_either_enough_or_targeted_search_queries() -> None:
     enough = _parse_audit_output("ENOUGH", 3)
     missing = _parse_audit_output(
@@ -1047,6 +1081,8 @@ def test_funnel_never_crosses_search_points_when_point_summaries_need_compressio
 
     def complete(user, **kwargs):
         assert kwargs["stage"] in {"reduce", "branch_finalize"}
+        assert "\n问题：" not in user
+        assert "检索要求：" in user
         found = set(re.findall(r"检索点：([^\\]+)\\n", user))
         prompt_points.append(found)
         source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
@@ -1421,8 +1457,10 @@ def test_point_branches_are_aggregated_once_before_the_final_summary() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     rows = _evidence(2)
     rows[0].retrieval_point = "原神"
+    rows[0].retrieval_query = "原神 当前版本"
     rows[0].claim = "原神事实"
     rows[1].retrieval_point = "绝区零"
+    rows[1].retrieval_query = "绝区零 当前版本"
     rows[1].claim = "绝区零事实"
     calls: list[tuple[str, str]] = []
 
@@ -1447,16 +1485,16 @@ def test_point_branches_are_aggregated_once_before_the_final_summary() -> None:
     assert warnings == []
     assert [stage for stage, _ in calls].count("branch_finalize") == 2
     assert [stage for stage, _ in calls][-2:] == ["aggregate", "finalize"]
-    cues = {
-        "branch_finalize": "分支最终总结：",
-        "aggregate": "汇总材料：",
-        "finalize": "最终回答：",
-    }
     for stage, prompt in calls:
-        if stage != "finalize":
+        if stage == "branch_finalize":
             assert prompt.startswith('[["S')
-        assert prompt.index("事实") < prompt.index("问题：比较两个游戏")
-        assert prompt.rstrip().endswith(cues[stage])
+            assert "问题：比较两个游戏" not in prompt
+            assert prompt.index("事实") < prompt.index("检索要求：")
+            assert prompt.rstrip().endswith(("原神：", "绝区零："))
+        else:
+            assert prompt.index("事实") < prompt.index("问题：比较两个游戏")
+            cue = "汇总材料：" if stage == "aggregate" else "最终回答："
+            assert prompt.rstrip().endswith(cue)
 
 
 def test_field_bound_final_uses_only_atomic_field_records() -> None:
