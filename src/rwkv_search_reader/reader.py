@@ -78,9 +78,21 @@ _KNOWN_SECONDARY_HOSTS = (
     "ourplay.net",
     "fun-game.online",
 )
-_FINAL_MODEL_STAGES = {"conversation", "document", "finalize", "memory"}
+_FINAL_MODEL_STAGES = {
+    "aggregate",
+    "conversation",
+    "document",
+    "finalize",
+    "memory",
+}
 _SCOPE_ACCEPTANCE_RE = re.compile(
     r"^(?:都需要|都要|全部|全都要|所有|这些都要|就这些|都可以|都行)[。.!！?？]*$"
+)
+_UNEXPANDED_COLLECTION_RE = re.compile(
+    r"(?:旗下|的)[^，。！？!?]{0,16}(?:游戏|产品|模型|项目|作品|应用)"
+    r"[^，。！？!?]{0,20}(?:都|分别|各自|所有)|"
+    r"(?:各类|各个|所有|全部)[^，。！？!?]{0,16}"
+    r"(?:游戏|产品|模型|项目|作品|应用)"
 )
 
 
@@ -100,7 +112,12 @@ def _parse_source_summary(value: str) -> str:
     text = re.sub(r"\s*\x60{3}$", "", text)
     text = re.sub(r"^\s*<(?:材料|摘要|summary)>\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*</(?:材料|摘要|summary)>\s*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\s*(?:summary|摘要)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^\s*(?:summary|摘要|网页摘要)\s*[:：]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(
         r"^\s*(?:根据(?:提供的|以上|上述)?网页内容[，,]?\s*)?"
         r"(?:以下是(?:对[^：:\n]{0,40})?(?:总结|概括)|总结如下)\s*[:：]\s*",
@@ -568,6 +585,7 @@ def _bounded_audit_material(
 class _MaterialNode:
     source_ids: tuple[str, ...]
     summary: str
+    retrieval_point: str = ""
 
 
 @dataclass(slots=True)
@@ -585,7 +603,17 @@ def _render_material_nodes(nodes: list[_MaterialNode]) -> str:
     """Render each reduced summary as an inseparable lineage-summary pair."""
 
     return "\n".join(
-        json.dumps([list(node.source_ids), node.summary], ensure_ascii=False)
+        json.dumps(
+            [
+                list(node.source_ids),
+                (
+                    f"检索点：{node.retrieval_point}\n{node.summary}"
+                    if node.retrieval_point
+                    else node.summary
+                ),
+            ],
+            ensure_ascii=False,
+        )
         for node in nodes
     )
 
@@ -780,6 +808,35 @@ def _chunk_material_nodes(
     return groups
 
 
+def _chunk_material_nodes_by_retrieval_point(
+    nodes: list[_MaterialNode], *, max_chars: int, fan_in: int
+) -> list[list[_MaterialNode]]:
+    """Finish each search point before any cross-point funnel reduction."""
+
+    point_groups: dict[str, list[_MaterialNode]] = {}
+    for node in nodes:
+        point_groups.setdefault(node.retrieval_point, []).append(node)
+    if not any(point and len(items) > 1 for point, items in point_groups.items()):
+        return _chunk_material_nodes(nodes, max_chars=max_chars, fan_in=fan_in)
+    groups: list[list[_MaterialNode]] = []
+    for items in point_groups.values():
+        groups.extend(
+            _chunk_material_nodes(items, max_chars=max_chars, fan_in=fan_in)
+        )
+    return groups
+
+
+def _combined_retrieval_point(nodes: list[_MaterialNode]) -> str:
+    return " | ".join(
+        dict.fromkeys(node.retrieval_point for node in nodes if node.retrieval_point)
+    )
+
+
+def _retrieval_points_collapsed(nodes: list[_MaterialNode]) -> bool:
+    points = [node.retrieval_point for node in nodes]
+    return bool(points) and all(points) and len(set(points)) == len(points)
+
+
 def _source_relevance(question: str, evidence: Evidence) -> float:
     question_terms = _claim_terms(question)
     source_terms = _claim_terms(f"{evidence.title} {evidence.claim}")
@@ -842,9 +899,14 @@ def _published_timestamp(value: str) -> float | None:
 def _final_evidence_order(question: str, evidence: list[Evidence]) -> list[Evidence]:
     """Place the strongest pair nearest the question while retaining all pairs."""
 
-    if _recency_requested(question):
+    def order_group(group: list[Evidence]) -> list[Evidence]:
+        if not _recency_requested(question):
+            return sorted(
+                group,
+                key=lambda item: (_source_relevance(question, item), item.score),
+            )
         return sorted(
-            evidence,
+            group,
             key=lambda item: (
                 _published_timestamp(item.published_date) is not None,
                 _published_timestamp(item.published_date) or 0.0,
@@ -852,10 +914,17 @@ def _final_evidence_order(question: str, evidence: list[Evidence]) -> list[Evide
                 item.score,
             ),
         )
-    return sorted(
-        evidence,
-        key=lambda item: (_source_relevance(question, item), item.score),
-    )
+
+    if not any(item.retrieval_point for item in evidence):
+        return order_group(evidence)
+    point_groups: dict[str, list[Evidence]] = {}
+    for item in evidence:
+        point_groups.setdefault(item.retrieval_point, []).append(item)
+    return [
+        item
+        for group in point_groups.values()
+        for item in order_group(group)
+    ]
 
 
 def _verified_source_relation(url: str, model_relation: str) -> str:
@@ -871,7 +940,11 @@ def _clean_final_answer(value: str) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^\x60{3}(?:text|markdown)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*\x60{3}$", "", text)
-    text = re.sub(r"^\s*(?:最终答案|回答)\s*[:：]\s*", "", text)
+    text = re.sub(
+        r"^\s*(?:最终答案|最终回答|回答|分支总结|汇总材料)\s*[:：]\s*",
+        "",
+        text,
+    )
     text = re.sub(r"^\s*根据(?:以上|上述|提供的)?材料[，,:：]\s*", "", text)
     text = re.sub(
         r"(^|[。！？!?]\s*)材料来源\s*[:：][^。！？!?]*(?:[。！？!?]|$)",
@@ -1085,8 +1158,6 @@ def _parse_research_plan_output(
             if " ".join(str(item).split()).strip()
         )
     )[:max_queries]
-    if scope_mode == "discover":
-        queries = queries[:2]
     goal = " ".join(str(payload.get("goal") or fallback_question).split()).strip()
     clarification = " ".join(str(payload.get("clarification") or "").split()).strip()[
         :1200
@@ -1108,6 +1179,14 @@ def _parse_research_plan_output(
         queries=queries or [fallback_question],
         scope_mode=scope_mode,
     )
+
+
+def _unexpanded_collection_plan(question: str, plan: ResearchPlan) -> bool:
+    """Keep unnamed collective requests on the search-point/funnel path."""
+
+    if plan.scope_mode == "discover":
+        return True
+    return bool(_UNEXPANDED_COLLECTION_RE.search(str(question or "")))
 
 
 def _support_score(claim: str, evidence: Evidence) -> float:
@@ -1365,9 +1444,10 @@ class RWKVReader:
         user = f"""当前日期：{_today()}
 问题：{question}
 
-把问题转换为检索计划。decision 只能是 search 或 clarify；公开信息用 search，只有指代无法确定时用 clarify。scope_mode 只能是 fixed 或 discover；明确对象用 fixed，未点名的公开类别用 discover。保留问题中的字段，最多生成 {self.settings.research_plan_max_queries} 个检索词。
+把问题转换为检索计划。decision 只能是 search 或 clarify；公开信息用 search，只有指代无法确定时用 clarify。scope_mode 只能是 fixed 或 discover；明确列出的对象用 fixed，要求某主体旗下或某类别的多个对象但没有逐一列名时用 discover，records 留空。保留问题中的字段，最多生成 {self.settings.research_plan_max_queries} 个检索词。
 只输出 JSON：
-{{"decision":"","scope_mode":"","goal":"","records":[{{"subject":"","question":"","fields":[]}}],"queries":[],"clarification":""}}"""
+{{"decision":"","scope_mode":"","goal":"","records":[{{"subject":"","question":"","fields":[]}}],"queries":[],"clarification":""}}
+检索计划 JSON："""
         output = self._complete(user, max_tokens=768, stage="plan")
         plan = _parse_research_plan_output(
             output,
@@ -1382,13 +1462,198 @@ class RWKVReader:
                 queries=[question],
                 scope_mode=(
                     "discover"
-                    if re.search(r"各个|所有|哪些|有哪些|某类|一类|类别", question)
+                    if re.search(
+                        r"各个|所有|哪些|有哪些|某类|一类|类别|旗下|都分别|各自",
+                        question,
+                    )
                     else "fixed"
                 ),
                 fallback=True,
             )
+        if plan.decision == "search" and _unexpanded_collection_plan(question, plan):
+            suggested_points = list(
+                dict.fromkeys(record.subject for record in plan.records if record.subject)
+            )
+            suggested_requirements = {
+                record.subject: record.question
+                for record in plan.records
+                if record.subject and record.question
+            }
+            if len(suggested_points) < 2:
+                suggested_points = []
+                suggested_requirements = {}
+            planned_by_point = {
+                point: next(
+                    (
+                        query
+                        for query in plan.queries
+                        if _normalized_text(point) in _normalized_text(query)
+                    ),
+                    "",
+                )
+                for point in suggested_points
+            }
+            if suggested_points and all(planned_by_point.values()):
+                plan.retrieval_points = suggested_points
+                plan.queries = [
+                    " ".join(
+                        (
+                            f"{planned_by_point[point]} "
+                            f"{suggested_requirements.get(point, '')}"
+                        ).split()
+                    )[:800]
+                    for point in suggested_points
+                ]
+            else:
+                try:
+                    plan.queries, plan.retrieval_points = self.design_search_points(
+                        question,
+                        suggested_points=suggested_points,
+                        suggested_requirements=suggested_requirements,
+                    )
+                except SearchReaderError:
+                    plan.queries = plan.queries or [question]
+                    plan.retrieval_points = list(plan.queries)
+                    plan.fallback = True
+            plan.scope_mode = "discover"
+            plan.records = []
         self._anchor_research_queries(question, plan)
         return plan
+
+    def design_search_points(
+        self,
+        question: str,
+        *,
+        suggested_points: list[str] | None = None,
+        suggested_requirements: dict[str, str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """Give one RWKV call the single job of designing retrieval queries."""
+
+        suggested_points = list(
+            dict.fromkeys(
+                " ".join(str(point).split()).strip()[:120]
+                for point in (suggested_points or [])
+                if " ".join(str(point).split()).strip()
+            )
+        )[: self.settings.research_plan_max_queries]
+        requirements = {
+            point: " ".join(
+                str((suggested_requirements or {}).get(point) or "").split()
+            ).strip()[:500]
+            for point in suggested_points
+        }
+        point_hint = (
+            "\n对象及检索要求："
+            + "；".join(
+                f"{point}（{requirements[point] or '覆盖用户所问信息'}）"
+                for point in suggested_points
+            )
+            + "。逐个设计，不要增加公司名或信息类型作为检索点。"
+            if suggested_points
+            else ""
+        )
+        user = f"""当前日期：{_today()}
+问题：{question}
+
+设计最多 {self.settings.research_plan_max_queries} 个彼此不同的联网检索点。每个点给出一个简短对象名称和一个检索词；一个检索点只负责一个对象，检索词覆盖该对象所需信息。不要回答问题。
+检索词必须包含该对象名称。涉及当前状态时优先设计能找到官方公告的检索词。{point_hint}
+只输出 JSON：
+{{"points":[["名称","检索词"]]}}
+检索点 JSON："""
+        output = self._complete(user, max_tokens=512, stage="search_design")
+        payload = _json_object_from_output(output, "search_design")
+        designed: list[tuple[str, str]] = []
+        for item in payload.get("points") or []:
+            if isinstance(item, dict):
+                name = " ".join(str(item.get("name") or "").split()).strip()
+                query = " ".join(str(item.get("query") or "").split()).strip()
+            elif isinstance(item, list) and len(item) >= 2:
+                name = " ".join(str(item[0]).split()).strip()
+                query = " ".join(str(item[1]).split()).strip()
+            else:
+                continue
+            if name and query:
+                if suggested_points:
+                    matched = next(
+                        (
+                            point
+                            for point in suggested_points
+                            if _normalized_text(point) in _normalized_text(name)
+                            or _normalized_text(point) in _normalized_text(query)
+                        ),
+                        "",
+                    )
+                    if not matched:
+                        continue
+                    name = matched
+                if _normalized_text(name) not in _normalized_text(query):
+                    query = f"{name} {query}"
+                requirement = requirements.get(name, "")
+                if requirement:
+                    query = f"{query} {requirement}"
+                designed.append((name[:120], query[:800]))
+        if not designed:
+            fallback_queries = list(
+                dict.fromkeys(
+                    " ".join(str(item).split()).strip()[:800]
+                    for item in (payload.get("queries") or [])
+                    if " ".join(str(item).split()).strip()
+                )
+            )
+            if suggested_points:
+                designed = [
+                    (
+                        point,
+                        next(
+                            (
+                                query
+                                for query in fallback_queries
+                                if _normalized_text(point)
+                                in _normalized_text(query)
+                            ),
+                            f"{point} {question}"[:800],
+                        ),
+                    )
+                    for point in suggested_points
+                ]
+            else:
+                designed = [(query, query) for query in fallback_queries]
+        if suggested_points:
+            designed_by_name: dict[str, tuple[str, str]] = {}
+            for name, query in designed:
+                designed_by_name.setdefault(name, (name, query))
+            designed = list(designed_by_name.values())
+            present = {name for name, _ in designed}
+            designed.extend(
+                (
+                    point,
+                    f"{point} {requirements.get(point) or question}"[:800],
+                )
+                for point in suggested_points
+                if point not in present
+            )
+        def complete_query(name: str, query: str) -> str:
+            value = query
+            if _normalized_text(name) not in _normalized_text(value):
+                value = f"{name} {value}"
+            requirement = requirements.get(name, "")
+            if requirement and _normalized_text(requirement) not in _normalized_text(
+                value
+            ):
+                value = f"{value} {requirement}"
+            return " ".join(value.split())[:800]
+
+        designed = [
+            (name, complete_query(name, query)) for name, query in designed
+        ]
+        designed = designed[: self.settings.research_plan_max_queries]
+        queries = list(dict.fromkeys(query for _, query in designed))
+        point_by_query = {query: name for name, query in designed}
+        if not queries:
+            raise SearchReaderError(
+                "search_design", "RWKV returned no usable search points"
+            )
+        return queries, [point_by_query[query] for query in queries]
 
     def _anchor_research_queries(
         self, question: str, plan: ResearchPlan
@@ -1403,7 +1668,7 @@ class RWKVReader:
                 if str(current.year) not in query:
                     query = f"{query} {anchor} 最新"
                 if re.search(r"版本|福利|活动|活動", f"{question} {query}"):
-                    query = f"{query} 更新公告 活动"
+                    query = f"{query} 官方 更新公告 活动"
                 anchored.append(" ".join(query.split()))
             plan.queries = anchored
         return plan
@@ -1430,7 +1695,8 @@ class RWKVReader:
 问题：{question}
 提取网页中属于问题所问类别的具体对象名称。版本、主题、活动、角色和道具不是对象。最多 4 个。
 只输出 JSON：
-{{"subjects":[]}}"""
+{{"subjects":[]}}
+候选对象 JSON："""
             output = self._complete(user, max_tokens=256, stage="scope_candidate")
             payload = _json_object_from_output(output, "scope_candidate")
             material_key = _normalized_text(f"{source.title} {material}")
@@ -1567,7 +1833,8 @@ class RWKVReader:
 问题：{question}
 从候选 subject 中原样选择最多 {self.settings.research_plan_max_queries} 个具体对象，为每个对象生成记录和检索词。保留问题中的字段，不新增对象。
 只输出 JSON：
-{{"decision":"search","scope_mode":"fixed","goal":"","records":[{{"subject":"","question":"","fields":[]}}],"queries":[],"clarification":""}}"""
+{{"decision":"search","scope_mode":"fixed","goal":"","records":[{{"subject":"","question":"","fields":[]}}],"queries":[],"clarification":""}}
+检索计划 JSON："""
         output = self._complete(user, max_tokens=1024, stage="scope_discovery")
         plan = _parse_research_plan_output(
             output,
@@ -1656,7 +1923,8 @@ class RWKVReader:
 verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 
 当前消息：{question}
-结合此前对话和 verified_state，把当前消息改写成可独立理解的问题；“下一个”必须保留此前已确认对象和基准记录。只输出改写后的问题。"""
+结合此前对话和 verified_state，把当前消息改写成可独立理解的问题；“下一个”必须保留此前已确认对象和基准记录。只输出改写后的问题。
+独立问题："""
         output = self._complete(user, max_tokens=160, stage="contextualize")
         rewritten = _clean_standalone_question(output, question)
         previous_answer = str(history[-1].get("answer") or "").strip()
@@ -1701,7 +1969,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         user = f"""{material}
 
 请求：{question}
-根据此前对话完成请求。合并重复内容，不复制来源编号。直接回答。"""
+根据此前对话完成请求。合并重复内容，不复制来源编号。直接回答。
+回答："""
         output = self._complete(
             user,
             max_tokens=self.settings.rwkv_max_tokens,
@@ -1749,7 +2018,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 已检索：{tried}
 当前日期：{_today()}
 
-        判断材料是否足以覆盖问题和记录中的字段。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。"""
+判断材料是否足以覆盖问题和记录中的字段。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。
+审核结果："""
         output = self._complete(user, max_tokens=192, stage="audit")
         audit = _parse_audit_output(output, self.settings.review_max_queries)
         missing_queries = [
@@ -1782,7 +2052,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 "没有则输出 NONE。"
             )
         output = self._complete(
-            f"{material}\n\n{request}",
+            f"{material}\n\n{request}\n字段原句：",
             max_tokens=min(256, self.settings.rwkv_summary_max_tokens),
             stage="evidence_extract",
         )
@@ -1939,7 +2209,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 当前日期：{_today()}
 问题：{question}
 整理成一个一致的记录。每个字段只使用该字段下的值，不交换字段。{temporal_rule}
-只输出 JSON：{{"facts":[{{"field":"","fact":"","source_ids":[]}}]}}"""
+只输出 JSON：{{"facts":[{{"field":"","fact":"","source_ids":[]}}]}}
+记录 JSON："""
         output = self._complete(user, max_tokens=768, stage="evidence_resolve")
         payload = _json_object_from_output(output, "evidence_resolve")
         raw_facts = payload.get("facts") or []
@@ -2218,9 +2489,16 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 
     def _summarize_one(self, _question: str, chunk: DocumentChunk) -> Evidence:
         material = chunk.text[: self.settings.max_evidence_chars].strip()
+        focus = chunk.retrieval_query or chunk.retrieval_point
+        instruction = (
+            f"总结以上网页中与检索词“{focus}”有关的内容。"
+            if focus
+            else "总结以上网页内容。"
+        )
         user = f"""{material}
 
-总结以上网页内容。"""
+{instruction}
+网页摘要："""
         output = self._complete(
             user,
             max_tokens=self.settings.rwkv_summary_max_tokens,
@@ -2256,6 +2534,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             score=chunk.score,
             source_relation=_verified_source_relation(chunk.url, "unclear"),
             published_date=chunk.published_date,
+            retrieval_point=chunk.retrieval_point,
+            retrieval_query=chunk.retrieval_query,
         )
 
     def summarize(
@@ -2299,6 +2579,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                         score=chunk.score,
                         source_relation="unclear",
                         published_date=chunk.published_date,
+                        retrieval_point=chunk.retrieval_point,
+                        retrieval_query=chunk.retrieval_query,
                     )
                     evidence_by_index[index] = evidence
                     status = "degraded"
@@ -2319,6 +2601,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                             "total": len(chunks),
                             "status": status,
                             "source_relation": evidence.source_relation,
+                            "retrieval_point": evidence.retrieval_point,
+                            "retrieval_query": evidence.retrieval_query,
                             "summary_preview": evidence.claim[:220],
                         },
                     )
@@ -2329,20 +2613,55 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         question: str,
         group: list[_MaterialNode],
         evidence_by_id: dict[str, Evidence],
+        target_chars: int | None = None,
     ) -> _MaterialNode:
         material = _render_material_nodes(group)
+        retrieval_point = _combined_retrieval_point(group)
+        instruction = (
+            f"压缩以上同一检索点的材料，不超过 {target_chars} 个字符"
+            if target_chars
+            else "合并以上材料中能回答问题的内容"
+        )
         user = f"""{material}
 
 问题：{question}
-合并以上材料中能回答问题的内容，删除重复，保留具体名称、日期、数字和 [S1] 来源编号。只输出合并后的材料。"""
+当前日期：{_today()}
+当前检索点：{retrieval_point or '未指定'}
+{instruction}，删除重复，保留具体名称、日期、数字和 [S1] 来源编号。只写当前检索点，不写其他对象；问题询问当前状态时，区分已生效、旧版本和前瞻信息，无法确认就保留冲突。只输出合并后的材料。
+分支总结："""
         output = self._complete(
             user,
-            max_tokens=self.settings.rwkv_summary_max_tokens,
+            max_tokens=(
+                min(
+                    self.settings.rwkv_summary_max_tokens,
+                    max(128, target_chars // 2),
+                )
+                if target_chars
+                else self.settings.rwkv_summary_max_tokens
+            ),
             stage="reduce",
         )
         summary = _clean_final_answer(output)
         if not summary:
             raise SearchReaderError("reduce", "RWKV returned an empty group summary")
+        if retrieval_point:
+            summary_key = _normalized_text(summary)
+            foreign_points = {
+                item.retrieval_point
+                for item in evidence_by_id.values()
+                if item.retrieval_point
+                and item.retrieval_point != retrieval_point
+            }
+            crossed = [
+                point
+                for point in foreign_points
+                if _normalized_text(point) in summary_key
+            ]
+            if crossed:
+                raise SearchReaderError(
+                    "reduce",
+                    "RWKV crossed retrieval points: " + ", ".join(sorted(crossed)),
+                )
         unsupported = _unsupported_summary_numbers(summary, material)
         if unsupported:
             values = ", ".join(sorted(unsupported))
@@ -2369,7 +2688,85 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if source_id in evidence_by_id
         ]
         summary = _attach_missing_citations(summary, source_evidence)
-        return _MaterialNode(source_ids=source_ids, summary=summary)
+        return _MaterialNode(
+            source_ids=source_ids,
+            summary=summary,
+            retrieval_point=_combined_retrieval_point(group),
+        )
+
+    def _finalize_branch(
+        self,
+        question: str,
+        node: _MaterialNode,
+        evidence_by_id: dict[str, Evidence],
+        target_chars: int,
+    ) -> _MaterialNode:
+        material = _render_material_nodes([node])
+        user = f"""{material}
+
+问题：{question}
+当前日期：{_today()}
+当前检索点：{node.retrieval_point}
+形成这个检索点的最终分支总结，不超过 {target_chars} 个字符。问题询问当前状态时，选择当前日期前已上线且生效时间最晚的信息；旧版本与未上线前瞻不作为当前版本，无法确认就说明冲突。只写当前检索点，不写其他对象；[S1] 只是来源编号，不是版本号。保留事实后的来源编号。
+分支最终总结："""
+        output = self._complete(
+            user,
+            max_tokens=min(
+                self.settings.rwkv_summary_max_tokens,
+                max(256, target_chars // 2),
+            ),
+            stage="branch_finalize",
+        )
+        summary = _clean_final_answer(output)
+        if not summary:
+            raise SearchReaderError(
+                "branch_finalize", "RWKV returned an empty branch summary"
+            )
+        unsupported = _unsupported_summary_numbers(summary, material)
+        if unsupported:
+            values = ", ".join(sorted(unsupported))
+            raise SearchReaderError(
+                "branch_finalize",
+                f"RWKV introduced unsupported numbers: {values}",
+            )
+        summary_key = _normalized_text(summary)
+        crossed = [
+            point
+            for point in {
+                item.retrieval_point
+                for item in evidence_by_id.values()
+                if item.retrieval_point
+                and item.retrieval_point != node.retrieval_point
+            }
+            if _normalized_text(point) in summary_key
+        ]
+        if crossed:
+            raise SearchReaderError(
+                "branch_finalize",
+                "RWKV crossed retrieval points: " + ", ".join(sorted(crossed)),
+            )
+        allowed = set(node.source_ids)
+        summary = re.sub(
+            r"\[(S\d+)\]",
+            lambda match: match.group(0)
+            if match.group(1).upper() in allowed
+            else "",
+            summary,
+            flags=re.IGNORECASE,
+        )
+        summary = _attach_missing_citations(
+            summary,
+            [
+                evidence_by_id[source_id]
+                for source_id in node.source_ids
+                if source_id in evidence_by_id
+            ],
+        )
+        return _MaterialNode(
+            source_ids=node.source_ids,
+            summary=summary,
+            retrieval_point=node.retrieval_point,
+        )
 
     def _reduce_evidence(
         self,
@@ -2386,23 +2783,52 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     if item.published_date
                     else item.claim
                 ),
+                retrieval_point=item.retrieval_point,
             )
             for item in evidence
         ]
         warnings: list[str] = []
         level = 0
         final_node_target = self.settings.rwkv_reduce_fan_in + 1
-        while (
-            len(nodes) > final_node_target
-            or len(_render_material_nodes(nodes))
-            > self.settings.rwkv_final_material_chars
-        ):
-            level += 1
-            groups = _chunk_material_nodes(
-                nodes,
-                max_chars=self.settings.rwkv_reduce_chunk_chars,
-                fan_in=self.settings.rwkv_reduce_fan_in,
+        while True:
+            rendered_chars = len(_render_material_nodes(nodes))
+            points_collapsed = _retrieval_points_collapsed(nodes)
+            point_bound_nodes = bool(nodes) and all(
+                node.retrieval_point for node in nodes
             )
+            structure_ready = (
+                points_collapsed
+                if point_bound_nodes
+                else len(nodes) <= final_node_target
+            )
+            if (
+                structure_ready
+                and rendered_chars <= self.settings.rwkv_final_material_chars
+            ):
+                break
+            level += 1
+            compression_target: int | None = None
+            if points_collapsed:
+                label_overhead = sum(
+                    len(node.retrieval_point)
+                    + sum(len(source_id) for source_id in node.source_ids)
+                    + 80
+                    for node in nodes
+                )
+                compression_target = max(
+                    160,
+                    (
+                        self.settings.rwkv_final_material_chars - label_overhead
+                    )
+                    // max(1, len(nodes)),
+                )
+                groups = [[node] for node in nodes]
+            else:
+                groups = _chunk_material_nodes_by_retrieval_point(
+                    nodes,
+                    max_chars=self.settings.rwkv_reduce_chunk_chars,
+                    fan_in=self.settings.rwkv_reduce_fan_in,
+                )
             if on_progress:
                 on_progress(
                     "reviewing",
@@ -2414,8 +2840,40 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     },
                 )
             next_nodes: dict[int, _MaterialNode] = {}
+            singleton_groups = {
+                index: group[0]
+                for index, group in enumerate(groups)
+                if len(group) == 1
+                and (
+                    compression_target is None
+                    or len(group[0].summary) <= compression_target
+                )
+            }
+            next_nodes.update(singleton_groups)
             completed = 0
-            workers = min(self.settings.rwkv_summary_workers, len(groups))
+            for node in singleton_groups.values():
+                completed += 1
+                if on_progress:
+                    on_progress(
+                        "evidence_group_read",
+                        {
+                            "level": level,
+                            "completed": completed,
+                            "total": len(groups),
+                            "source_ids": list(node.source_ids),
+                            "retrieval_point": node.retrieval_point,
+                            "status": "retained",
+                            "summary_preview": node.summary[:220],
+                        },
+                    )
+            reducible_groups = [
+                (index, group)
+                for index, group in enumerate(groups)
+                if index not in singleton_groups
+            ]
+            workers = min(
+                self.settings.rwkv_summary_workers, max(1, len(reducible_groups))
+            )
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
                     pool.submit(
@@ -2423,8 +2881,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                         question,
                         group,
                         evidence_by_id,
+                        compression_target,
                     ): (index, group)
-                    for index, group in enumerate(groups)
+                    for index, group in reducible_groups
                 }
                 for future in as_completed(futures):
                     index, group = futures[future]
@@ -2450,6 +2909,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                             summary="\n".join(
                                 item.summary[:per_node] for item in group
                             ),
+                            retrieval_point=_combined_retrieval_point(group),
                         )
                         status = "degraded"
                         warnings.append(
@@ -2467,6 +2927,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                                 "completed": completed,
                                 "total": len(groups),
                                 "source_ids": list(source_ids),
+                                "retrieval_point": node.retrieval_point,
                                 "status": status,
                                 "summary_preview": node.summary[:220],
                             },
@@ -2475,7 +2936,178 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if level >= 6:
                 warnings.append("funnel reduction reached the six-level safety limit")
                 break
+        if _retrieval_points_collapsed(nodes):
+            label_overhead = sum(
+                len(node.retrieval_point)
+                + sum(len(source_id) for source_id in node.source_ids)
+                + 80
+                for node in nodes
+            )
+            target_chars = max(
+                320,
+                (self.settings.rwkv_final_material_chars - label_overhead)
+                // max(1, len(nodes)),
+            )
+            if on_progress:
+                on_progress(
+                    "branch_finalizing",
+                    {
+                        "branch_count": len(nodes),
+                        "retrieval_points": [
+                            node.retrieval_point for node in nodes
+                        ],
+                    },
+                )
+            finalized_nodes: dict[int, _MaterialNode] = {}
+            workers = min(self.settings.rwkv_summary_workers, len(nodes))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(
+                        self._finalize_branch,
+                        question,
+                        node,
+                        evidence_by_id,
+                        target_chars,
+                    ): (index, node)
+                    for index, node in enumerate(nodes)
+                }
+                completed = 0
+                for future in as_completed(futures):
+                    index, original = futures[future]
+                    try:
+                        finalized = future.result()
+                        status = "done"
+                    except SearchReaderError as exc:
+                        finalized = original
+                        status = "degraded"
+                        warnings.append(
+                            f"{original.retrieval_point} branch finalization degraded: {exc}"[
+                                :500
+                            ]
+                        )
+                    finalized_nodes[index] = finalized
+                    completed += 1
+                    if on_progress:
+                        on_progress(
+                            "branch_finalized",
+                            {
+                                "completed": completed,
+                                "total": len(nodes),
+                                "retrieval_point": original.retrieval_point,
+                                "status": status,
+                                "summary_preview": finalized.summary[:220],
+                            },
+                        )
+            nodes = [finalized_nodes[index] for index in range(len(nodes))]
         return _render_material_nodes(nodes), warnings, len(nodes)
+
+    def _aggregate_retrieval_points(
+        self,
+        question: str,
+        material: str,
+        retrieval_points: list[str],
+    ) -> tuple[str, list[str]]:
+        point_list = "、".join(retrieval_points)
+        user = f"""{material}
+
+问题：{question}
+将以上分支总结整理成一份汇总材料。只保留这些检索点：{point_list}。每个检索点单独成段，保留名称、事实和 [S1] 来源编号；不新增对象，不回答问题，不改变事实归属。只输出汇总材料。
+汇总材料："""
+        output = self._complete(
+            user,
+            max_tokens=min(self.settings.rwkv_max_tokens, 2048),
+            stage="aggregate",
+        )
+        aggregated = _clean_final_answer(output)
+        warnings: list[str] = []
+        if not aggregated:
+            return material, ["retrieval-point aggregation returned empty material"]
+        unsupported = _unsupported_summary_numbers(aggregated, material)
+        if unsupported:
+            values = ", ".join(sorted(unsupported))
+            return material, [
+                f"retrieval-point aggregation introduced unsupported numbers: {values}"
+            ]
+        missing_points = [
+            point
+            for point in retrieval_points
+            if _normalized_text(point) not in _normalized_text(aggregated)
+        ]
+        if missing_points:
+            warnings.append(
+                "retrieval-point aggregation omitted branches: "
+                + ", ".join(missing_points)
+            )
+            return material, warnings
+        headings = re.findall(r"(?m)^#{1,6}\s+(.+?)\s*$", aggregated)
+        unknown_headings = [
+            heading
+            for heading in headings
+            if not any(
+                _normalized_text(point) in _normalized_text(heading)
+                for point in retrieval_points
+            )
+        ]
+        if unknown_headings:
+            warnings.append(
+                "retrieval-point aggregation added branches: "
+                + ", ".join(unknown_headings)
+            )
+            return material, warnings
+        source_points: dict[str, str] = {}
+        for line in material.splitlines():
+            try:
+                source_ids, summary = json.loads(line)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            point_match = re.search(r"检索点：([^\n]+)", str(summary))
+            if point_match:
+                for source_id in source_ids:
+                    source_points[str(source_id).upper()] = point_match.group(1)
+        heading_matches = list(
+            re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", aggregated)
+        )
+        for index, heading_match in enumerate(heading_matches):
+            heading = heading_match.group(1)
+            point = next(
+                (
+                    item
+                    for item in retrieval_points
+                    if _normalized_text(item) in _normalized_text(heading)
+                ),
+                "",
+            )
+            if not point:
+                continue
+            end = (
+                heading_matches[index + 1].start()
+                if index + 1 < len(heading_matches)
+                else len(aggregated)
+            )
+            section = aggregated[heading_match.end() : end]
+            crossed = [
+                source_id
+                for source_id in re.findall(
+                    r"\[(S\d+)\]", section, flags=re.IGNORECASE
+                )
+                if source_points.get(source_id.upper(), point) != point
+            ]
+            if crossed:
+                warnings.append(
+                    f"retrieval-point aggregation crossed {point} citations: "
+                    + ", ".join(dict.fromkeys(crossed))
+                )
+                return material, warnings
+        allowed_ids = set(re.findall(r"S\d+", material, flags=re.IGNORECASE))
+        aggregated = re.sub(
+            r"\[(S\d+)\]",
+            lambda match: match.group(0)
+            if match.group(1).upper() in allowed_ids
+            else "",
+            aggregated,
+            flags=re.IGNORECASE,
+        )
+        return aggregated, warnings
 
     def finalize(
         self,
@@ -2514,6 +3146,39 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             reduced_material, reduction_warnings, group_count = self._reduce_evidence(
                 question, ordered, on_progress=on_progress
             )
+            retrieval_points = list(
+                dict.fromkeys(
+                    item.retrieval_point
+                    for item in ordered
+                    if item.retrieval_point
+                )
+            )
+            if len(retrieval_points) > 1:
+                if on_progress:
+                    on_progress(
+                        "aggregating",
+                        {
+                            "retrieval_points": retrieval_points,
+                            "branch_count": len(retrieval_points),
+                        },
+                    )
+                reduced_material, aggregate_warnings = (
+                    self._aggregate_retrieval_points(
+                        question,
+                        reduced_material,
+                        retrieval_points,
+                    )
+                )
+                reduction_warnings.extend(aggregate_warnings)
+                if on_progress:
+                    on_progress(
+                        "aggregate_completed",
+                        {
+                            "retrieval_points": retrieval_points,
+                            "branch_count": len(retrieval_points),
+                            "status": "degraded" if aggregate_warnings else "done",
+                        },
+                    )
         del (
             conversation_history,
             current_message,
@@ -2529,10 +3194,25 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if use_atomic_records
             else "根据以上材料直接回答问题"
         )
+        final_point_scope = (
+            "只回答这些检索点："
+            + "、".join(
+                dict.fromkeys(
+                    item.retrieval_point
+                    for item in ordered
+                    if item.retrieval_point
+                )
+            )
+            + "；不要增加其他对象。"
+            if not use_atomic_records
+            and any(item.retrieval_point for item in ordered)
+            else ""
+        )
         user = f"""{reduced_material}
 
 问题：{question}
-{material_request}，只回答所问内容，合并重复内容，不推断材料没有的信息；材料不足就说明。事实后只用 [S1] 格式标注来源。{scope_note}"""
+{material_request}，只回答所问内容，合并重复内容，不推断材料没有的信息；不同检索点的对象和事实不得混用；材料不足就说明。事实后只用 [S1] 格式标注来源。{final_point_scope}{scope_note}
+最终回答："""
         if on_progress:
             on_progress(
                 "finalizing",

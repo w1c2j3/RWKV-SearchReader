@@ -21,6 +21,7 @@ from rwkv_search_reader.reader import (
     _attach_missing_citations,
     _bind_atomic_citations,
     _bind_subject_citations,
+    _chunk_material_nodes_by_retrieval_point,
     _clean_final_answer,
     _context_retry_tokens,
     _copied_fact_supported,
@@ -28,6 +29,7 @@ from rwkv_search_reader.reader import (
     _field_binding_applicable,
     _final_evidence_order,
     _is_explicit_benefit_fact,
+    _MaterialNode,
     _narrow_selected_fact,
     _parse_audit_output,
     _parse_research_plan_output,
@@ -88,7 +90,8 @@ def test_research_plan_parser_keeps_records_and_queries() -> None:
 def test_research_plan_parser_supports_material_scope_discovery() -> None:
     plan = _parse_research_plan_output(
         '{"decision":"search","scope_mode":"discover","goal":"查询公开集合",'
-        '"records":[],"queries":["当前二游版本与主题"],"clarification":""}',
+        '"records":[],"queries":["对象范围","当前版本","版本主题","当前卡池"],'
+        '"clarification":""}',
         "各个二游版本和主题是什么？",
         4,
     )
@@ -96,6 +99,73 @@ def test_research_plan_parser_supports_material_scope_discovery() -> None:
     assert plan.decision == "search"
     assert plan.scope_mode == "discover"
     assert plan.records == []
+    assert plan.queries == ["对象范围", "当前版本", "版本主题", "当前卡池"]
+
+
+def test_collapsed_collection_gets_a_separate_rwkv_search_design_call() -> None:
+    reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
+    calls = []
+
+    def complete(user, **kwargs):
+        calls.append((user, kwargs))
+        if kwargs["stage"] == "plan":
+            return (
+                '{"decision":"search","scope_mode":"fixed","goal":"逐项回答",'
+                '"records":[{"subject":"米哈游游戏","question":"版本主题卡池抽数",'
+                '"fields":["版本","主题","卡池","抽数"]}],'
+                '"queries":["米哈游游戏 版本主题卡池抽数"],"clarification":""}'
+            )
+        return (
+            '{"points":['
+            '["米哈游游戏范围","米哈游当前运营游戏列表"],'
+            '["当前版本主题","米哈游各游戏当前版本主题"],'
+            '["当前卡池","米哈游各游戏当前卡池"],'
+            '["可获得抽数","米哈游各游戏版本可获得抽数"]]}'
+        )
+
+    reader._complete = complete
+    plan = reader.plan_research(
+        "米哈游的游戏当前都分别是什么版本，主题、卡池和抽数是什么？"
+    )
+
+    assert [kwargs["stage"] for _, kwargs in calls] == ["plan", "search_design"]
+    assert plan.scope_mode == "discover"
+    assert plan.records == []
+    assert len(plan.queries) == 4
+    assert "运营游戏列表" in plan.queries[0]
+    assert "卡池" in plan.queries[2]
+    assert plan.retrieval_points == [
+        "米哈游游戏范围",
+        "当前版本主题",
+        "当前卡池",
+        "可获得抽数",
+    ]
+
+
+def test_model_expanded_collection_keeps_queries_but_uses_funnel_path() -> None:
+    reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
+    calls = []
+
+    def complete(user, **kwargs):
+        calls.append(kwargs["stage"])
+        return (
+            '{"decision":"search","scope_mode":"fixed","goal":"逐项回答",'
+            '"records":['
+            '{"subject":"原神","question":"版本主题","fields":["版本","主题"]},'
+            '{"subject":"绝区零","question":"版本主题","fields":["版本","主题"]}],'
+            '"queries":["原神 当前版本主题","绝区零 当前版本主题"],'
+            '"clarification":""}'
+        )
+
+    reader._complete = complete
+    plan = reader.plan_research("米哈游的游戏当前都分别是什么版本和主题？")
+
+    assert calls == ["plan"]
+    assert plan.scope_mode == "discover"
+    assert plan.records == []
+    assert plan.retrieval_points == ["原神", "绝区零"]
+    assert len(plan.queries) == 2
+    assert plan.queries[0].startswith("原神 当前版本主题")
 
 
 def test_game_scope_rejects_events_and_field_values_as_subjects() -> None:
@@ -642,12 +712,41 @@ def test_summary_prompt_contains_only_material_and_one_short_request() -> None:
     evidence = reader._summarize_one("UNIQUE QUESTION", chunk)
 
     prompt = captured["user"]
-    assert prompt == "UNIQUE MATERIAL\n\n总结以上网页内容。"
+    assert prompt == "UNIQUE MATERIAL\n\n总结以上网页内容。\n网页摘要："
     assert "UNIQUE QUESTION" not in prompt
     assert "来源材料" not in prompt
     assert "URL" not in prompt
     assert captured["max_tokens"] == 1024
     assert evidence.claim == "Relevant fact."
+
+
+def test_page_summary_uses_only_its_short_search_point_as_focus() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "原神相关事实。"
+
+    reader._complete = complete
+    chunk = DocumentChunk(
+        source_id="S1",
+        title="综合网页",
+        url="https://example.com",
+        text="网页同时提到了多个游戏。",
+        retrieval_point="原神",
+        retrieval_query="原神 当前版本 卡池 抽数",
+    )
+
+    evidence = reader._summarize_one("完整用户问题", chunk)
+
+    assert captured["user"] == (
+        "网页同时提到了多个游戏。\n\n"
+        "总结以上网页中与检索词“原神 当前版本 卡池 抽数”有关的内容。\n"
+        "网页摘要："
+    )
+    assert "完整用户问题" not in captured["user"]
+    assert evidence.retrieval_point == "原神"
 
 
 def test_markdown_summary_keeps_raw_fragment_when_model_marks_it_missing() -> None:
@@ -670,7 +769,8 @@ def test_markdown_summary_keeps_raw_fragment_when_model_marks_it_missing() -> No
     evidence = reader._summarize_one("总结文档策略", chunk)
 
     assert captured["user"] == (
-        "Markdown 按标题和段落切块，默认只使用文档。\n\n总结以上网页内容。"
+        "Markdown 按标题和段落切块，默认只使用文档。\n\n"
+        "总结以上网页内容。\n网页摘要："
     )
     assert evidence.claim == "Markdown 按标题和段落切块，默认只使用文档。"
 
@@ -889,6 +989,83 @@ def test_recency_order_keeps_every_source_and_places_newest_nearest_question() -
     ordered = _final_evidence_order("今天有什么新闻", rows)
 
     assert [row.source_id for row in ordered] == ["S2", "S3", "S1"]
+
+
+def test_evidence_order_keeps_search_point_materials_adjacent() -> None:
+    rows = _evidence(4)
+    rows[0].retrieval_point = "原神"
+    rows[1].retrieval_point = "崩坏：星穹铁道"
+    rows[2].retrieval_point = "原神"
+    rows[3].retrieval_point = "崩坏：星穹铁道"
+
+    ordered = _final_evidence_order("当前版本", rows)
+
+    assert [row.retrieval_point for row in ordered] == [
+        "原神",
+        "原神",
+        "崩坏：星穹铁道",
+        "崩坏：星穹铁道",
+    ]
+
+
+def test_funnel_groups_interleaved_materials_within_each_search_point_first() -> None:
+    nodes = [
+        _MaterialNode(("S1",), "原神材料一", "原神"),
+        _MaterialNode(("S2",), "崩铁材料一", "崩坏：星穹铁道"),
+        _MaterialNode(("S3",), "原神材料二", "原神"),
+        _MaterialNode(("S4",), "崩铁材料二", "崩坏：星穹铁道"),
+    ]
+
+    groups = _chunk_material_nodes_by_retrieval_point(
+        nodes, max_chars=10_000, fan_in=4
+    )
+
+    assert [[node.source_ids[0] for node in group] for group in groups] == [
+        ["S1", "S3"],
+        ["S2", "S4"],
+    ]
+
+
+def test_funnel_never_crosses_search_points_when_point_summaries_need_compression() -> (
+    None
+):
+    settings = replace(
+        Settings(),
+        rwkv_model="test",
+        rwkv_reduce_fan_in=4,
+        rwkv_reduce_chunk_chars=6000,
+        rwkv_final_material_chars=1000,
+    )
+    reader = RWKVReader(settings)
+    rows = _evidence(6)
+    points = ["原神", "崩坏：星穹铁道", "绝区零"]
+    for index, row in enumerate(rows):
+        row.retrieval_point = points[index % len(points)]
+        row.claim = "详细材料" * 100
+    prompt_points: list[set[str]] = []
+
+    def complete(user, **kwargs):
+        assert kwargs["stage"] in {"reduce", "branch_finalize"}
+        found = set(re.findall(r"检索点：([^\\]+)\\n", user))
+        prompt_points.append(found)
+        source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
+        body = "压缩材料" * (
+            20
+            if "压缩以上" in user or kwargs["stage"] == "branch_finalize"
+            else 120
+        )
+        return body + "".join(f"[{source_id}]" for source_id in source_ids)
+
+    reader._complete = complete
+
+    material, warnings, group_count = reader._reduce_evidence("问题", rows)
+
+    assert warnings == []
+    assert group_count == 3
+    assert len(material) <= settings.rwkv_final_material_chars
+    assert prompt_points
+    assert all(len(found) == 1 for found in prompt_points)
+    assert all(f"检索点：{point}" in material for point in points)
 
 
 def test_citation_binding_prefers_exact_version_and_date_support() -> None:
@@ -1195,6 +1372,38 @@ def test_final_reader_returns_direct_natural_summary_without_list_renderer() -> 
     assert answer == "这是综合后的自然回答，不是逐来源清单 [S1][S2]。"
     assert warnings == []
     assert len(captured["prompts"]) == 1
+
+
+def test_point_branches_are_aggregated_once_before_the_final_summary() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    rows = _evidence(2)
+    rows[0].retrieval_point = "原神"
+    rows[0].claim = "原神事实"
+    rows[1].retrieval_point = "绝区零"
+    rows[1].claim = "绝区零事实"
+    calls: list[tuple[str, str]] = []
+
+    def complete(user, **kwargs):
+        calls.append((kwargs["stage"], user))
+        if kwargs["stage"] == "branch_finalize":
+            if "当前检索点：原神" in user:
+                return "原神：原神事实 [S1]"
+            return "绝区零：绝区零事实 [S2]"
+        if kwargs["stage"] == "aggregate":
+            return "原神：原神事实 [S1]\n绝区零：绝区零事实 [S2]"
+        assert kwargs["stage"] == "finalize"
+        assert "原神：原神事实 [S1]" in user
+        assert "绝区零：绝区零事实 [S2]" in user
+        return "原神与绝区零的最终总结 [S1][S2]"
+
+    reader._complete = complete
+
+    answer, warnings = reader.finalize("比较两个游戏", rows)
+
+    assert answer == "原神与绝区零的最终总结 [S1][S2]"
+    assert warnings == []
+    assert [stage for stage, _ in calls].count("branch_finalize") == 2
+    assert [stage for stage, _ in calls][-2:] == ["aggregate", "finalize"]
 
 
 def test_field_bound_final_uses_only_atomic_field_records() -> None:

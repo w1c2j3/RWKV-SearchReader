@@ -297,6 +297,8 @@ def rank_chunks(
                     score=round(score, 4),
                     chunk_index=chunk_index,
                     published_date=hit.published_date,
+                    retrieval_point=hit.retrieval_point,
+                    retrieval_query=hit.retrieval_query,
                 )
             )
     chunks.sort(
@@ -317,6 +319,8 @@ def provider_materials(hits: list[SearchHit]) -> list[DocumentChunk]:
             score=float(hit.score or 0.0),
             chunk_index=0,
             published_date=hit.published_date,
+            retrieval_point=hit.retrieval_point,
+            retrieval_query=hit.retrieval_query,
         )
         for source_index, hit in enumerate(hits, start=1)
         if hit.content.strip() or hit.snippet.strip()
@@ -407,6 +411,7 @@ class Retriever:
         start_index: int = 1,
         results_per_query: int | None = None,
         max_total_results: int | None = None,
+        retrieval_point_by_query: dict[str, str] | None = None,
     ) -> tuple[list[str], list[SearchHit], list[DocumentChunk], list[str]]:
         queries = list(
             dict.fromkeys(
@@ -424,9 +429,14 @@ class Retriever:
         search_warnings: list[str] = []
         for query in queries:
             try:
-                groups.append(
-                    self.provider.search(query, per_query)
-                )
+                hits = self.provider.search(query, per_query)
+                retrieval_point = str(
+                    (retrieval_point_by_query or {}).get(query) or query
+                ).strip()
+                for hit in hits:
+                    hit.retrieval_point = retrieval_point
+                    hit.retrieval_query = query
+                groups.append(hits)
             except SearchReaderError as exc:
                 search_warnings.append(f"{query}: {exc}"[:500])
         if not groups:

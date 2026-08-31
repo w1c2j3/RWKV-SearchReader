@@ -15,6 +15,8 @@ class SearchHit:
     score: float = 0.0
     published_date: str = ""
     error: str = ""
+    retrieval_point: str = ""
+    retrieval_query: str = ""
 
 
 @dataclass(slots=True)
@@ -26,6 +28,8 @@ class DocumentChunk:
     score: float = 0.0
     chunk_index: int = 0
     published_date: str = ""
+    retrieval_point: str = ""
+    retrieval_query: str = ""
 
 
 @dataclass(slots=True)
@@ -38,6 +42,8 @@ class Evidence:
     score: float = 0.0
     source_relation: str = "unclear"
     published_date: str = ""
+    retrieval_point: str = ""
+    retrieval_query: str = ""
 
 
 @dataclass(slots=True)
@@ -62,6 +68,7 @@ class ResearchPlan:
     scope_mode: str = "fixed"
     clarification: str = ""
     fallback: bool = False
+    retrieval_points: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

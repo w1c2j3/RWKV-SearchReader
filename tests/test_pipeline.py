@@ -19,6 +19,7 @@ from rwkv_search_reader.models import (
 from rwkv_search_reader.pipeline import (
     _EXPLICIT_WEB_RE,
     SearchReaderPipeline,
+    _bind_queries_to_retrieval_points,
     _conversation_reply,
     _history_only_request,
     _rechecks_supported_fact,
@@ -100,10 +101,12 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
     assert progress[1][1]["sources"][0] == {
         "source_id": "S1",
         "title": "Source",
-        "url": "https://example.com",
-        "score": 0.0,
-        "published_date": "",
-    }
+            "url": "https://example.com",
+            "score": 0.0,
+            "published_date": "",
+            "retrieval_point": "",
+            "retrieval_query": "",
+        }
     assert progress[0][1]["query"] == "Question"
     assert result.trace[-1]["stage"] == "completed"
 
@@ -144,7 +147,7 @@ def test_model_planner_can_request_scope_clarification_without_search(tmp_path) 
     ]
 
 
-def test_public_unspecified_set_is_discovered_then_searched_per_subject(
+def test_public_unspecified_set_runs_planned_points_then_funnel_summary(
     tmp_path,
 ) -> None:
     settings = replace(
@@ -158,87 +161,57 @@ def test_public_unspecified_set_is_discovered_then_searched_per_subject(
     pipeline.reader.plan_research = lambda question: ResearchPlan(
         decision="search",
         scope_mode="discover",
-        goal="回答代表性二游的版本和主题",
-        queries=["当前二游版本主题"],
-    )
-    records = [
-        ResearchRecord("原神", "当前版本和主题", ["版本", "主题"]),
-        ResearchRecord("绝区零", "当前版本和主题", ["版本", "主题"]),
-    ]
-    pipeline.reader.discover_research_scope = lambda question, sources: ResearchPlan(
-        decision="search",
-        scope_mode="fixed",
-        goal="逐个回答",
-        records=records,
-        queries=["原神 当前版本 主题", "绝区零 当前版本 主题"],
+        goal="按检索点收集资料",
+        queries=["二游对象范围", "二游当前版本", "二游版本主题"],
     )
     first_hit = SearchHit(
         "二游版本盘点", "https://example.com/discovery", content="原神、绝区零"
-    )
-    second_hit = SearchHit(
-        "逐游戏资料", "https://example.com/details", content="版本和主题资料"
     )
     retrieval_calls = []
 
     def retrieve(queries, **kwargs):
         retrieval_calls.append((queries, kwargs))
-        if len(retrieval_calls) == 1:
-            first_hit.source_id = "S1"
-            return (
-                queries,
-                [first_hit],
-                [
-                    DocumentChunk(
-                        "S1", first_hit.title, first_hit.url, first_hit.content
-                    )
-                ],
-                [],
-            )
-        second_hit.source_id = "S2"
+        first_hit.source_id = "S1"
         return (
             queries,
-            [second_hit],
-            [DocumentChunk("S2", second_hit.title, second_hit.url, second_hit.content)],
+            [first_hit],
+            [DocumentChunk("S1", first_hit.title, first_hit.url, first_hit.content)],
             [],
         )
 
     pipeline.retriever.run_queries = retrieve
-    evidence = [
-        Evidence("S1", first_hit.title, first_hit.url, "发现两个游戏", "原神、绝区零"),
-        Evidence(
-            "S2", second_hit.title, second_hit.url, "版本和主题资料", "版本和主题资料"
-        ),
-    ]
+    evidence = [Evidence("S1", first_hit.title, first_hit.url, "资料", "资料")]
     pipeline.reader.summarize = lambda question, chunks, **kwargs: (evidence, [])
     pipeline.reader.audit = lambda *args, **kwargs: EvidenceAudit(sufficient=True)
-    pipeline.reader.select_evidence = lambda *args, **kwargs: (
-        [FieldEvidenceSelection("原神", "版本", "S2", "supported", "版本资料")],
-        [],
+    pipeline.reader.select_evidence = lambda *args, **kwargs: pytest.fail(
+        "unnamed collections must not use atomic field binding"
     )
     final_call = {}
 
     def finalize(*args, **kwargs):
         final_call.update(kwargs)
-        return "代表性回答 [S2]", []
+        return "持续总结后的回答 [S1]", []
 
     pipeline.reader.finalize = finalize
 
     result = pipeline.answer("二游现在的版本是什么，各个主题是什么？")
 
-    assert len(retrieval_calls) == 2
-    assert retrieval_calls[1][0] == ["原神 当前版本 主题", "绝区零 当前版本 主题"]
-    assert retrieval_calls[1][1]["excluded_urls"] == {first_hit.url}
-    assert retrieval_calls[1][1]["start_index"] == 2
+    assert len(retrieval_calls) == 1
+    assert retrieval_calls[0][0] == [
+        "二游对象范围",
+        "二游当前版本",
+        "二游版本主题",
+    ]
     assert result.queries == [
-        "当前二游版本主题",
-        "原神 当前版本 主题",
-        "绝区零 当前版本 主题",
+        "二游对象范围",
+        "二游当前版本",
+        "二游版本主题",
     ]
     stages = [event["stage"] for event in result.trace]
-    assert stages.index("scope_discovering") < stages.index("scope_discovered")
-    assert stages.index("scope_discovered") < stages.index("scope_searching")
-    assert "scope_sources_found" in stages
-    assert final_call["representative_scope"] is True
+    assert "search_points_collected" in stages
+    assert "scope_discovering" not in stages
+    assert final_call["research_records"] == []
+    assert final_call["evidence_selections"] == []
 
 
 def test_model_planner_queries_and_records_reach_audit_and_writer(tmp_path) -> None:
@@ -297,7 +270,13 @@ def test_model_planner_queries_and_records_reach_audit_and_writer(tmp_path) -> N
 
     assert received["retrieval"] == (
         planned_queries,
-        {"question": "原神和绝区零当前版本和福利分别是什么？"},
+        {
+            "question": "原神和绝区零当前版本和福利分别是什么？",
+            "retrieval_point_by_query": {
+                "原神 当前版本 福利": "原神 当前版本 福利",
+                "绝区零 当前版本 福利": "绝区零 当前版本 福利",
+            },
+        },
     )
     assert received["audit_records"] == records
     assert received["writer_records"] == records
@@ -439,6 +418,25 @@ def test_supplemental_query_preserves_version_named_by_user() -> None:
     )
 
     assert "3.14" in sanitized
+
+
+def test_supplemental_queries_bind_back_to_their_original_search_points() -> None:
+    points = [
+        "米哈游 原神 当前版本 版本主题 卡池 抽数",
+        "米哈游 崩坏：星穹铁道 当前版本 版本主题 卡池 抽数",
+        "米哈游 绝区零 当前版本 版本主题 卡池 抽数",
+    ]
+    queries = [
+        "原神 版本 主题 卡池 抽数 官方公告",
+        "崩坏：星穹铁道 版本 主题 卡池 抽数 官方公告",
+        "绝区零 版本 主题 卡池 抽数 官方公告",
+        "鸣潮 当前版本",
+    ]
+
+    bindings = _bind_queries_to_retrieval_points(queries, points)
+
+    assert [bindings[query] for query in queries[:3]] == points
+    assert bindings[queries[3]] == queries[3]
 
 
 def test_pipeline_summarizes_conversation_without_search(tmp_path) -> None:
@@ -592,6 +590,9 @@ def test_pipeline_uses_audit_query_to_add_new_sources(tmp_path) -> None:
     assert result.queries == ["Question", "missing fact query"]
     assert supplemental_calls[0][1]["excluded_urls"] == {first_hit.url}
     assert supplemental_calls[0][1]["start_index"] == 2
+    assert supplemental_calls[0][1]["retrieval_point_by_query"] == {
+        "missing fact query": "Question"
+    }
     assert [event["stage"] for event in result.trace].count("auditing") == 2
 
 

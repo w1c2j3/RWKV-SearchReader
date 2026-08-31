@@ -136,6 +136,13 @@ def test_planned_queries_keep_up_to_ten_materials_per_object() -> None:
     assert len(chunks) == 20
     assert sum(chunk.title.startswith("对象A") for chunk in chunks) == 10
     assert sum(chunk.title.startswith("对象B") for chunk in chunks) == 10
+    assert {source.retrieval_point for source in sources} == {"对象A", "对象B"}
+    assert {chunk.retrieval_point for chunk in chunks} == {"对象A", "对象B"}
+    assert {chunk.retrieval_query for chunk in chunks} == {"对象A", "对象B"}
+    assert all(
+        chunk.retrieval_point in chunk.title
+        for chunk in chunks
+    )
 
 
 def test_supplemental_retrieval_excludes_old_urls_and_continues_source_ids() -> None:
@@ -147,10 +154,14 @@ def test_supplemental_retrieval_excludes_old_urls_and_continues_source_ids() -> 
         question="original question",
         excluded_urls={"https://example.com/1", "https://example.com/2"},
         start_index=11,
+        retrieval_point_by_query={"missing detail": "stable point"},
     )
 
     assert [source.source_id for source in sources] == ["S11", "S12"]
     assert [chunk.source_id for chunk in chunks] == ["S11", "S12"]
+    assert all(source.retrieval_point == "stable point" for source in sources)
+    assert all(chunk.retrieval_point == "stable point" for chunk in chunks)
+    assert all(chunk.retrieval_query == "missing detail" for chunk in chunks)
 
 
 def test_balanced_hits_deduplicates_http_and_https_page_variants() -> None:

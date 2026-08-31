@@ -163,6 +163,36 @@ def _sanitize_supplemental_query(query: str, question: str) -> str:
     return sanitized[:800]
 
 
+def _query_ngrams(value: str) -> set[str]:
+    compact = re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", value.casefold())
+    grams: set[str] = set()
+    for size in (2, 3):
+        grams.update(
+            compact[index : index + size]
+            for index in range(max(0, len(compact) - size + 1))
+        )
+    return grams
+
+
+def _bind_queries_to_retrieval_points(
+    queries: list[str], retrieval_points: list[str]
+) -> dict[str, str]:
+    """Attach audit-generated query variants to the original search branch."""
+
+    points = list(dict.fromkeys(point for point in retrieval_points if point.strip()))
+    if not points:
+        return {query: query for query in queries}
+    point_grams = [_query_ngrams(point) for point in points]
+    shared = set.intersection(*point_grams) if len(point_grams) > 1 else set()
+    bindings: dict[str, str] = {}
+    for query in queries:
+        query_grams = _query_ngrams(query)
+        scores = [len((grams - shared) & query_grams) for grams in point_grams]
+        best_score = max(scores, default=0)
+        bindings[query] = points[scores.index(best_score)] if best_score else query
+    return bindings
+
+
 def _document_sources(
     passages: list[MarkdownPassage], start_index: int = 1
 ) -> tuple[list[SearchHit], list[DocumentChunk]]:
@@ -456,6 +486,7 @@ class SearchReaderPipeline:
                             "scope_mode": research_plan.scope_mode,
                             "goal": research_plan.goal,
                             "queries": research_plan.queries,
+                            "retrieval_points": research_plan.retrieval_points,
                             "clarification": research_plan.clarification,
                             "records": [
                                 {
@@ -516,12 +547,19 @@ class SearchReaderPipeline:
             sources: list[SearchHit] = []
             chunks: list[DocumentChunk] = []
             retrieval_warnings: list[str] = []
+            stable_retrieval_points: list[str] = []
             if web_enabled:
                 planned_queries = (
                     research_plan.queries
                     if research_plan and research_plan.decision == "search"
                     else [effective_question]
                 )
+                stable_retrieval_points = list(planned_queries)
+                if (
+                    research_plan
+                    and len(research_plan.retrieval_points) == len(planned_queries)
+                ):
+                    stable_retrieval_points = list(research_plan.retrieval_points)
                 emit(
                     "searching",
                     {
@@ -535,6 +573,13 @@ class SearchReaderPipeline:
                         self.retriever.run_queries(
                             planned_queries,
                             question=effective_question,
+                            retrieval_point_by_query=dict(
+                                zip(
+                                    planned_queries,
+                                    stable_retrieval_points,
+                                    strict=True,
+                                )
+                            ),
                         )
                     )
                 else:
@@ -553,6 +598,8 @@ class SearchReaderPipeline:
                                 "url": source.url,
                                 "score": source.score,
                                 "published_date": source.published_date,
+                                "retrieval_point": source.retrieval_point,
+                                "retrieval_query": source.retrieval_query,
                             }
                             for index, source in enumerate(
                                 sources[: len(chunks)], start=1
@@ -565,111 +612,18 @@ class SearchReaderPipeline:
                     and research_plan.decision == "search"
                     and research_plan.scope_mode == "discover"
                 ):
-                    representative_scope = True
+                    # The planning RWKV already split an unnamed collection into
+                    # independent retrieval points. Keep all results in the normal
+                    # map/reduce path instead of inventing one atomic category row.
+                    research_plan.records = []
                     emit(
-                        "scope_discovering",
+                        "search_points_collected",
                         {
+                            "queries": queries,
+                            "retrieval_points": stable_retrieval_points,
                             "source_count": len(chunks),
-                            "message": "正在从当前资料中确定具体对象",
+                            "message": "各检索点资料已进入持续总结",
                         },
-                    )
-                    scope_started = time.perf_counter()
-                    try:
-                        discovered_plan = self.reader.discover_research_scope(
-                            effective_question, sources
-                        )
-                    except SearchReaderError as exc:
-                        pipeline_warnings.append(
-                            f"research scope discovery degraded: {exc}"[:500]
-                        )
-                        emit(
-                            "scope_discovered",
-                            {
-                                "success": False,
-                                "subjects": [],
-                                "message": "未能稳定拆分具体对象，将直接使用现有资料回答",
-                            },
-                        )
-                        research_plan = None
-                    else:
-                        research_plan = discovered_plan
-                        emit(
-                            "scope_discovered",
-                            {
-                                "success": True,
-                                "subjects": [
-                                    record.subject for record in discovered_plan.records
-                                ],
-                                "records": [
-                                    {
-                                        "subject": record.subject,
-                                        "question": record.question,
-                                        "fields": record.fields,
-                                    }
-                                    for record in discovered_plan.records
-                                ],
-                                "queries": discovered_plan.queries,
-                                "message": "已从资料中确定本轮代表性对象",
-                            },
-                        )
-                        emit(
-                            "scope_searching",
-                            {
-                                "queries": discovered_plan.queries,
-                                "subject_count": len(discovered_plan.records),
-                                "message": "正在逐对象补充资料",
-                            },
-                        )
-                        try:
-                            (
-                                scope_queries,
-                                scope_sources,
-                                scope_chunks,
-                                scope_warnings,
-                            ) = self.retriever.run_queries(
-                                discovered_plan.queries,
-                                question=effective_question,
-                                excluded_urls={source.url for source in sources},
-                                start_index=len(sources) + 1,
-                            )
-                        except SearchReaderError as exc:
-                            pipeline_warnings.append(
-                                f"per-subject retrieval degraded: {exc}"[:500]
-                            )
-                            emit(
-                                "scope_sources_found",
-                                {
-                                    "source_count": 0,
-                                    "total_source_count": len(sources),
-                                    "message": "没有找到新的逐对象资料，保留第一轮材料",
-                                },
-                            )
-                        else:
-                            queries.extend(scope_queries)
-                            sources.extend(scope_sources)
-                            chunks.extend(scope_chunks)
-                            retrieval_warnings.extend(scope_warnings)
-                            emit(
-                                "scope_sources_found",
-                                {
-                                    "queries": scope_queries,
-                                    "source_count": len(scope_chunks),
-                                    "total_source_count": len(sources),
-                                    "sources": [
-                                        {
-                                            "source_id": source.source_id,
-                                            "title": source.title,
-                                            "url": source.url,
-                                            "score": source.score,
-                                            "published_date": source.published_date,
-                                        }
-                                        for source in scope_sources[: len(scope_chunks)]
-                                    ],
-                                    "message": "逐对象资料已加入本轮阅读",
-                                },
-                            )
-                    timings["scope_discovery"] = round(
-                        (time.perf_counter() - scope_started) * 1000, 1
                     )
             if local_passages:
                 emit(
@@ -862,11 +816,16 @@ class SearchReaderPipeline:
                     break
 
                 supplement_round = review_index + 1
+                supplemental_point_bindings = _bind_queries_to_retrieval_points(
+                    supplemental_queries,
+                    stable_retrieval_points,
+                )
                 emit(
                     "supplemental_searching",
                     {
                         "round": supplement_round,
                         "queries": supplemental_queries,
+                        "retrieval_point_by_query": supplemental_point_bindings,
                         "message": "正在补充缺失资料",
                     },
                 )
@@ -882,6 +841,7 @@ class SearchReaderPipeline:
                         question=effective_question,
                         excluded_urls={source.url for source in sources},
                         start_index=len(sources) + 1,
+                        retrieval_point_by_query=supplemental_point_bindings,
                     )
                 except SearchReaderError as exc:
                     audit_warnings.append(
@@ -917,6 +877,8 @@ class SearchReaderPipeline:
                                 "url": source.url,
                                 "score": source.score,
                                 "published_date": source.published_date,
+                                "retrieval_point": source.retrieval_point,
+                                "retrieval_query": source.retrieval_query,
                             }
                             for source in new_sources[: len(new_chunks)]
                         ],
