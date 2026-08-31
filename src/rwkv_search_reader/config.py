@@ -84,10 +84,13 @@ def _key_pool() -> tuple[str, ...]:
 _load_local_env(PROJECT_ROOT / ".env.local")
 if not (_text("TAVILY_API_KEY") or _text("TAVILY_API_KEYS")):
     # Reuse only the local Tavily credentials already kept by RWKV-ECRA.
-    _load_local_env(
-        PROJECT_ROOT.parent / "RWKV-ECRA" / ".env.local",
-        allowed_keys={"TAVILY_API_KEY", "TAVILY_API_KEYS"},
-    )
+    for filename in (".env.local", ".env"):
+        _load_local_env(
+            PROJECT_ROOT.parent / "RWKV-ECRA" / filename,
+            allowed_keys={"TAVILY_API_KEY", "TAVILY_API_KEYS"},
+        )
+        if _text("TAVILY_API_KEY") or _text("TAVILY_API_KEYS"):
+            break
 
 
 @dataclass(frozen=True, slots=True)

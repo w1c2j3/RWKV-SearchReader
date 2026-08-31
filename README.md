@@ -107,7 +107,7 @@ SEARCH_READER_RWKV_FINAL_PROTOCOL=completions
 
 `SUMMARY_WORKERS` 同时控制逐来源阅读、逐字段证据选择和漏斗 chunk 归并的并发。每个对象检索式最多读取 Tavily 前 10 条结果；审核发现证据不足时最多补检两轮。材料超过 final 预算时会按 chunk 递归归并，再调用最终 RWKV 输出回答。
 
-在当前机器上，如果新项目自己的 `.env.local` 没有 Tavily 凭证，程序会只读取相邻 `RWKV-ECRA/.env.local` 中的 `TAVILY_API_KEY` / `TAVILY_API_KEYS`，不会读取或复制其中的其他配置和密钥。密钥池会按顺序故障转移。
+在当前机器上，如果新项目自己的 `.env.local` 没有 Tavily 凭证，程序会依次检查相邻 `RWKV-ECRA/.env.local` 和 `RWKV-ECRA/.env`，但只读取 `TAVILY_API_KEY` / `TAVILY_API_KEYS`，不会读取或复制其中的其他配置和密钥。密钥池会按顺序故障转移。
 
 ### 其他搜索后端
 

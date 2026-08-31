@@ -823,6 +823,12 @@ def test_summary_numbers_compare_scientific_and_fraction_latex() -> None:
     assert _unsupported_summary_numbers("参数150000000，比例0.75。", material) == set()
 
 
+def test_extreme_scientific_markup_does_not_overflow_number_validation() -> None:
+    material = r"页面脚本包含 $1 \times 10^{9999999}$。"
+
+    assert _unsupported_summary_numbers(material, material) == set()
+
+
 def test_summary_numbers_still_reject_changed_scaled_values() -> None:
     material = "发行4044.64万股，占比5.74%。"
 

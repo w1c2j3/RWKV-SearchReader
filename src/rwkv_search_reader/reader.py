@@ -9,7 +9,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
@@ -176,15 +176,25 @@ def _normalize_numeric_markup(value: str) -> str:
     text = re.sub(r"(?<=\d)\\,\s*(?=\d{3}(?:\D|$))", ",", text)
 
     def replace_fraction(match: re.Match[str]) -> str:
-        denominator = Decimal(match.group("denominator"))
-        if not denominator:
+        try:
+            denominator = Decimal(match.group("denominator"))
+            if not denominator:
+                return match.group(0)
+            result = Decimal(match.group("numerator")) / denominator
+        except DecimalException:
             return match.group(0)
-        return _decimal_text(Decimal(match.group("numerator")) / denominator)
+        return _decimal_text(result)
 
     def replace_scientific(match: re.Match[str]) -> str:
-        coefficient = Decimal(match.group("coefficient"))
-        exponent = int(match.group("exponent"))
-        return _decimal_text(coefficient * (Decimal(10) ** exponent))
+        try:
+            exponent = int(match.group("exponent"))
+            if abs(exponent) > 1000:
+                return match.group(0)
+            coefficient = Decimal(match.group("coefficient"))
+            result = coefficient * (Decimal(10) ** exponent)
+        except (DecimalException, ValueError):
+            return match.group(0)
+        return _decimal_text(result)
 
     text = _LATEX_FRACTION_RE.sub(replace_fraction, text)
     return _SCIENTIFIC_RE.sub(replace_scientific, text)
@@ -207,11 +217,16 @@ def _normalized_number_pairs(value: str) -> list[tuple[str, str]]:
             continue
         suffix_match = _NUMBER_SUFFIX_RE.match(value, match.end())
         suffix = suffix_match.group("suffix").casefold() if suffix_match else ""
-        if suffix in {"%", "‰"}:
-            ratio_scale = Decimal("0.01") if suffix == "%" else Decimal("0.001")
-            canonical = f"ratio:{_decimal_key(number * ratio_scale)}"
-        else:
-            canonical = _decimal_key(number * _NUMBER_SCALES.get(suffix, Decimal(1)))
+        try:
+            if suffix in {"%", "‰"}:
+                ratio_scale = Decimal("0.01") if suffix == "%" else Decimal("0.001")
+                canonical = f"ratio:{_decimal_key(number * ratio_scale)}"
+            else:
+                canonical = _decimal_key(
+                    number * _NUMBER_SCALES.get(suffix, Decimal(1))
+                )
+        except DecimalException:
+            canonical = _decimal_key(number)
         normalized.append((canonical, _decimal_key(number)))
     return normalized
 
