@@ -199,6 +199,17 @@ uv run rwkv-search-reader-eval \
 
 结果写入 `results.jsonl`，汇总写入 `summary.json` 和 `REPORT.md`。再次使用同一 `--output` 会跳过已经成功记录的题目；加 `--retry-errors` 可重试失败题。该数据集没有标准答案，因此脚本报告完成率、引用率、降级率、失败阶段和耗时，不把这些结构指标冒充事实正确率。
 
+运行本地参考资料/RAG 20 题测试：
+
+```bash
+uv run rwkv-search-reader-rag-eval \
+  --dataset evals/rag_reference_20_20260902.json \
+  --output runs/rag-reference-g1j \
+  --workers 2
+```
+
+该套件先把虚构 Markdown 资料写入隔离的本地 conversation，再执行事实定位、表格读取、跨章节综合、版本冲突消解、无答案拒答、全文总结和连续追问。资料包含模型无法可靠凭记忆猜中的唯一名称、数字和路径；报告同时检查内容关键词、`document://` 来源、引用有效性、是否意外联网以及思考标签泄漏。
+
 ## 第一版边界
 
 - 少量完整寒暄句走确定性本地回复；其他问题（包括翻译）仍会联网。
@@ -206,7 +217,7 @@ uv run rwkv-search-reader-eval \
 - 审核补检默认最多两轮，避免错误审核导致无界检索；达到边界仍不足时会保留告警并用已有材料如实回答。
 - Tavily 路径使用 Search 返回的清洗后 Markdown 原文，不在本机重复抓取网页；每个单网页阅读输入仍受材料字符上限约束。
 - 其他搜索后端的 HTML 正文提取仍是轻量实现。
-- Markdown 已支持；PDF、Office、登录态网页、JavaScript 渲染和 token 级流式生成尚未实现；网页端已经可以流式显示处理阶段。
+- Markdown 参考资料已支持；PDF、Office、登录态网页、JavaScript 渲染和 token 级流式生成尚未实现；网页端已经可以流式显示处理阶段。
 - RWKV 需要由独立的 OpenAI 兼容服务提供，本仓库不包含模型权重和推理引擎。
 
 ## 项目结构

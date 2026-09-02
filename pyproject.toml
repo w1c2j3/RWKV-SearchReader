@@ -23,6 +23,7 @@ dev = ["pytest>=8,<10"]
 rwkv-search-reader = "rwkv_search_reader.cli:main"
 rwkv-search-reader-api = "rwkv_search_reader.api:main"
 rwkv-search-reader-eval = "rwkv_search_reader.evaluation:main"
+rwkv-search-reader-rag-eval = "rwkv_search_reader.rag_evaluation:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

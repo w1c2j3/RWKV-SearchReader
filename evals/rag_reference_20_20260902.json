@@ -1,0 +1,162 @@
+{
+  "schema_version": "rwkv-search-reader.rag-reference.v1",
+  "purpose": "Live local-reference evaluation with synthetic facts that cannot be answered reliably from model memory.",
+  "question_count": 20,
+  "documents": {
+    "orion": {
+      "filename": "orion-deployment.md",
+      "content": "# 北辰中继部署手册\n\n北辰中继（内部代号 Polaris Relay）是天穹项目的消息入口。本文所有数字只适用于 2.7 系列。\n\n## 生产端点\n\n服务监听端口为 7443，健康检查路径为 `/readyz`。对话数据库固定保存在 `/srv/polaris/data/dialogues.db`。备份每天 02:15（Asia/Shanghai）执行，保留 14 天。\n\n## 上线顺序\n\n上线必须依次完成四步：先创建数据库快照；再部署 reader；随后预热模型；最后在连续三次健康检查成功后切换反向代理。不得在模型预热之前切流。\n\n## 回滚条件\n\nP95 延迟连续五分钟超过 1800 毫秒，或者五分钟错误率超过 2%，任一条件满足就回滚。回滚镜像固定为 `polaris-reader:2.7.4`。先把新版本流量设为 0，再恢复旧配置；不得删除新数据库。"
+    },
+    "travel": {
+      "filename": "quartz-travel-policy.md",
+      "content": "# 石英计划差旅规则\n\n## 住宿\n\n北京、上海住宿上限为每晚 680 元，其他中国大陆城市为每晚 520 元。只有当含早餐房价不高于适用上限加 80 元时，早餐差额才可报销。\n\n## 市内交通\n\n公共交通优先。当地时间 22:30 以后出行，或者随身设备总重量超过 12 千克时，可以乘坐出租车；两个条件不要求同时满足。\n\n## 外币与例外\n\n外币费用使用报销发生日中国银行现汇中间价换算。任何超标准例外都必须由财务责任人批准，批准代号为 `Mica-7`，直属经理同意不能替代该批准。"
+    },
+    "study": {
+      "filename": "aurelia-retrieval-study.md",
+      "content": "# 曙光检索实验 Aster-9\n\n实验使用 12,000 条合成客服工单，其中中文 8,400 条、英文 3,600 条。三套方案都在同一台机器上各运行 480 次查询。\n\n## 结果\n\n| 方案 | Recall@5 | P95 延迟 |\n| --- | ---: | ---: |\n| Rook | 71.2% | 820 ms |\n| Lumen | 78.6% | 940 ms |\n| Fjord | 76.1% | 610 ms |\n\nLumen 的召回率最高；在 Recall@5 高于 75% 的方案中，Fjord 延迟最低。\n\n## 限制\n\n实验只覆盖短查询，没有测试超过 8,000 字符的长文档，也没有真人用户流量。因此结果不能直接外推到长文档生产场景。"
+    },
+    "release_240": {
+      "filename": "harbor-release-2.4.0.md",
+      "content": "# Harbor Ledger 2.4.0\n\n发布日期为 2026-07-14。该版本加入增量同步和离线校验，但存在两个已知问题：重试时可能重复发送 webhook；索引缓存可能在连续导入后增长。升级要求 `index_version=4`。"
+    },
+    "release_241": {
+      "filename": "harbor-release-2.4.1.md",
+      "content": "# Harbor Ledger 2.4.1\n\n发布日期为 2026-07-19，这是对 2.4.0 的修复版本。它修复了重复 webhook 和索引缓存泄漏，并把最低配置要求提高为 `index_version=5`。该公告明确取代 2.4.0 的部署建议。"
+    },
+    "meeting_july": {
+      "filename": "glacier-meeting-july.md",
+      "content": "# Glacier 存储迁移会 · 7 月草案\n\n草案建议负责人为林岚，完成日期为 2026-09-12，预算 36 万元。会议记录注明这些内容尚待架构委员会确认。"
+    },
+    "decision_august": {
+      "filename": "glacier-decision-august.md",
+      "content": "# Glacier 存储迁移 · 8 月最终决议\n\n架构委员会最终决定负责人改为周屿，完成日期调整为 2026-09-18，批准预算为 34 万元。本文明确取代 7 月草案；其余未写明事项保持不变。"
+    },
+    "catalog": {
+      "filename": "cedar-device-catalog.md",
+      "content": "# Cedar 边缘设备目录\n\nCedar Mini 配备 32 GB 内存，典型功耗 18 W，含税价 2490 元，保修两年。Cedar Pro 配备 64 GB 内存，典型功耗 35 W，含税价 4290 元，保修三年。只有 Cedar Pro 支持双 10GbE；两款设备都不含无线模块。目录没有提供销量、毛利率或供应商名称。"
+    },
+    "incident": {
+      "filename": "indigo-incident-042.md",
+      "content": "# Indigo 事件 042\n\n09:12 监控首次报警；09:18 流量切换到备用集群；09:27 主服务恢复；09:41 宣布事件结束。根因是证书轮换任务遗漏节点 `blue-3`。整改负责人为严朔，整改截止日为 2026-09-06，措施是在轮换清单中加入节点枚举校验。"
+    }
+  },
+  "cases": [
+    {
+      "case_id": "rag_001_endpoint",
+      "category": "single_fact",
+      "documents": ["orion"],
+      "turns": [{"question": "北辰中继监听哪个端口，健康检查路径是什么？", "must_include_all": ["7443", "/readyz"]}]
+    },
+    {
+      "case_id": "rag_002_storage",
+      "category": "single_fact",
+      "documents": ["orion"],
+      "turns": [{"question": "对话数据库保存在哪里，备份保留多少天？", "must_include_all": ["/srv/polaris/data/dialogues.db", "14天"]}]
+    },
+    {
+      "case_id": "rag_003_deploy_order",
+      "category": "multi_section",
+      "documents": ["orion"],
+      "turns": [{"question": "按顺序说明北辰中继上线的四个步骤。", "must_include_all": ["数据库快照", "部署reader", "预热模型", "切换反向代理"]}]
+    },
+    {
+      "case_id": "rag_004_rollback",
+      "category": "multi_section",
+      "documents": ["orion"],
+      "turns": [{"question": "触发回滚的两个独立条件是什么，使用哪个镜像？", "must_include_all": ["1800毫秒", "2%", "polaris-reader:2.7.4"]}]
+    },
+    {
+      "case_id": "rag_005_hotel",
+      "category": "single_fact",
+      "documents": ["travel"],
+      "turns": [{"question": "上海与其他中国大陆城市的住宿上限分别是多少？", "must_include_all": ["680元", "520元"]}]
+    },
+    {
+      "case_id": "rag_006_taxi",
+      "category": "rule_reasoning",
+      "documents": ["travel"],
+      "turns": [{"question": "什么情况下允许乘出租车？两个条件必须同时满足吗？", "must_include_all": ["22:30", "12千克"], "must_include_any": ["不要求同时满足", "任一条件"]}]
+    },
+    {
+      "case_id": "rag_007_exception",
+      "category": "rule_reasoning",
+      "documents": ["travel"],
+      "turns": [{"question": "超标准差旅由谁批准，批准代号是什么？直属经理能替代吗？", "must_include_all": ["财务责任人", "Mica-7"], "must_include_any": ["不能替代", "不可以替代"]}]
+    },
+    {
+      "case_id": "rag_008_sample",
+      "category": "table_lookup",
+      "documents": ["study"],
+      "turns": [{"question": "Aster-9 使用多少条工单，每套方案运行多少次查询？", "must_include_all": ["12000条", "480次"]}]
+    },
+    {
+      "case_id": "rag_009_recall",
+      "category": "table_lookup",
+      "documents": ["study"],
+      "turns": [{"question": "哪套方案的 Recall@5 最高，数值是多少？", "must_include_all": ["Lumen", "78.6%"]}]
+    },
+    {
+      "case_id": "rag_010_constraint",
+      "category": "table_reasoning",
+      "documents": ["study"],
+      "turns": [{"question": "在 Recall@5 高于 75% 的方案中，谁的 P95 延迟最低？给出召回率和延迟。", "must_include_all": ["Fjord", "76.1%", "610ms"]}]
+    },
+    {
+      "case_id": "rag_011_limit",
+      "category": "multi_section",
+      "documents": ["study"],
+      "turns": [{"question": "为什么这项实验不能直接外推到长文档生产场景？", "must_include_all": ["短查询", "8000字符"], "must_include_any": ["没有真人用户流量", "未测试真人用户流量"]}]
+    },
+    {
+      "case_id": "rag_012_release",
+      "category": "multi_document",
+      "documents": ["release_240", "release_241"],
+      "turns": [{"question": "两份发布说明中应采用哪个部署版本、发布日期和最低 index_version？", "must_include_all": ["2.4.1", "2026-07-19", "index_version=5"]}]
+    },
+    {
+      "case_id": "rag_014_final_decision",
+      "category": "conflict_resolution",
+      "documents": ["meeting_july", "decision_august"],
+      "turns": [{"question": "Glacier 迁移的最终负责人、完成日期和预算分别是什么？", "must_include_all": ["周屿", "2026-09-18", "34万元"], "must_not_include": ["林岚是最终负责人"]}]
+    },
+    {
+      "case_id": "rag_015_decision_delta",
+      "category": "conflict_resolution",
+      "documents": ["meeting_july", "decision_august"],
+      "turns": [{"question": "8 月最终决议相对 7 月草案改变了哪三项？", "must_include_all": ["林岚", "周屿", "2026-09-12", "2026-09-18", "36万元", "34万元"]}]
+    },
+    {
+      "case_id": "rag_016_catalog",
+      "category": "comparison",
+      "documents": ["catalog"],
+      "turns": [{"question": "比较 Cedar Mini 与 Cedar Pro 的内存、功耗、价格和保修期。", "must_include_all": ["32GB", "18W", "2490元", "两年", "64GB", "35W", "4290元", "三年"]}]
+    },
+    {
+      "case_id": "rag_017_incident",
+      "category": "timeline",
+      "documents": ["incident"],
+      "turns": [{"question": "概括 Indigo 042 从报警到恢复的时间线，并说明根因。", "must_include_all": ["09:12", "09:18", "09:27", "blue-3"]}]
+    },
+    {
+      "case_id": "rag_018_unanswerable",
+      "category": "unanswerable",
+      "documents": ["catalog"],
+      "turns": [{"question": "Cedar Pro 去年的销量和毛利率是多少？", "must_include_any": ["没有提供", "未提供", "未提及", "无法从", "没有说明"], "must_not_include": ["1000台", "20%"]}]
+    },
+    {
+      "case_id": "rag_019_broad_summary",
+      "category": "broad_summary",
+      "documents": ["orion"],
+      "turns": [{"question": "总结这份部署文档的端点、上线顺序和回滚原则。", "must_include_all": ["7443", "数据库快照", "预热模型", "1800毫秒", "polaris-reader:2.7.4"]}]
+    },
+    {
+      "case_id": "rag_020_multiturn",
+      "category": "multi_turn",
+      "documents": ["meeting_july", "decision_august"],
+      "turns": [
+        {"question": "最终决议指定的负责人是谁？", "must_include_all": ["周屿"]},
+        {"question": "他的完成日期是什么时候，比草案晚了几天？", "must_include_all": ["2026-09-18", "6天"]}
+      ]
+    }
+  ]
+}
