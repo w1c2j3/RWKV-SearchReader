@@ -1598,6 +1598,39 @@ def test_point_branches_are_aggregated_once_before_the_final_summary() -> None:
             assert prompt.rstrip().endswith(cue)
 
 
+def test_retrieval_point_aggregate_retries_with_smaller_context_budget() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    requested: list[int] = []
+
+    def complete(user, *, max_tokens, stage):
+        del user
+        assert stage == "aggregate"
+        requested.append(max_tokens)
+        if len(requested) == 1:
+            raise SearchReaderError(
+                "aggregate",
+                "maximum context length is 16384 tokens. However, you requested "
+                "2048 output tokens and your prompt contains at least 14337 input tokens",
+            )
+        return "# 原神\n原神事实 [S1]\n# 绝区零\n绝区零事实 [S2]"
+
+    reader._complete = complete
+    material = (
+        '[[' + '"S1"], "检索点：原神\\n原神事实 [S1]"]\n'
+        '[[' + '"S2"], "检索点：绝区零\\n绝区零事实 [S2]"]'
+    )
+    aggregated, warnings = reader._aggregate_retrieval_points(
+        "比较两个游戏", material, ["原神", "绝区零"]
+    )
+
+    assert requested == [2048, 1024]
+    assert "原神事实 [S1]" in aggregated
+    assert "绝区零事实 [S2]" in aggregated
+    assert warnings == [
+        "aggregate output budget reduced to 1024 tokens to fit context"
+    ]
+
+
 def test_field_bound_final_uses_only_atomic_field_records() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     rows = _evidence(2)

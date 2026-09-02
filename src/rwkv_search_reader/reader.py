@@ -3338,15 +3338,32 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 问题：{question}
 将以上分支总结整理成一份汇总材料。只保留这些检索点：{point_list}。每个检索点单独成段，保留名称、事实和 [S1] 来源编号；不新增对象，不回答问题，不改变事实归属。只输出汇总材料。
 汇总材料："""
-        output = self._complete(
-            user,
-            max_tokens=min(self.settings.rwkv_max_tokens, 2048),
-            stage="aggregate",
-        )
-        aggregated = _clean_final_answer(output)
         warnings: list[str] = []
+        requested_tokens = min(self.settings.rwkv_max_tokens, 2048)
+        output_tokens = requested_tokens
+        for attempt in range(4):
+            try:
+                output = self._complete(
+                    user,
+                    max_tokens=output_tokens,
+                    stage="aggregate",
+                )
+                break
+            except SearchReaderError as exc:
+                retry_tokens = _context_retry_tokens(str(exc), output_tokens)
+                if retry_tokens is None or attempt == 3:
+                    raise
+                output_tokens = retry_tokens
+        if output_tokens != requested_tokens:
+            warnings.append(
+                f"aggregate output budget reduced to {output_tokens} tokens to fit context"
+            )
+        aggregated = _clean_final_answer(output)
         if not aggregated:
-            return material, ["retrieval-point aggregation returned empty material"]
+            return material, [
+                *warnings,
+                "retrieval-point aggregation returned empty material",
+            ]
         unsupported = _unsupported_summary_numbers(aggregated, material)
         if unsupported:
             values = ", ".join(sorted(unsupported))
