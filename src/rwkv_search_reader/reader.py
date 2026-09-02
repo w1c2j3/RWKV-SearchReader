@@ -8,7 +8,7 @@ import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
@@ -27,6 +27,10 @@ from .models import (
 )
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_SEMANTIC_VERSION_RE = re.compile(
+    r"(?<![\w.])v?(?P<version>\d+\.\d+\.\d+(?:[-+][0-9a-z.-]+)?)(?![\w.])",
+    flags=re.IGNORECASE,
+)
 _SCIENTIFIC_RE = re.compile(
     r"(?P<coefficient>[+-]?\d+(?:\.\d+)?)\s*"
     r"(?:[eE]\s*|(?:\\(?:times|cdot)|[×*])\s*10\s*\^\s*\{?\s*)"
@@ -62,6 +66,32 @@ _NUMBER_SCALES = {
     "billions": Decimal(1000000000),
     "trillion": Decimal(1000000000000),
     "trillions": Decimal(1000000000000),
+}
+_ENGLISH_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
 }
 _CONTEXT_REFERENCE_RE = re.compile(
     r"它|它们|他们|她们|这个|那个|这些|那些|这两个|那两个|二者|两者|上述|前者|后者|"
@@ -197,6 +227,15 @@ def _normalize_numeric_markup(value: str) -> str:
     text = text.replace(r"\%", "%")
     text = re.sub(r"(?<=\d)\s*\{\s*,\s*\}\s*(?=\d{3}(?:\D|$))", ",", text)
     text = re.sub(r"(?<=\d)\\,\s*(?=\d{3}(?:\D|$))", ",", text)
+    month_names = "|".join(
+        re.escape(name) for name in sorted(_ENGLISH_MONTHS, key=len, reverse=True)
+    )
+    text = re.sub(
+        rf"\b({month_names})\.?(?=\s+\d{{1,2}}\b)",
+        lambda match: str(_ENGLISH_MONTHS[match.group(1).casefold()]),
+        text,
+        flags=re.IGNORECASE,
+    )
 
     def replace_fraction(match: re.Match[str]) -> str:
         try:
@@ -267,6 +306,97 @@ def _unsupported_summary_numbers(summary: str, material: str) -> set[str]:
     }
 
 
+def _normalized_full_dates(value: str) -> set[str]:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    dates: set[str] = set()
+    for match in re.finditer(
+        r"(?<!\d)(20\d{2})\s*(?:年|[-/.])\s*(1[0-2]|0?[1-9])"
+        r"\s*(?:月|[-/.])\s*(3[01]|[12]\d|0?[1-9])\s*日?",
+        text,
+    ):
+        year, month, day = (int(part) for part in match.groups())
+        try:
+            dates.add(date(year, month, day).isoformat())
+        except ValueError:
+            continue
+    month_names = "|".join(
+        re.escape(name) for name in sorted(_ENGLISH_MONTHS, key=len, reverse=True)
+    )
+    for match in re.finditer(
+        rf"\b({month_names})\.?\s+(3[01]|[12]\d|0?[1-9])(?:st|nd|rd|th)?"
+        rf",?\s+(20\d{{2}})\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        month_name, day, year = match.groups()
+        try:
+            dates.add(
+                date(
+                    int(year), _ENGLISH_MONTHS[month_name.casefold()], int(day)
+                ).isoformat()
+            )
+        except ValueError:
+            continue
+    return dates
+
+
+def _normalized_semantic_versions(value: str) -> set[str]:
+    return {
+        match.group("version").casefold()
+        for match in _SEMANTIC_VERSION_RE.finditer(str(value or ""))
+    }
+
+
+def _unsupported_summary_bindings(summary: str, material: str) -> set[str]:
+    unsupported = _unsupported_summary_numbers(summary, material)
+    unsupported_versions = (
+        _normalized_semantic_versions(summary)
+        - _normalized_semantic_versions(material)
+    )
+    for version in unsupported_versions:
+        unsupported.difference_update(
+            _decimal_key(Decimal(part))
+            for part in re.findall(r"\d+", version)
+        )
+        unsupported.add(f"version:{version}")
+    unsupported.update(
+        f"date:{date}"
+        for date in (_normalized_full_dates(summary) - _normalized_full_dates(material))
+    )
+    return unsupported
+
+
+def _requested_date_difference_material(material: str, question: str) -> str:
+    """Return deterministic date intervals only when the question asks for one."""
+
+    if not re.search(r"几天|相差|间隔|提前|推迟|早了|晚了", question):
+        return ""
+    parsed_dates = sorted(
+        date.fromisoformat(value) for value in _normalized_full_dates(material)
+    )
+    intervals = [
+        (left, right, abs((right - left).days))
+        for index, left in enumerate(parsed_dates)
+        for right in parsed_dates[index + 1 :]
+    ][:20]
+    return "\n".join(
+        f"日期计算：{left.isoformat()} 至 {right.isoformat()} 相差 {days} 天。"
+        for left, right, days in intervals
+    )
+
+
+def _final_validation_material(material: str, question: str) -> str:
+    """Include question constants and explicitly requested date arithmetic.
+
+    The final reader may legitimately repeat an identifier from the question, or
+    use a deterministic day interval derived from two dates in the evidence.
+    Neither case is a newly invented number.
+    """
+
+    derived = _requested_date_difference_material(material, question)
+    return f"{material}\n{derived}\n用户问题：{question}".strip()
+
+
 def _remove_unsupported_number_sentences(summary: str, material: str) -> str:
     """Keep supported parts of a summary instead of discarding the whole page."""
 
@@ -281,7 +411,7 @@ def _remove_unsupported_number_sentences(summary: str, material: str) -> str:
             sentence.strip()
             for sentence in re.split(r"(?<=[。！？!?；;])\s*", content)
             if sentence.strip()
-            and not _unsupported_summary_numbers(sentence, material)
+            and not _unsupported_summary_bindings(sentence, material)
         ]
         if kept:
             lines.append(f"{prefix}{''.join(kept)}".rstrip())
@@ -509,8 +639,9 @@ def _bind_atomic_citations(
             citations = "".join(f"[{source_id}]" for source_id in matched_ids)
             parts[index] = f"{plain.rstrip()} {citations}"
         else:
-            # Never retain a model-invented citation.
-            parts[index] = plain
+            # The general citation pass already removed unknown sources. Keep
+            # citations for facts outside the atomic field plan.
+            parts[index] = clause
     return "".join(parts)
 
 
@@ -1191,6 +1322,12 @@ def _clean_final_answer(value: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(
+        r"\s*[（(]\s*来源\s*S\d+\s*[)）]",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
         r"([。！？!?；;])\s*((?:\[S\d+\])+)",
         r" \2\1",
         text,
@@ -1356,12 +1493,14 @@ def _parse_research_plan_output(
             subject = ""
         if question in prompt_placeholders:
             question = ""
-        fields = [
-            " ".join(str(item).split()).strip()[:80]
-            for item in (raw.get("fields") or raw.get("required_fields") or [])
-            if " ".join(str(item).split()).strip()
-            not in prompt_placeholders
-        ][:8]
+        fields: list[str] = []
+        for item in raw.get("fields") or raw.get("required_fields") or []:
+            if isinstance(item, dict):
+                item = item.get("field") or item.get("name") or ""
+            field_name = " ".join(str(item).split()).strip()[:80]
+            if field_name and field_name not in prompt_placeholders:
+                fields.append(field_name)
+        fields = fields[:8]
         if subject or question:
             records.append(
                 ResearchRecord(
@@ -1380,6 +1519,13 @@ def _parse_research_plan_output(
             if " ".join(str(item).split()).strip()
         )
     )[:max_queries]
+    direct_urls = list(
+        dict.fromkeys(
+            " ".join(str(item).split()).strip()[:2000]
+            for item in (payload.get("urls") or [])
+            if " ".join(str(item).split()).strip()
+        )
+    )[:10]
     goal = " ".join(str(payload.get("goal") or fallback_question).split()).strip()
     clarification = " ".join(str(payload.get("clarification") or "").split()).strip()[
         :1200
@@ -1398,8 +1544,10 @@ def _parse_research_plan_output(
         decision="search",
         goal=goal or fallback_question,
         records=records,
-        queries=queries or [fallback_question],
+        queries=queries or ([] if direct_urls else [fallback_question]),
         scope_mode=scope_mode,
+        direct_urls=direct_urls,
+        fallback=not queries,
     )
 
 
@@ -1750,10 +1898,10 @@ class RWKVReader:
         user = f"""当前日期：{_today()}
 问题：{question}
 
-把问题转换为检索计划。decision 只能是 search 或 clarify；公开信息用 search，只有指代无法确定时用 clarify。scope_mode 只能是 fixed 或 discover；明确列出的对象用 fixed，要求某主体旗下或某类别的多个对象但没有逐一列名时用 discover，records 留空。保留问题中的字段，最多生成 {self.settings.research_plan_max_queries} 个检索词。
+列出待检索的对象和字段，不回答问题。decision 只能是 search 或 clarify，scope_mode 只能是 fixed 或 discover。records 按具体对象组织，同一对象只写一条。fields 必须是用户所问字段名称的字符串数组，不填写值。未列名的一类对象用 discover，records 留空。用户原文已有的网址放进 urls。
 只输出 JSON：
-{{"decision":"","scope_mode":"","goal":"","records":[{{"subject":"","question":"","fields":[]}}],"queries":[],"clarification":""}}
-检索计划 JSON："""
+{{"decision":"search","scope_mode":"fixed","goal":"","records":[{{"subject":"","question":"","fields":[""]}}],"urls":[],"clarification":""}}
+待检索项 JSON："""
         output = self._complete(user, max_tokens=768, stage="plan")
         plan = _parse_research_plan_output(
             output,
@@ -1823,8 +1971,131 @@ class RWKVReader:
                     plan.fallback = True
             plan.scope_mode = "discover"
             plan.records = []
-        self._anchor_research_queries(question, plan)
+        elif plan.decision == "search" and plan.fallback:
+            try:
+                designed_queries, designed_points = self.design_record_queries(
+                    question,
+                    plan.records,
+                    plan.direct_urls,
+                )
+            except SearchReaderError:
+                if not plan.queries and not plan.direct_urls:
+                    plan.queries = [question]
+            else:
+                if designed_queries or plan.direct_urls:
+                    plan.queries = designed_queries
+                    plan.retrieval_points = designed_points
+                    plan.fallback = False
         return plan
+
+    def design_record_queries(
+        self,
+        question: str,
+        records: list[ResearchRecord],
+        direct_urls: list[str],
+    ) -> tuple[list[str], list[str]]:
+        """Give RWKV one job: turn planned records into retrieval branches."""
+
+        material = json.dumps(
+            [
+                {
+                    "subject": record.subject,
+                    "question": record.question,
+                    "fields": list(record.fields),
+                }
+                for record in records
+            ],
+            ensure_ascii=False,
+        )
+        url_note = (
+            f"\n已有网址：{json.dumps(direct_urls, ensure_ascii=False)}"
+            if direct_urls
+            else ""
+        )
+        if direct_urls:
+            assessment_user = f"""{material}{url_note}
+
+问题：{question}
+只判断用户是否还明确要求搜索、核实或比较这个网址以外的其他来源。明确要求了只输出 YES，否则只输出 NO。不要回答问题，不判断网页内容。
+判断："""
+            assessment = self._complete(
+                assessment_user,
+                max_tokens=64,
+                stage="search_design",
+            )
+            if _normalized_text(assessment) in {"no", "urlonly", "url_only"}:
+                return [], []
+        requests = [
+            "每个 fields 字段分别设计一个检索分支。每个检索词都保留对象名称以及问题中的当前、最新和日期等限定词。",
+            "覆盖所有 fields，为每一个不同待查点写检索词；保留对象名和用户的限定词。",
+            "逐项设计检索词，一个字段一个分支，不删除对象名称、当前或最新。",
+        ]
+        prompts = [
+            f"""{material}{url_note}
+
+问题：{question}
+{request}不回答问题；如果已有网址足以完成要求，points 输出空数组。最多 {self.settings.research_plan_max_queries} 个分支。
+只输出 JSON：{{"points":[["检索点","检索词"]]}}
+检索分支 JSON："""
+            for request in requests
+        ]
+
+        def design(user: str) -> list[tuple[str, str]]:
+            output = self._complete(user, max_tokens=512, stage="search_design")
+            payload = _json_object_from_output(output, "search_design")
+            rows: list[tuple[str, str]] = []
+            for item in payload.get("points") or []:
+                if isinstance(item, dict):
+                    point = " ".join(str(item.get("name") or "").split()).strip()
+                    query = " ".join(str(item.get("query") or "").split()).strip()
+                elif isinstance(item, list) and len(item) >= 2:
+                    point = " ".join(str(item[0]).split()).strip()
+                    query = " ".join(str(item[1]).split()).strip()
+                else:
+                    continue
+                if (
+                    point
+                    and query
+                    and point not in {"检索点", "名称"}
+                    and query not in {"检索词", "查询"}
+                ):
+                    rows.append((point[:160], query[:800]))
+            return list(dict.fromkeys(rows))[
+                : self.settings.research_plan_max_queries
+            ]
+
+        candidates: dict[int, list[tuple[str, str]]] = {}
+        with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
+            futures = {
+                pool.submit(design, prompt): index
+                for index, prompt in enumerate(prompts)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    candidates[index] = future.result()
+                except SearchReaderError:
+                    continue
+        if not candidates:
+            raise SearchReaderError(
+                "search_design", "RWKV returned no usable search design"
+            )
+        if direct_urls and any(not rows for rows in candidates.values()):
+            designed: list[tuple[str, str]] = []
+        else:
+            selected_index = max(
+                candidates,
+                key=lambda index: (
+                    len({point for point, _query in candidates[index]}),
+                    len(candidates[index]),
+                    -index,
+                ),
+            )
+            designed = candidates[selected_index]
+        return (
+            [query for _point, query in designed],
+            [point for point, _query in designed],
+        )
 
     def design_search_points(
         self,
@@ -1960,24 +2231,6 @@ class RWKVReader:
                 "search_design", "RWKV returned no usable search points"
             )
         return queries, [point_by_query[query] for query in queries]
-
-    def _anchor_research_queries(
-        self, question: str, plan: ResearchPlan
-    ) -> ResearchPlan:
-        """Add current-time terms without changing the model-selected scope."""
-
-        if plan.decision == "search" and _recency_requested(question):
-            current = datetime.now().astimezone()
-            anchor = f"{current.year}年{current.month}月"
-            anchored: list[str] = []
-            for query in plan.queries:
-                if str(current.year) not in query:
-                    query = f"{query} {anchor} 最新"
-                if re.search(r"版本|福利|活动|活動", f"{question} {query}"):
-                    query = f"{query} 官方 更新公告 活动"
-                anchored.append(" ".join(query.split()))
-            plan.queries = anchored
-        return plan
 
     def discover_research_scope(
         self, question: str, sources: list[SearchHit]
@@ -2175,7 +2428,7 @@ class RWKVReader:
         plan.records = records
         plan.queries = queries
         plan.clarification = ""
-        return self._anchor_research_queries(question, plan)
+        return plan
 
     @staticmethod
     def prior_facts(history: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -2335,6 +2588,10 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         ][: self.settings.review_max_queries]
         if audit.sufficient and missing_queries:
             return EvidenceAudit(sufficient=False, queries=missing_queries)
+        if field_selections and all(
+            item.status == "supported" for item in field_selections
+        ):
+            return EvidenceAudit(sufficient=True)
         return audit
 
     def _extract_one_field(
@@ -2349,12 +2606,14 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         material = f"{evidence.title}\n{evidence.claim}".strip()
         if re.search(r"日期|时间|上线|发布|上市", field):
             request = (
-                f"复制明确写着{record.subject}{field}的完整原句。"
+                f"待查项是“{record.subject}：{record.question}”。"
+                f"复制明确写着字段“{field}”的完整原句。"
                 "相关活动、申购日期不算；没有则输出 NONE。"
             )
         else:
             request = (
-                f"复制{record.subject}的{field}，只保留包含答案的最短原句。"
+                f"待查项是“{record.subject}：{record.question}”。"
+                f"复制字段“{field}”的值，只保留包含答案的最短原句。"
                 "没有则输出 NONE。"
             )
         output = self._complete(
@@ -2372,7 +2631,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 fact = titled
         if not _copied_fact_supported(fact, material):
             return None
-        unsupported = _unsupported_summary_numbers(fact, material)
+        unsupported = _unsupported_summary_bindings(fact, material)
         if unsupported:
             values = ", ".join(sorted(unsupported))
             raise SearchReaderError(
@@ -2450,7 +2709,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             source_ids=source_ids,
         )
 
-    def _resolve_record_fields(
+    def _resolve_record_fields_together(
         self,
         question: str,
         record: ResearchRecord,
@@ -2478,6 +2737,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     {
                         "subject": candidate.subject,
                         "field": candidate.field,
+                        "source": candidate.title,
                         "fact": candidate.fact,
                     },
                 ],
@@ -2545,6 +2805,14 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     if str(item or "").strip().upper() in allowed
                 )
             )
+            source_ids = [
+                source_id
+                for source_id in source_ids
+                if _copied_fact_supported(
+                    fact,
+                    f"{allowed[source_id].title} {allowed[source_id].fact}",
+                )
+            ]
             if not source_ids:
                 signature = _field_fact_signature(field, fact)
                 source_ids = [
@@ -2558,7 +2826,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 f"{allowed[source_id].title} {allowed[source_id].fact}"
                 for source_id in source_ids
             )
-            if _unsupported_summary_numbers(fact, support_material):
+            if _unsupported_summary_bindings(fact, support_material):
                 continue
             if not _copied_fact_supported(fact, support_material):
                 continue
@@ -2619,6 +2887,156 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             selections.append(options[0])
         return selections
 
+    def _resolve_record_fields(
+        self,
+        question: str,
+        record: ResearchRecord,
+        candidates_by_field: dict[str, list[_FieldFactCandidate]],
+        prior_facts: list[dict[str, object]] | None = None,
+    ) -> list[FieldEvidenceSelection]:
+        """Resolve each field in its own concurrent RWKV call."""
+
+        record_subject = _normalized_text(record.subject)
+        relevant_prior = [
+            item
+            for item in (prior_facts or [])
+            if record_subject
+            and (
+                record_subject in _normalized_text(str(item.get("subject") or ""))
+                or _normalized_text(str(item.get("subject") or "")) in record_subject
+            )
+        ]
+        next_version_requested = bool(re.search(r"下一个|下一版|后续版本", question))
+        prior_versions = [
+            version
+            for item in relevant_prior
+            if (version := _version_order(str(item.get("fact") or "")))
+        ]
+
+        def resolve(field: str) -> FieldEvidenceSelection:
+            candidates = candidates_by_field.get(field, [])
+            fallback = self._fallback_field_selection(record, field, candidates)
+            if not candidates:
+                return fallback
+            material = "\n".join(
+                json.dumps(
+                    [
+                        [candidate.source_id],
+                        {
+                            "source": candidate.title,
+                            "fact": candidate.fact,
+                        },
+                    ],
+                    ensure_ascii=False,
+                )
+                for candidate in candidates
+            )
+            prior_material = json.dumps(relevant_prior[:8], ensure_ascii=False)
+            temporal = ""
+            if next_version_requested:
+                temporal = "选择晚于此前已确认版本的记录；没有就输出空 fact。"
+            elif _recency_requested(question):
+                temporal = "选择当前日期前已经生效且时间最新的同一条记录。"
+            user = f"""{material}
+
+此前已确认：{prior_material}
+当前日期：{_today()}
+待查项：{record.subject}；{record.question}
+字段：{field}
+从以上候选中确定这个字段的一个值。{temporal}不要拼接不同候选；无法确定就输出空 fact。
+只输出 JSON：{{"fact":"","source_ids":[]}}
+字段 JSON："""
+            output = self._complete(user, max_tokens=384, stage="evidence_resolve")
+            payload = _json_object_from_output(output, "evidence_resolve")
+            raw_fact: object = payload.get("fact") or ""
+            raw_source_ids: object = payload.get("source_ids") or []
+            if not raw_fact and isinstance(payload.get("facts"), list):
+                first = next(
+                    (
+                        item
+                        for item in payload["facts"]
+                        if isinstance(item, dict)
+                        and _normalized_text(str(item.get("field") or field))
+                        == _normalized_text(field)
+                    ),
+                    None,
+                )
+                if first:
+                    raw_fact = first.get("fact") or ""
+                    raw_source_ids = first.get("source_ids") or []
+            fact = " ".join(str(raw_fact).split()).strip()[:500]
+            if not fact:
+                return fallback
+            allowed = {candidate.source_id: candidate for candidate in candidates}
+            source_ids = list(
+                dict.fromkeys(
+                    str(item or "").strip().upper()
+                    for item in (
+                        raw_source_ids
+                        if isinstance(raw_source_ids, list)
+                        else [raw_source_ids]
+                    )
+                    if str(item or "").strip().upper() in allowed
+                )
+            )
+            source_ids = [
+                source_id
+                for source_id in source_ids
+                if _copied_fact_supported(
+                    fact,
+                    f"{allowed[source_id].title} {allowed[source_id].fact}",
+                )
+            ]
+            if not source_ids:
+                source_ids = [
+                    candidate.source_id
+                    for candidate in candidates
+                    if _copied_fact_supported(
+                        fact, f"{candidate.title} {candidate.fact}"
+                    )
+                ]
+            if not source_ids:
+                return fallback
+            support_material = " ".join(
+                f"{allowed[source_id].title} {allowed[source_id].fact}"
+                for source_id in source_ids
+            )
+            if _unsupported_summary_bindings(fact, support_material):
+                return fallback
+            if next_version_requested and re.search(r"版本", field):
+                candidate_version = _version_order(fact)
+                if (
+                    prior_versions
+                    and candidate_version
+                    and candidate_version <= max(prior_versions)
+                ):
+                    return FieldEvidenceSelection(
+                        subject=record.subject,
+                        field=field,
+                        source_id="",
+                        status="missing",
+                        fact="材料未给出晚于此前已确认记录的下一个版本。",
+                    )
+            return FieldEvidenceSelection(
+                subject=record.subject,
+                field=field,
+                source_id=source_ids[0],
+                status="supported",
+                fact=_narrow_selected_fact(field, fact),
+                source_ids=source_ids,
+            )
+
+        workers = min(self.settings.rwkv_summary_workers, max(1, len(record.fields)))
+        resolved: dict[int, FieldEvidenceSelection] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(resolve, field): index
+                for index, field in enumerate(record.fields)
+            }
+            for future in as_completed(futures):
+                resolved[futures[future]] = future.result()
+        return [resolved[index] for index in range(len(record.fields))]
+
     def select_evidence(
         self,
         question: str,
@@ -2649,11 +3067,13 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             for field in record.fields:
                 ranked = sorted(
                     related,
-                    key=lambda item: _source_relevance(
-                        f"{record.subject} {field}", item
+                    key=lambda item: (
+                        _normalized_text(field)
+                        in _normalized_text(item.retrieval_point),
+                        _source_relevance(f"{record.subject} {field}", item),
                     ),
                     reverse=True,
-                )[:4]
+                )[:10]
                 for item in ranked:
                     cache_key = (
                         _normalized_text(record.subject),
@@ -2793,17 +3213,17 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 )
         return selections, warnings
 
-    def _summarize_one(self, _question: str, chunk: DocumentChunk) -> Evidence:
+    def _summarize_one(self, question: str, chunk: DocumentChunk) -> Evidence:
         material = chunk.text[: self.settings.max_evidence_chars].strip()
-        focus = chunk.retrieval_query or chunk.retrieval_point
+        point = chunk.retrieval_point or chunk.retrieval_query
         instruction = (
-            f"总结以上网页中与检索词“{focus}”有关的内容。"
-            if focus
+            f"总结以上网页中与检索点“{point}”有关、可用于回答“{question}”的内容。"
+            if point
             else "总结以上网页内容。"
         )
         user = f"""{material}
 
-{instruction}
+{instruction}只复述同一条记录明确对应的值，不把不同表格行、版本或对象的信息拼在一起；网页有表格时保留相关的完整行。
 网页摘要："""
         output = self._complete(
             user,
@@ -2821,7 +3241,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             summary = _remove_copied_temporal_qualifiers(
                 summary, f"{chunk.title}\n{material}"
             )
-        unsupported = _unsupported_summary_numbers(
+        unsupported = _unsupported_summary_bindings(
             summary, material
         )
         if unsupported:
@@ -2972,7 +3392,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 raise SearchReaderError(
                     "reduce", "RWKV returned only foreign retrieval points"
                 )
-        unsupported = _unsupported_summary_numbers(summary, material)
+        unsupported = _unsupported_summary_bindings(
+            summary, f"{material}\n当前日期：{_today()}"
+        )
         if unsupported:
             values = ", ".join(sorted(unsupported))
             raise SearchReaderError(
@@ -3011,35 +3433,36 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             for source_id in node.source_ids
             if source_id in evidence_by_id
         ]
+        requirement = _branch_requirement(
+            node.source_ids, evidence_by_id, node.retrieval_point
+        )
         direct_anchors = sorted(
             branch_sources,
             key=lambda item: (
+                _source_relevance(requirement, item),
+                item.source_relation == "official",
+                item.score,
                 _latest_effective_material_timestamp(
                     f"{item.published_date} {item.claim}"
                 ),
-                item.source_relation == "official",
-                item.score,
             ),
         )[-4:]
         anchor_nodes = [
             _MaterialNode(
                 source_ids=(item.source_id,),
-                summary=item.claim[:1200],
+                summary=f"{item.title}\n{item.claim}"[:1200],
                 retrieval_point=node.retrieval_point,
             )
             for item in direct_anchors
             if len(node.source_ids) > 1
         ]
         material = _render_material_nodes([node, *anchor_nodes])
-        requirement = _branch_requirement(
-            node.source_ids, evidence_by_id, node.retrieval_point
-        )
         user = f"""{material}
 
 当前日期：{_today()}
 当前检索点：{node.retrieval_point}
 检索要求：{requirement}
-把以上材料总结为这个检索点的最终分支，不超过 {target_chars} 个字符。当前状态选择已经生效且时间最晚的信息；旧信息和未来预告不算当前状态。只写当前检索点并保留事实后的 [S1] 来源编号。
+把以上材料总结为这个检索点的最终分支，不超过 {target_chars} 个字符。只保留直接回答检索要求的最终事实；当前状态选择已经生效且时间最晚的信息，删除旧记录、未来预告和说明。只写当前检索点并保留事实后的 [S1] 来源编号。
 {node.retrieval_point}："""
         output = self._complete(
             user,
@@ -3054,7 +3477,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             raise SearchReaderError(
                 "branch_finalize", "RWKV returned an empty branch summary"
             )
-        unsupported = _unsupported_summary_numbers(summary, material)
+        unsupported = _unsupported_summary_bindings(
+            summary, f"{material}\n当前日期：{_today()}"
+        )
         if unsupported:
             values = ", ".join(sorted(unsupported))
             raise SearchReaderError(
@@ -3100,15 +3525,17 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         question: str,
         evidence: list[Evidence],
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
+        max_chars: int | None = None,
     ) -> tuple[str, list[str], int]:
+        material_limit = max_chars or self.settings.rwkv_final_material_chars
         evidence_by_id = {item.source_id: item for item in evidence}
         nodes = [
             _MaterialNode(
                 source_ids=(item.source_id,),
                 summary=(
-                    f"{item.claim}\n发布时间：{item.published_date}"
+                    f"{item.title}\n{item.claim}\n发布时间：{item.published_date}"
                     if item.published_date
-                    else item.claim
+                    else f"{item.title}\n{item.claim}"
                 ),
                 retrieval_point=item.retrieval_point,
             )
@@ -3128,9 +3555,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 if point_bound_nodes
                 else len(nodes) <= final_node_target
             )
-            if (
-                structure_ready
-                and rendered_chars <= self.settings.rwkv_final_material_chars
+            if structure_ready and (
+                points_collapsed or rendered_chars <= material_limit
             ):
                 break
             level += 1
@@ -3145,7 +3571,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 compression_target = max(
                     160,
                     (
-                        self.settings.rwkv_final_material_chars - label_overhead
+                        material_limit - label_overhead
                     )
                     // max(1, len(nodes)),
                 )
@@ -3171,9 +3597,11 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 index: group[0]
                 for index, group in enumerate(groups)
                 if len(group) == 1
-                and (
-                    compression_target is None
-                    or len(group[0].summary) <= compression_target
+                and len(group[0].summary)
+                <= (
+                    compression_target
+                    if compression_target is not None
+                    else self.settings.rwkv_reduce_chunk_chars
                 )
             }
             next_nodes.update(singleton_groups)
@@ -3228,7 +3656,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                         per_node = max(
                             240,
                             self.settings.rwkv_reduce_chunk_chars
-                            // max(1, len(group))
+                            // max(2, len(group))
                             - 80,
                         )
                         node = _MaterialNode(
@@ -3272,7 +3700,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             )
             target_chars = max(
                 320,
-                (self.settings.rwkv_final_material_chars - label_overhead)
+                (material_limit - label_overhead)
                 // max(1, len(nodes)),
             )
             if on_progress:
@@ -3336,7 +3764,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         user = f"""{material}
 
 问题：{question}
-将以上分支总结整理成一份汇总材料。只保留这些检索点：{point_list}。每个检索点单独成段，保留名称、事实和 [S1] 来源编号；不新增对象，不回答问题，不改变事实归属。只输出汇总材料。
+将以上分支总结整理成一份汇总材料。只保留这些检索点：{point_list}。每个检索点单独成段，只保留该分支已经给出的最终值和 [S1] 来源编号；不新增对象，不回答问题，不改变事实归属。只输出汇总材料。
 汇总材料："""
         warnings: list[str] = []
         requested_tokens = min(self.settings.rwkv_max_tokens, 2048)
@@ -3364,7 +3792,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 *warnings,
                 "retrieval-point aggregation returned empty material",
             ]
-        unsupported = _unsupported_summary_numbers(aggregated, material)
+        unsupported = _unsupported_summary_bindings(
+            aggregated, f"{material}\n当前日期：{_today()}"
+        )
         if unsupported:
             values = ", ".join(sorted(unsupported))
             return material, [
@@ -3467,60 +3897,42 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             raise SearchReaderError("read", "there are no source summaries to combine")
         eligible = _eligible_evidence(question, evidence)
         ordered = _final_evidence_order(question, eligible)
-        use_atomic_records = bool(
-            evidence_selections
-            and _field_binding_applicable(question, research_records)
+        reduced_material, reduction_warnings, group_count = self._reduce_evidence(
+            question,
+            ordered,
+            on_progress=on_progress,
         )
-        if use_atomic_records:
-            selected_rows = list(evidence_selections or [])
-            reduced_material, material_truncated = _bounded_field_material(
-                selected_rows, self.settings.rwkv_final_material_chars
+        retrieval_points = list(
+            dict.fromkeys(
+                item.retrieval_point
+                for item in ordered
+                if item.retrieval_point
             )
-            reduction_warnings: list[str] = (
-                ["atomic field material was compacted to fit the final context"]
-                if material_truncated
-                else []
-            )
-            group_count = len(
-                {selection.subject for selection in selected_rows}
-            )
-        else:
-            reduced_material, reduction_warnings, group_count = self._reduce_evidence(
-                question, ordered, on_progress=on_progress
-            )
-            retrieval_points = list(
-                dict.fromkeys(
-                    item.retrieval_point
-                    for item in ordered
-                    if item.retrieval_point
+        )
+        if len(retrieval_points) > 1:
+            if on_progress:
+                on_progress(
+                    "aggregating",
+                    {
+                        "retrieval_points": retrieval_points,
+                        "branch_count": len(retrieval_points),
+                    },
                 )
+            reduced_material, aggregate_warnings = self._aggregate_retrieval_points(
+                question,
+                reduced_material,
+                retrieval_points,
             )
-            if len(retrieval_points) > 1:
-                if on_progress:
-                    on_progress(
-                        "aggregating",
-                        {
-                            "retrieval_points": retrieval_points,
-                            "branch_count": len(retrieval_points),
-                        },
-                    )
-                reduced_material, aggregate_warnings = (
-                    self._aggregate_retrieval_points(
-                        question,
-                        reduced_material,
-                        retrieval_points,
-                    )
+            reduction_warnings.extend(aggregate_warnings)
+            if on_progress:
+                on_progress(
+                    "aggregate_completed",
+                    {
+                        "retrieval_points": retrieval_points,
+                        "branch_count": len(retrieval_points),
+                        "status": "degraded" if aggregate_warnings else "done",
+                    },
                 )
-                reduction_warnings.extend(aggregate_warnings)
-                if on_progress:
-                    on_progress(
-                        "aggregate_completed",
-                        {
-                            "retrieval_points": retrieval_points,
-                            "branch_count": len(retrieval_points),
-                            "status": "degraded" if aggregate_warnings else "done",
-                        },
-                    )
         del (
             conversation_history,
             current_message,
@@ -3530,11 +3942,6 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             "回答当轮材料能够确认的代表对象，不要声称已经穷举全部。"
             if representative_scope
             else ""
-        )
-        material_request = (
-            "根据以上字段记录直接回答问题，每个字段只使用自己的值"
-            if use_atomic_records
-            else "根据以上材料直接回答问题"
         )
         final_point_scope = (
             "只回答这些检索点："
@@ -3546,14 +3953,64 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 )
             )
             + "；不要增加其他对象。"
-            if not use_atomic_records
-            and any(item.retrieval_point for item in ordered)
+            if any(item.retrieval_point for item in ordered)
             else ""
         )
-        user = f"""{reduced_material}
+        derived_material = _requested_date_difference_material(
+            reduced_material, question
+        )
+        answer_material = (
+            f"{reduced_material}\n{derived_material}"
+            if derived_material
+            else reduced_material
+        )
+        verified_rows = [
+            json.dumps(
+                [
+                    list(item.source_ids or ([item.source_id] if item.source_id else [])),
+                    {
+                        "subject": item.subject,
+                        "field": item.field,
+                        "fact": item.fact,
+                    },
+                ],
+                ensure_ascii=False,
+            )
+            for item in (evidence_selections or [])
+            if item.status == "supported" and item.fact
+        ] if _field_binding_applicable(question, research_records or []) else []
+        if verified_rows:
+            verified_budget = max(
+                1000, self.settings.rwkv_final_material_chars // 2
+            )
+            bounded_verified: list[str] = []
+            verified_chars = 0
+            for row in verified_rows:
+                if bounded_verified and verified_chars + len(row) + 1 > verified_budget:
+                    break
+                if len(row) > verified_budget:
+                    continue
+                bounded_verified.append(row)
+                verified_chars += len(row) + 1
+            verified_material = "\n".join(bounded_verified)
+            base_budget = max(
+                0,
+                self.settings.rwkv_final_material_chars
+                - len(verified_material)
+                - 1,
+            )
+            answer_material = answer_material[:base_budget].rstrip()
+            if verified_material:
+                answer_material += "\n" + verified_material
+        verified_instruction = (
+            "末尾的对象字段二元组已经逐来源核对，出现冲突时采用二元组中的值。"
+            if verified_rows
+            else ""
+        )
+        user = f"""{answer_material}
 
 问题：{question}
-{material_request}，只回答所问内容；值相同的字段合并表达，每个独立事实只标一个最直接的 [S1] 来源。不要推断材料没有的信息，不同对象的事实不得混用；材料不足就说明。{final_point_scope}{scope_note}
+根据以上材料直接回答问题；{verified_instruction}只回答所问内容。完整覆盖问题中的每个问项：表格条件查询先筛选符合条件的行，再只在这些行中比较目标列，并从同一行复制对象名和全部所问数值；比较变化同时写变化前和变化后。合并重复事实，每个独立事实只标一个最直接的 [S1] 来源；[S1] 只是来源编号，不是事实值。同一对象互相关联的字段采用同一条记录，不跨版本拼接。不要推断材料没有的信息，不同对象的事实不得混用；材料不足就说明。{final_point_scope}{scope_note}
 最终回答："""
         if on_progress:
             on_progress(
@@ -3582,42 +4039,107 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         answer = _clean_final_answer(output)
         if not answer:
             raise SearchReaderError("read", "RWKV returned an empty final answer")
-        if use_atomic_records:
-            answer = _merge_duplicate_atomic_fields(
-                answer, list(evidence_selections or [])
+        validation_material = _final_validation_material(
+            f"{answer_material}\n当前日期：{_today()}", question
+        )
+        if all(item.url.startswith("document://") for item in ordered):
+            review_user = f"""{answer_material}
+
+初稿：{answer}
+
+问题：{question}
+核对初稿是否完整回答了问题中的每个对象、字段和值。表格条件查询先筛选符合条件的行，再只在这些行中比较目标列，并从同一行复制对象名和全部所问数值。材料标题和表格单元格也是事实；如果缺少问项，只补齐缺少项，不得删除初稿已有事实。不要增加未问内容，不要解释核对过程，不要使用表格，保留事实后的 [S1] 来源编号。
+最终回答："""
+            try:
+                reviewed = _clean_final_answer(
+                    self._complete(
+                        review_user,
+                        max_tokens=output_tokens,
+                        stage="finalize",
+                    )
+                )
+            except SearchReaderError as exc:
+                reduction_warnings.append(
+                    f"final completeness review degraded: {exc}"[:500]
+                )
+            else:
+                keeps_terms = _claim_terms(answer) <= _claim_terms(reviewed)
+                keeps_numbers = _normalized_numbers(answer) <= _normalized_numbers(
+                    reviewed
+                )
+                introduces_numbers = bool(
+                    _unsupported_summary_bindings(reviewed, validation_material)
+                )
+                if reviewed and keeps_terms and keeps_numbers and not introduces_numbers:
+                    answer = reviewed
+                elif reviewed:
+                    reduction_warnings.append(
+                        "final completeness review was discarded because it removed or introduced facts"
+                    )
+        for correction_attempt in range(2):
+            unsupported = _unsupported_summary_bindings(
+                answer, validation_material
             )
-            answer, atomic_warnings = _filter_unsupported_atomic_clauses(
-                answer, list(evidence_selections or [])
+            if not unsupported:
+                break
+            correction_user = f"""{answer_material}
+
+待修正回答：{answer}
+
+问题：{question}
+重新回答问题。完整覆盖每个问项；表格查询同时写对象名和数值，比较变化同时写变化前和变化后。[S1] 只是来源编号，不是事实值。只使用以上材料中的事实与数字，合并重复内容，并保留对应的 [S1] 来源；不要解释修改过程。
+最终回答："""
+            corrected = self._complete(
+                correction_user,
+                max_tokens=output_tokens,
+                stage="finalize",
             )
-            reduction_warnings.extend(atomic_warnings)
+            answer = _clean_final_answer(corrected)
             if not answer:
-                answer = _atomic_fallback_answer(list(evidence_selections or []))
-                reduction_warnings.append(
-                    "final atomic answer used the deterministic safety renderer"
+                raise SearchReaderError(
+                    "read", "RWKV returned an empty corrected final answer"
                 )
-            selected_ids = {
-                source_id
-                for selection in evidence_selections or []
-                if selection.status == "supported"
-                for source_id in _selection_source_ids(selection)
-            }
-            answer = _bind_atomic_citations(
-                answer, list(evidence_selections or [])
+            if correction_attempt == 0:
+                reduction_warnings.append(
+                    "final answer was regenerated after introducing unsupported numbers"
+                )
+        remaining_unsupported = _unsupported_summary_bindings(
+            answer, validation_material
+        )
+        if remaining_unsupported:
+            recovery_user = f"""{answer_material}
+
+问题：{question}
+独立重新回答问题，不参考此前生成内容。完整覆盖每个问项，只使用以上材料中的事实与数字，合并重复内容，并保留事实后的 [S1] 来源编号；不要解释修改过程。
+最终回答："""
+            for _attempt in range(2):
+                recovered = _clean_final_answer(
+                    self._complete(
+                        recovery_user,
+                        max_tokens=output_tokens,
+                        stage="finalize",
+                    )
+                )
+                if recovered and not _unsupported_summary_bindings(
+                    recovered, validation_material
+                ):
+                    answer = recovered
+                    remaining_unsupported = set()
+                    reduction_warnings.append(
+                        "final answer was independently regenerated after repeated numeric mismatch"
+                    )
+                    break
+        if remaining_unsupported:
+            values = ", ".join(sorted(remaining_unsupported))
+            raise SearchReaderError(
+                "read", f"RWKV final answer introduced unsupported numbers: {values}"
             )
+        answer, citations_rebound = _bind_retrieval_point_citations(answer, ordered)
+        if citations_rebound:
+            reduction_warnings.append("final answer cross-point citations were rebound")
+        if evidence_selections:
+            answer = _bind_atomic_citations(answer, evidence_selections)
             answer = _coalesce_adjacent_identical_citations(answer)
-            if selected_ids and not re.search(r"\[S\d+\]", answer, flags=re.IGNORECASE):
-                answer = _atomic_fallback_answer(list(evidence_selections or []))
-                reduction_warnings.append(
-                    "final atomic answer had no supportable clause; used safety renderer"
-                )
-        else:
-            answer, citations_rebound = _bind_retrieval_point_citations(
-                answer, ordered
-            )
-            if citations_rebound:
-                reduction_warnings.append(
-                    "final answer cross-point citations were rebound"
-                )
         return answer, reduction_warnings
 
 

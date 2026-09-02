@@ -111,6 +111,47 @@ def test_pipeline_order_and_result_contract(tmp_path) -> None:
     assert result.trace[-1]["stage"] == "completed"
 
 
+def test_pipeline_reads_an_explicit_url_before_search(tmp_path) -> None:
+    settings = replace(
+        Settings(),
+        rwkv_model="rwkv-test",
+        research_plan_enabled=True,
+        trace_enabled=False,
+        trace_directory=tmp_path,
+    )
+    pipeline = SearchReaderPipeline(settings)
+    url = "https://example.com/release"
+    hit = SearchHit("Direct page", url, source_id="S1", content="Direct fact")
+    chunk = DocumentChunk("S1", hit.title, hit.url, hit.content)
+    evidence = Evidence("S1", hit.title, hit.url, "Direct fact", "Direct fact")
+    calls = []
+    pipeline.reader.plan_research = lambda question: ResearchPlan(
+        decision="search",
+        goal="读取指定网页",
+        queries=[],
+        direct_urls=[url],
+    )
+
+    def read_urls(urls, **kwargs):
+        calls.append(("url", urls, kwargs))
+        return urls, [hit], [chunk], []
+
+    pipeline.retriever.run_urls = read_urls
+    pipeline.retriever.run = lambda question: pytest.fail("search must not run")
+    pipeline.reader.summarize = lambda *args, **kwargs: ([evidence], [])
+    pipeline.reader.audit = lambda *args, **kwargs: EvidenceAudit(sufficient=True)
+    pipeline.reader.finalize = lambda *args, **kwargs: ("Direct answer [S1]", [])
+
+    result = pipeline.answer(f"请阅读 {url} 并总结")
+
+    assert calls[0][0:2] == ("url", [url])
+    assert result.retrieval_mode == "direct-url"
+    assert result.search_provider == "direct-url"
+    assert result.queries == [url]
+    assert "url_reading" in [event["stage"] for event in result.trace]
+    assert "searching" not in [event["stage"] for event in result.trace]
+
+
 def test_model_planner_can_request_scope_clarification_without_search(tmp_path) -> None:
     settings = replace(
         Settings(),
@@ -272,6 +313,7 @@ def test_model_planner_queries_and_records_reach_audit_and_writer(tmp_path) -> N
         planned_queries,
         {
             "question": "原神和绝区零当前版本和福利分别是什么？",
+            "start_index": 1,
             "retrieval_point_by_query": {
                 "原神 当前版本 福利": "原神 当前版本 福利",
                 "绝区零 当前版本 福利": "绝区零 当前版本 福利",

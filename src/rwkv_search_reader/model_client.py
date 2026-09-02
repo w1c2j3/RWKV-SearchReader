@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import requests
@@ -53,15 +54,29 @@ class OpenAICompatibleClient:
         }
 
     def _post(self, path: str, payload: dict[str, Any], stage: str) -> str:
-        try:
-            response = self.session.post(
-                f"{self.base_url}{path}",
-                headers=self.headers,
-                json=payload,
-                timeout=(10, self.timeout_seconds),
-            )
-        except requests.RequestException as exc:
-            raise SearchReaderError(stage, f"model request failed: {exc}") from exc
+        response = None
+        for attempt in range(3):
+            try:
+                response = self.session.post(
+                    f"{self.base_url}{path}",
+                    headers=self.headers,
+                    json=payload,
+                    timeout=(10, self.timeout_seconds),
+                )
+            except requests.ConnectionError as exc:
+                if attempt == 2:
+                    raise SearchReaderError(
+                        stage, f"model request failed after reconnect retries: {exc}"
+                    ) from exc
+                time.sleep(0.5 * (2**attempt))
+                continue
+            except requests.RequestException as exc:
+                raise SearchReaderError(stage, f"model request failed: {exc}") from exc
+            if response.status_code not in {502, 503, 504} or attempt == 2:
+                break
+            time.sleep(0.5 * (2**attempt))
+        if response is None:  # pragma: no cover - loop always returns or raises
+            raise SearchReaderError(stage, "model request did not return a response")
         if response.status_code >= 400:
             detail = response.text[:800].replace("\n", " ")
             raise SearchReaderError(

@@ -486,6 +486,7 @@ class SearchReaderPipeline:
                             "scope_mode": research_plan.scope_mode,
                             "goal": research_plan.goal,
                             "queries": research_plan.queries,
+                            "urls": research_plan.direct_urls,
                             "retrieval_points": research_plan.retrieval_points,
                             "clarification": research_plan.clarification,
                             "records": [
@@ -548,44 +549,97 @@ class SearchReaderPipeline:
             chunks: list[DocumentChunk] = []
             retrieval_warnings: list[str] = []
             stable_retrieval_points: list[str] = []
+            direct_url_used = False
+            search_used = False
             if web_enabled:
                 planned_queries = (
                     research_plan.queries
                     if research_plan and research_plan.decision == "search"
                     else [effective_question]
                 )
-                stable_retrieval_points = list(planned_queries)
+                direct_urls = (
+                    research_plan.direct_urls
+                    if research_plan and research_plan.decision == "search"
+                    else []
+                )
+                planned_retrieval_points = list(planned_queries)
                 if (
                     research_plan
                     and len(research_plan.retrieval_points) == len(planned_queries)
                 ):
-                    stable_retrieval_points = list(research_plan.retrieval_points)
-                emit(
-                    "searching",
-                    {
-                        "query": planned_queries[0],
-                        "queries": planned_queries,
-                        "message": "正在查找相关资料",
-                    },
-                )
-                if research_plan and research_plan.decision == "search":
-                    queries, sources, chunks, retrieval_warnings = (
-                        self.retriever.run_queries(
-                            planned_queries,
-                            question=effective_question,
-                            retrieval_point_by_query=dict(
-                                zip(
-                                    planned_queries,
-                                    stable_retrieval_points,
-                                    strict=True,
-                                )
-                            ),
+                    planned_retrieval_points = list(research_plan.retrieval_points)
+                direct_url_error: SearchReaderError | None = None
+                if direct_urls:
+                    emit(
+                        "url_reading",
+                        {
+                            "urls": direct_urls,
+                            "url_count": len(direct_urls),
+                            "message": "正在读取指定网页",
+                        },
+                    )
+                    try:
+                        url_queries, url_sources, url_chunks, url_warnings = (
+                            self.retriever.run_urls(
+                                direct_urls,
+                                question=effective_question,
+                            )
                         )
+                        queries.extend(url_queries)
+                        sources.extend(url_sources)
+                        chunks.extend(url_chunks)
+                        retrieval_warnings.extend(url_warnings)
+                        stable_retrieval_points.extend(url_queries)
+                        direct_url_used = True
+                    except SearchReaderError as exc:
+                        direct_url_error = exc
+                        pipeline_warnings.append(
+                            f"direct URL reading degraded: {exc}"[:1200]
+                        )
+                if planned_queries:
+                    emit(
+                        "searching",
+                        {
+                            "query": planned_queries[0],
+                            "queries": planned_queries,
+                            "message": "正在查找相关资料",
+                        },
                     )
-                else:
-                    queries, sources, chunks, retrieval_warnings = self.retriever.run(
-                        effective_question
-                    )
+                    try:
+                        if research_plan and research_plan.decision == "search":
+                            found_queries, found_sources, found_chunks, found_warnings = (
+                                self.retriever.run_queries(
+                                    planned_queries,
+                                    question=effective_question,
+                                    start_index=len(sources) + 1,
+                                    retrieval_point_by_query=dict(
+                                        zip(
+                                            planned_queries,
+                                            planned_retrieval_points,
+                                            strict=True,
+                                        )
+                                    ),
+                                )
+                            )
+                        else:
+                            found_queries, found_sources, found_chunks, found_warnings = (
+                                self.retriever.run(effective_question)
+                            )
+                    except SearchReaderError as exc:
+                        if not chunks:
+                            raise
+                        pipeline_warnings.append(
+                            f"supplemental planned search degraded: {exc}"[:1200]
+                        )
+                    else:
+                        queries.extend(found_queries)
+                        sources.extend(found_sources)
+                        chunks.extend(found_chunks)
+                        retrieval_warnings.extend(found_warnings)
+                        stable_retrieval_points.extend(planned_retrieval_points)
+                        search_used = True
+                if not chunks and direct_url_error is not None:
+                    raise direct_url_error
                 emit(
                     "sources_found",
                     {
@@ -919,22 +973,6 @@ class SearchReaderPipeline:
             timings["total"] = round((time.perf_counter() - started) * 1000, 1)
             emit("completed", {"duration_ms": timings["total"]})
 
-            controlled_citation_ids = {
-                source_id
-                for item in evidence_selections
-                if item.status in {"supported", "conflict"}
-                for source_id in [*item.source_ids, item.source_id]
-                if source_id
-            }
-            citation_evidence = (
-                [
-                    item
-                    for item in evidence
-                    if item.source_id in controlled_citation_ids
-                ]
-                if evidence_selections
-                else evidence
-            )
             conversation_state = {
                 "resolved_question": effective_question,
                 "records": [
@@ -965,8 +1003,19 @@ class SearchReaderPipeline:
                 *audit_warnings,
                 *selection_warnings,
                 *final_warnings,
-                *citation_warnings(answer, citation_evidence),
+                *citation_warnings(answer, evidence),
             ]
+            retrieval_modes: list[str] = []
+            provider_names: list[str] = []
+            if local_passages:
+                retrieval_modes.append("document")
+                provider_names.append("local-markdown")
+            if direct_url_used:
+                retrieval_modes.append("direct-url")
+                provider_names.append("direct-url")
+            if search_used:
+                retrieval_modes.append("forced")
+                provider_names.append(self.provider.name)
             result = PipelineResult(
                 request_id=request_id,
                 session_id=session_id,
@@ -975,25 +1024,9 @@ class SearchReaderPipeline:
                 queries=queries,
                 sources=sources,
                 evidence=evidence,
-                retrieval_mode=(
-                    "document+forced"
-                    if local_passages and web_enabled
-                    else "document"
-                    if local_passages
-                    else "forced"
-                ),
-                search_provider=(
-                    f"{self.provider.name}+local-markdown"
-                    if local_passages and web_enabled
-                    else "local-markdown"
-                    if local_passages
-                    else self.provider.name
-                ),
-                reader_mode=(
-                    "rwkv-planned-parallel-atomic-fields-final-summary"
-                    if evidence_selections
-                    else "rwkv-reviewed-parallel-funnel-final-summary"
-                ),
+                retrieval_mode="+".join(retrieval_modes) or "forced",
+                search_provider="+".join(provider_names) or self.provider.name,
+                reader_mode="rwkv-reviewed-parallel-funnel-final-summary",
                 degraded=bool(warnings),
                 warnings=warnings,
                 timings_ms=timings,

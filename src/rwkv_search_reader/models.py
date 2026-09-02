@@ -69,6 +69,7 @@ class ResearchPlan:
     clarification: str = ""
     fallback: bool = False
     retrieval_points: list[str] = field(default_factory=list)
+    direct_urls: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

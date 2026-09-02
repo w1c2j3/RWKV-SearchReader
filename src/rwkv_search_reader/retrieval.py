@@ -402,6 +402,62 @@ class Retriever:
             raise SearchReaderError("input", "question is empty")
         return self.run_queries(queries, question=question)
 
+    def run_urls(
+        self,
+        urls: list[str],
+        *,
+        question: str,
+        start_index: int = 1,
+    ) -> tuple[list[str], list[SearchHit], list[DocumentChunk], list[str]]:
+        """Read user-supplied URLs directly before considering web search."""
+
+        normalized = list(
+            dict.fromkeys(url for value in urls if (url := normalize_url(value)))
+        )[:10]
+        if not normalized:
+            raise SearchReaderError("fetch", "no valid direct URL was supplied")
+        pending = [SearchHit(title="", url=url, provider="direct-url") for url in normalized]
+
+        def read_with_retry(hit: SearchHit) -> SearchHit:
+            for _ in range(2):
+                hit.error = ""
+                fetched = fetch_page(hit, self.settings)
+                if fetched.content.strip():
+                    return fetched
+            return hit
+
+        fetched_by_url: dict[str, SearchHit] = {}
+        with ThreadPoolExecutor(max_workers=min(5, len(pending))) as pool:
+            futures = {
+                pool.submit(read_with_retry, hit): hit.url for hit in pending
+            }
+            for future in as_completed(futures):
+                url = futures[future]
+                try:
+                    fetched_by_url[url] = future.result()
+                except Exception as exc:  # noqa: BLE001 - retain other direct URLs
+                    failed = next(hit for hit in pending if hit.url == url)
+                    failed.error = f"{type(exc).__name__}: {exc}"[:400]
+                    fetched_by_url[url] = failed
+        fetched = [fetched_by_url[url] for url in normalized]
+        warnings = [
+            f"direct URL unreadable: {hit.url}: {hit.error or 'empty content'}"[:500]
+            for hit in fetched
+            if not hit.content.strip()
+        ]
+        readable = [hit for hit in fetched if hit.content.strip()]
+        if not readable:
+            detail = "; ".join(warnings)
+            raise SearchReaderError(
+                "fetch", (f"all direct URLs were unreadable: {detail}")[:1200]
+            )
+        for index, hit in enumerate(readable, start=start_index):
+            hit.source_id = f"S{index}"
+            hit.content = hit.content[: self.settings.max_evidence_chars]
+            hit.retrieval_point = hit.url
+            hit.retrieval_query = question
+        return normalized, readable, provider_materials(readable), warnings
+
     def run_queries(
         self,
         queries: list[str],
@@ -440,7 +496,11 @@ class Retriever:
             except SearchReaderError as exc:
                 search_warnings.append(f"{query}: {exc}"[:500])
         if not groups:
-            raise SearchReaderError("search", "all deterministic search queries failed")
+            detail = "; ".join(search_warnings)
+            message = "all deterministic search queries failed"
+            if detail:
+                message = f"{message}: {detail}"
+            raise SearchReaderError("search", message[:1200])
         deduplicated = _balanced_hits(
             groups,
             total_limit,

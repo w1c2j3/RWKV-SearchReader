@@ -36,6 +36,14 @@ _COMMON_GENERIC_TLDS = {
     "tech",
     "xyz",
 }
+_AMBIGUOUS_CODE_SUFFIXES = {
+    "js",
+    "jsx",
+    "py",
+    "rb",
+    "ts",
+    "tsx",
+}
 
 
 def _key_identity(api_key: str) -> str:
@@ -87,6 +95,7 @@ def _explicit_domains(query: str) -> list[str]:
             value.removeprefix("www.")
             for value in values
             if value not in excluded
+            and value.rsplit(".", 1)[-1] not in _AMBIGUOUS_CODE_SUFFIXES
             and (
                 len(value.rsplit(".", 1)[-1]) == 2
                 or value.rsplit(".", 1)[-1] in _COMMON_GENERIC_TLDS
@@ -212,6 +221,18 @@ class TavilyProvider(SearchProvider):
             request,
             timeout=(10, self.settings.request_timeout_seconds),
         )
+        if (
+            response.status_code == 400
+            and "include_domains" in response.text.casefold()
+            and request.pop("include_domains", None) is not None
+        ):
+            # Product names such as Node.js can resemble a bare domain. If Tavily
+            # rejects an inferred filter, preserve the query and search broadly.
+            response = self._post(
+                "search",
+                request,
+                timeout=(10, self.settings.request_timeout_seconds),
+            )
         payload = _json_object(response, "search")
         hits: list[SearchHit] = []
         for item in payload.get("results") or []:

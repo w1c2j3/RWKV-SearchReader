@@ -175,7 +175,7 @@ class Settings:
             "retrieval_mode": "web-or-attached-documents",
             "search_provider": self.search_provider,
             "search_configured": provider_ready,
-            "reader_mode": "rwkv-planned-atomic-fields-or-funnel-final-summary",
+            "reader_mode": "rwkv-reviewed-parallel-funnel-final-summary",
             "summary_workers": self.rwkv_summary_workers,
             "summary_max_tokens": self.rwkv_summary_max_tokens,
             "reduce_chunk_chars": self.rwkv_reduce_chunk_chars,

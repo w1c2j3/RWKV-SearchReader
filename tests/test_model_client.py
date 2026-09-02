@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import requests
+
 from rwkv_search_reader.model_client import OpenAICompatibleClient
 
 
@@ -115,3 +117,34 @@ def test_chat_omits_empty_system_message() -> None:
     assert captured["json"]["messages"] == [
         {"role": "user", "content": "question"}
     ]
+
+
+def test_model_connection_is_retried_after_a_transient_tunnel_failure(monkeypatch) -> None:
+    client = OpenAICompatibleClient(
+        base_url="http://model.test/v1",
+        api_key="secret",
+        model="rwkv",
+        timeout_seconds=10,
+    )
+    calls = 0
+
+    def post(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise requests.ConnectionError("tunnel reconnecting")
+        return FakeResponse()
+
+    monkeypatch.setattr("rwkv_search_reader.model_client.time.sleep", lambda _: None)
+    client.session.post = post
+
+    answer = client.completion(
+        system="",
+        user="question",
+        max_tokens=32,
+        temperature=0.1,
+        stage="read",
+    )
+
+    assert answer == "answer"
+    assert calls == 2

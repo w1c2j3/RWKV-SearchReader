@@ -4,6 +4,7 @@ from rwkv_search_reader.rag_evaluation import (
     DEFAULT_DATASET,
     _grade_turn,
     _load_suite,
+    _match_text,
 )
 
 
@@ -13,6 +14,10 @@ def test_reference_suite_contains_twenty_questions() -> None:
     assert len(documents) >= 8
     assert sum(len(case["turns"]) for case in cases) == 20
     assert any(len(case["turns"]) > 1 for case in cases)
+
+
+def test_rag_match_treats_field_separators_as_formatting() -> None:
+    assert _match_text("index_version=5") == _match_text("index_version：5")
 
 
 def test_rag_grade_checks_content_and_document_provenance() -> None:

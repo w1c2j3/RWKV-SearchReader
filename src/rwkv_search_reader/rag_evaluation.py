@@ -64,7 +64,7 @@ def _load_suite(path: Path) -> tuple[dict[str, dict[str, str]], list[dict[str, A
 def _match_text(value: str) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     text = text.replace(",", "").replace("，", "")
-    return re.sub(r"[\s`*_]+", "", text)
+    return re.sub(r"[\s`*_:：=|]+", "", text)
 
 
 def _grade_turn(expected: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -195,11 +195,13 @@ def _build_summary(records: list[dict[str, Any]], cases: list[dict[str, Any]], s
     categories: dict[str, dict[str, int]] = defaultdict(
         lambda: {"cases": 0, "questions": 0, "passed": 0, "content_passed": 0}
     )
+    for case in cases:
+        category = str(case.get("category") or "unknown")
+        categories[category]["cases"] += 1
+        categories[category]["questions"] += len(case.get("turns") or [])
     for record in records:
         category = str(record.get("category") or "unknown")
-        categories[category]["cases"] += 1
         for turn in record.get("turns") or []:
-            categories[category]["questions"] += 1
             categories[category]["passed"] += int(bool(turn["grade"]["pass"]))
             categories[category]["content_passed"] += int(
                 bool(turn["grade"]["content_pass"])
@@ -211,6 +213,9 @@ def _build_summary(records: list[dict[str, Any]], cases: list[dict[str, Any]], s
         if not passed
     )
     elapsed = [float(turn.get("elapsed_seconds") or 0) for turn in turns]
+    execution_errors = sum(record.get("status") == "error" for record in records)
+    if execution_errors:
+        failed_checks["execution_error"] += execution_errors
     return {
         "schema_version": "rwkv-search-reader-rag-eval.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -220,6 +225,7 @@ def _build_summary(records: list[dict[str, Any]], cases: list[dict[str, Any]], s
             "recorded_cases": len(records),
             "questions": sum(len(case["turns"]) for case in cases),
             "recorded_questions": len(turns),
+            "execution_errors": execution_errors,
             "passed": sum(bool(turn["grade"]["pass"]) for turn in turns),
             "structural_passed": sum(
                 bool(turn["grade"]["structural_pass"]) for turn in turns
@@ -249,9 +255,10 @@ def _report(summary: dict[str, Any]) -> str:
         f"- 模型：`{summary['model']}`",
         f"- 场景：{counts['recorded_cases']} / {counts['cases']}",
         f"- 问题：{counts['recorded_questions']} / {counts['questions']}",
-        f"- 完整通过：{counts['passed']} / {counts['recorded_questions']}",
-        f"- 内容命中：{counts['content_passed']} / {counts['recorded_questions']}",
-        f"- 结构通过：{counts['structural_passed']} / {counts['recorded_questions']}",
+        f"- 完整通过：{counts['passed']} / {counts['questions']}",
+        f"- 内容命中：{counts['content_passed']} / {counts['questions']}",
+        f"- 结构通过：{counts['structural_passed']} / {counts['questions']}",
+        f"- 执行错误：{counts['execution_errors']}",
         f"- 空回答 / 思考标签泄漏：{counts['empty_answers']} / {counts['reasoning_markup_leaks']}",
         f"- 平均 / 最大耗时：{summary['latency_seconds']['mean']}s / {summary['latency_seconds']['max']}s",
         "",

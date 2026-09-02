@@ -94,6 +94,55 @@ def test_search_query_split_keeps_trailing_instruction_with_single_question() ->
     assert _search_queries(question) == [question]
 
 
+def test_retriever_reads_user_url_directly_without_search(monkeypatch) -> None:
+    settings = replace(Settings(), max_evidence_chars=30)
+    provider = StubProvider(settings)
+
+    def fetch(hit, settings):
+        del settings
+        hit.title = "Direct page"
+        hit.content = "direct material " * 10
+        return hit
+
+    monkeypatch.setattr("rwkv_search_reader.retrieval.fetch_page", fetch)
+    queries, sources, chunks, warnings = Retriever(settings, provider).run_urls(
+        ["https://example.com/release"], question="页面说了什么？"
+    )
+
+    assert provider.received == []
+    assert queries == ["https://example.com/release"]
+    assert sources[0].source_id == "S1"
+    assert len(chunks[0].text) == 30
+    assert chunks[0].retrieval_point == "https://example.com/release"
+    assert chunks[0].retrieval_query == "页面说了什么？"
+    assert warnings == []
+
+
+def test_direct_url_reader_retries_a_transient_empty_fetch(monkeypatch) -> None:
+    settings = Settings()
+    provider = StubProvider(settings)
+    calls = []
+
+    def fetch(hit, settings):
+        del settings
+        calls.append(hit.url)
+        if len(calls) == 1:
+            hit.error = "ReadTimeout"
+        else:
+            hit.content = "material after retry"
+        return hit
+
+    monkeypatch.setattr("rwkv_search_reader.retrieval.fetch_page", fetch)
+    _, sources, _, warnings = Retriever(settings, provider).run_urls(
+        ["https://example.com/release"], question="页面说了什么？"
+    )
+
+    assert calls == ["https://example.com/release"] * 2
+    assert sources[0].content == "material after retry"
+    assert sources[0].error == ""
+    assert warnings == []
+
+
 def test_reader_ready_results_keep_provider_order_without_extracting() -> None:
     settings = replace(Settings(), search_max_results=4, fetch_pages=3)
     provider = MaterialProvider(settings)

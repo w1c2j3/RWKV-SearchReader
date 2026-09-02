@@ -167,8 +167,38 @@ def test_tavily_does_not_treat_filenames_as_domains() -> None:
         return FakeResponse(200, {"results": []})
 
     provider.session.post = post
-    for question in ("llama.cpp 最新版本", "给出 compose.yaml", "不要修改 uv.lock"):
+    for question in (
+        "Node.js 当前 LTS 版本",
+        "llama.cpp 最新版本",
+        "给出 compose.yaml",
+        "不要修改 uv.lock",
+    ):
         provider.search(question, 6)
 
     assert all("include_domains" not in request for request in captured)
+    _reset_tavily_health_for_tests()
+
+
+def test_tavily_retries_without_a_rejected_inferred_domain() -> None:
+    _reset_tavily_health_for_tests()
+    settings = replace(Settings(), tavily_api_keys=("key",))
+    provider = TavilyProvider(settings)
+    captured = []
+
+    def post(url, **kwargs):
+        del url
+        captured.append(kwargs["json"].copy())
+        if len(captured) == 1:
+            return FakeResponse(
+                400,
+                {"detail": {"error": "All domains in include_domains are invalid"}},
+            )
+        return FakeResponse(200, {"results": []})
+
+    provider.session.post = post
+    provider.search("请核对 release.zz", 6)
+
+    assert captured[0]["include_domains"] == ["release.zz"]
+    assert "include_domains" not in captured[1]
+    assert captured[1]["query"] == captured[0]["query"]
     _reset_tavily_health_for_tests()
