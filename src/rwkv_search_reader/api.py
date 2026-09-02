@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import queue
+import re
 import socket
 import threading
 import time
@@ -22,9 +23,20 @@ from starlette.middleware.gzip import GZipMiddleware
 from . import __version__
 from .config import PROJECT_ROOT, get_settings
 from .conversations import ConversationStore, new_conversation_id
+from .documents import (
+    MarkdownPassage,
+    full_document_read_requested,
+    limit_full_document_passages,
+    rank_markdown_passages,
+)
 from .models import SearchReaderError
 from .pipeline import SearchReaderPipeline
 from .tracing import recent_traces, session_records
+
+_DOCUMENT_CONTEXT_REFERENCE_RE = re.compile(
+    r"^\s*(?:它|它们|这个|那个|这些|那些|这份|这篇|该(?:文档|版本|项目))|"
+    r"上述|前者|后者"
+)
 
 
 class AnswerRequest(BaseModel):
@@ -97,6 +109,32 @@ def _conversation_store() -> ConversationStore:
             store = ConversationStore(path)
             _STORES[key] = store
         return store
+
+
+def _select_document_passages(
+    store: ConversationStore,
+    conversation_id: str,
+    client_id: str,
+    question: str,
+    history: list[dict[str, Any]],
+) -> list[MarkdownPassage]:
+    settings = get_settings()
+    passages = store.document_passages(conversation_id, client_id)
+    if not passages:
+        return []
+    if full_document_read_requested(question):
+        return limit_full_document_passages(
+            passages, settings.document_full_read_max_chunks
+        )
+    context_questions = (
+        [turn["question"] for turn in history[-1:]]
+        if _DOCUMENT_CONTEXT_REFERENCE_RE.search(question)
+        else []
+    )
+    document_query = " ".join([*context_questions, question])
+    return rank_markdown_passages(
+        document_query, passages, settings.document_max_chunks
+    )
 
 
 def _request_identity(request: Request) -> str:
@@ -182,14 +220,8 @@ async def _answer(
             settings.conversation_turns,
             query=question,
         )
-        document_query = " ".join(
-            [*(turn["question"] for turn in history[-2:]), question]
-        )
-        document_passages = store.search_documents(
-            identity,
-            owner,
-            document_query,
-            settings.document_max_chunks,
+        document_passages = _select_document_passages(
+            store, identity, owner, question, history
         )
         result = await run_in_threadpool(
             _new_pipeline().answer,
@@ -245,14 +277,8 @@ def _answer_events(
                 settings.conversation_turns,
                 query=question,
             )
-            document_query = " ".join(
-                [*(turn["question"] for turn in history[-2:]), question]
-            )
-            document_passages = store.search_documents(
-                identity,
-                owner,
-                document_query,
-                settings.document_max_chunks,
+            document_passages = _select_document_passages(
+                store, identity, owner, question, history
             )
             result = _new_pipeline().answer(
                 question,
@@ -470,6 +496,99 @@ def upload_document(request: DocumentUploadRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _document_upload_events(request: DocumentUploadRequest) -> Iterator[str]:
+    events: queue.Queue[dict[str, Any]] = queue.Queue()
+    started = time.monotonic()
+    finished = threading.Event()
+    current_stage = "upload_received"
+    current_message = "文件已接收"
+
+    def progress(stage: str, detail: dict[str, Any]) -> None:
+        nonlocal current_stage, current_message
+        current_stage = stage
+        current_message = str(detail.get("message") or current_message)
+        events.put(
+            {
+                "type": "progress",
+                "stage": stage,
+                "detail": {
+                    **detail,
+                    "elapsed_seconds": round(time.monotonic() - started),
+                },
+            }
+        )
+
+    def work() -> None:
+        settings = get_settings()
+        store = _conversation_store()
+        try:
+            store.ensure(request.conversation_id, request.client_id)
+            document = store.add_document(
+                request.conversation_id,
+                request.client_id,
+                request.filename,
+                request.content,
+                max_bytes=settings.document_max_bytes,
+                chunk_chars=settings.document_chunk_chars,
+                content_base64=request.content_base64,
+                max_pdf_bytes=settings.document_pdf_max_bytes,
+                max_pdf_pages=settings.document_pdf_max_pages,
+                progress=progress,
+            )
+            progress(
+                "document_ready",
+                {
+                    "message": f"已完成解析，共 {document['chunk_count']} 个分块",
+                    "chunk_count": document["chunk_count"],
+                },
+            )
+            events.put({"type": "result", "result": document})
+        except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
+            events.put(
+                {
+                    "type": "error",
+                    "error": {"message": str(exc) or "文档上传失败"},
+                }
+            )
+        finally:
+            finished.set()
+
+    threading.Thread(target=work, daemon=True).start()
+    yield json.dumps(
+        {
+            "type": "progress",
+            "stage": "upload_received",
+            "detail": {"message": "文件已接收", "elapsed_seconds": 0},
+        },
+        ensure_ascii=False,
+    ) + "\n"
+    while not (finished.is_set() and events.empty()):
+        try:
+            event = events.get(timeout=1.0)
+        except queue.Empty:
+            event = {
+                "type": "progress",
+                "stage": current_stage,
+                "detail": {
+                    "message": current_message,
+                    "elapsed_seconds": round(time.monotonic() - started),
+                },
+            }
+        yield json.dumps(event, ensure_ascii=False) + "\n"
+
+
+@app.post("/v1/documents/upload/stream")
+def upload_document_stream(request: DocumentUploadRequest) -> StreamingResponse:
+    return StreamingResponse(
+        _document_upload_events(request),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/v1/documents/list")

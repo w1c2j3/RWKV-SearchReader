@@ -5,14 +5,22 @@ import binascii
 import math
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
+from typing import Any
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _BROAD_DOCUMENT_RE = re.compile(
-    r"总结|概括|综述|全文|整篇|整体|主要内容|核心内容|要点|大意|梳理"
+    r"总结|概括|综述|全文|整篇|整体|主要内容|核心内容|要点|大意|梳理|"
+    r"对比|比较|异同|区别|两篇|多篇|各篇|两份|多份|各份|全部文档|所有文档|"
+    r"summari[sz]e|overview|compare|comparison|whole\s+(?:paper|document)|"
+    r"entire\s+(?:paper|document)|both\s+papers|all\s+documents",
+    flags=re.IGNORECASE,
 )
+
+ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +69,8 @@ def normalize_markdown(filename: str, content: str) -> tuple[str, str]:
     return clean_name, clean_content
 
 
-@lru_cache(maxsize=1)
-def _docling_converter():
+@lru_cache(maxsize=2)
+def _docling_converter(do_ocr: bool = True):
     try:
         from docling.datamodel.accelerator_options import (
             AcceleratorDevice,
@@ -86,7 +94,7 @@ def _docling_converter():
             device=AcceleratorDevice.CPU,
             num_threads=4,
         ),
-        do_ocr=True,
+        do_ocr=do_ocr,
         do_table_structure=True,
     )
     return DocumentConverter(
@@ -103,6 +111,7 @@ def _convert_pdf_bytes(
     *,
     max_pages: int,
     max_bytes: int,
+    progress: ProgressCallback | None = None,
 ) -> str:
     try:
         from docling.datamodel.base_models import DocumentStream
@@ -113,14 +122,63 @@ def _convert_pdf_bytes(
             "PDF support is unavailable; install the project with the pdf extra"
         ) from exc
 
+    needs_ocr = _pdf_needs_ocr(content)
+    if progress:
+        progress(
+            "pdf_analyzed",
+            {
+                "ocr": needs_ocr,
+                "message": (
+                    "正在识别扫描页文字"
+                    if needs_ocr
+                    else "已检测到文本层，跳过 OCR"
+                ),
+            },
+        )
     stream = DocumentStream(name=filename, stream=BytesIO(content))
     with _PDF_CONVERSION_LOCK:
-        result = _docling_converter().convert(
+        if progress:
+            progress(
+                "pdf_converting",
+                {"ocr": needs_ocr, "message": "正在还原标题、段落和表格"},
+            )
+        result = _docling_converter(needs_ocr).convert(
             stream,
             max_num_pages=max_pages,
             max_file_size=max_bytes,
         )
     return str(result.document.export_to_markdown() or "")
+
+
+def _pdf_needs_ocr(content: bytes) -> bool:
+    """Use OCR only when sampled pages do not already expose a useful text layer."""
+
+    try:
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument(BytesIO(content))
+        page_count = len(document)
+        if not page_count:
+            return True
+        sample_count = min(8, page_count)
+        indexes = sorted(
+            {
+                min(page_count - 1, round(index * (page_count - 1) / max(1, sample_count - 1)))
+                for index in range(sample_count)
+            }
+        )
+        visible_chars = 0
+        readable_pages = 0
+        for index in indexes:
+            page = document[index]
+            text_page = page.get_textpage()
+            text = re.sub(r"\s+", "", text_page.get_text_range() or "")
+            visible_chars += len(text)
+            if len(text) >= 80:
+                readable_pages += 1
+        return visible_chars < 300 or readable_pages < max(1, len(indexes) // 2)
+    except Exception:  # noqa: BLE001  # pragma: no cover - safe OCR fallback
+        return True
 
 
 def prepare_document(
@@ -131,6 +189,7 @@ def prepare_document(
     max_markdown_bytes: int,
     max_pdf_bytes: int,
     max_pdf_pages: int,
+    progress: ProgressCallback | None = None,
 ) -> PreparedDocument:
     """Validate an uploaded document and normalize it to Markdown for retrieval."""
 
@@ -158,11 +217,14 @@ def prepare_document(
     if not raw.lstrip().startswith(b"%PDF-"):
         raise ValueError("uploaded file is not a PDF")
     try:
+        if progress:
+            progress("pdf_received", {"message": "PDF 已接收，正在检查文本层"})
         markdown = _convert_pdf_bytes(
             clean_name,
             raw,
             max_pages=max_pdf_pages,
             max_bytes=max_pdf_bytes,
+            progress=progress,
         )
     except RuntimeError:
         raise
@@ -174,6 +236,11 @@ def prepare_document(
         raise ValueError("PDF has no readable content")
     if len(markdown.encode("utf-8")) > max_markdown_bytes:
         raise ValueError(f"converted document exceeds {max_markdown_bytes} bytes")
+    if progress:
+        progress(
+            "pdf_converted",
+            {"char_count": len(markdown), "message": "PDF 已转换，正在切分章节"},
+        )
     return PreparedDocument(clean_name, markdown, raw, "application/pdf")
 
 
@@ -321,3 +388,31 @@ def rank_markdown_passages(
 
     ranked = sorted(passages, key=score, reverse=True)
     return ranked[:limit]
+
+
+def full_document_read_requested(query: str) -> bool:
+    """Return whether a question needs coverage across the attached documents."""
+
+    return bool(_BROAD_DOCUMENT_RE.search(str(query or "")))
+
+
+def limit_full_document_passages(
+    passages: list[MarkdownPassage], limit: int
+) -> list[MarkdownPassage]:
+    """Keep every passage when possible, otherwise sample every document evenly."""
+
+    if limit <= 0 or len(passages) <= limit:
+        return passages
+    by_document: dict[str, list[MarkdownPassage]] = {}
+    for passage in passages:
+        by_document.setdefault(passage.document_id, []).append(passage)
+    allocation = max(1, math.ceil(limit / max(1, len(by_document))))
+    samples = [_even_sample(rows, allocation) for rows in by_document.values()]
+    selected: list[MarkdownPassage] = []
+    for position in range(allocation):
+        for rows in samples:
+            if position < len(rows):
+                selected.append(rows[position])
+            if len(selected) >= limit:
+                return selected
+    return selected

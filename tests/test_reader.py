@@ -25,8 +25,10 @@ from rwkv_search_reader.reader import (
     _chunk_material_nodes_by_retrieval_point,
     _clean_final_answer,
     _coalesce_adjacent_identical_citations,
+    _contains_prompt_leakage,
     _context_retry_tokens,
     _copied_fact_supported,
+    _document_answer_points,
     _eligible_evidence,
     _field_binding_applicable,
     _field_qualifier_supported,
@@ -41,6 +43,7 @@ from rwkv_search_reader.reader import (
     _parse_audit_output,
     _parse_research_plan_output,
     _parse_source_summary,
+    _relevant_markdown_tables,
     _remove_copied_temporal_qualifiers,
     _requested_date_difference_material,
     _unsupported_summary_bindings,
@@ -67,6 +70,30 @@ def _evidence(count: int = 1) -> list[Evidence]:
 
 def test_citation_audit_accepts_known_sources() -> None:
     assert citation_warnings("Answer [S1][S2]", _evidence(2)) == []
+
+
+def test_relevant_document_table_survives_a_lossy_model_summary() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: (
+        "L2 的两次失败必须发生在同一演练窗口。"
+    )
+    material = """| 级别 | 触发条件 | 首次响应时限 | 升级对象 |
+| --- | --- | --- | --- |
+| L1 | P95 延迟高于 120 ms | 20 分钟 | 当值工程师 |
+| L2 | 重复率高于 0.20% | 8 分钟 | 现场负责人 |"""
+
+    evidence = reader._summarize_one(
+        "如果重复率升到 0.21%，应触发哪个报警级别，多久响应，升级给谁？",
+        DocumentChunk(
+            "S1",
+            "运行手册 / 报警分级",
+            "document://manual#chunk-2",
+            material,
+        ),
+    )
+
+    assert _relevant_markdown_tables("重复率报警", material) in evidence.claim
+    assert "| L2 | 重复率高于 0.20% | 8 分钟 | 现场负责人 |" in evidence.claim
 
 
 def test_citation_audit_reports_missing_and_unknown_sources() -> None:
@@ -356,6 +383,45 @@ def test_direct_url_sufficiency_is_decided_before_search_queries() -> None:
     assert captured[0].index("已有网址") < captured[0].index("问题：")
 
 
+def test_search_design_repairs_a_missing_record_branch() -> None:
+    reader = RWKVReader(
+        replace(Settings(), rwkv_model="test", research_plan_max_queries=4)
+    )
+    outputs = iter(
+        [
+            (
+                '{"points":[["售后地点","小米 SU7 Ultra 售后地点"],'
+                '["售后网点","小米 SU7 Ultra 售后网点"],'
+                '["售后网络","小米 SU7 Ultra 售后服务网络"]]}'
+            ),
+            '{"points":[["售后地点","小米 SU7 Ultra 售后地点"]]}',
+            '{"points":[["售后网点","小米 SU7 Ultra 售后网点"]]}',
+        ]
+    )
+    reader._complete = lambda *args, **kwargs: next(outputs)
+
+    queries, points = reader.design_record_queries(
+        "关于小米 SU7 Ultra，售后在哪里，多久洗一次车？",
+        [
+            ResearchRecord(
+                "小米 SU7 Ultra",
+                "一般售后在什么地方？",
+                ["售后地点", "售后网点"],
+            ),
+            ResearchRecord(
+                "小米 SU7 Ultra",
+                "多久洗一次车比较好？",
+                ["洗车频率", "洗车建议"],
+            ),
+        ],
+        [],
+    )
+
+    assert "洗车频率" in points
+    assert any("多久洗一次车" in query for query in queries)
+    assert len(queries) <= 4
+
+
 def test_scope_discovery_uses_first_pass_material_for_concrete_records() -> None:
     reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
     captured = {}
@@ -457,7 +523,7 @@ def test_final_answer_deduplicates_single_line_delimited_generation() -> None:
     )
 
     assert _clean_final_answer(value) == (
-        "- 新增代理人 **维琳娜**（风·异常）、**诺姆**（火·击破）、**维琳娜**（风·异常）"
+        "- 新增代理人 **维琳娜**（风·异常）、**诺姆**（火·击破）"
     )
 
 
@@ -1059,7 +1125,7 @@ def test_page_summary_uses_its_search_point_and_complete_user_question() -> None
     assert evidence.retrieval_point == "原神"
 
 
-def test_markdown_summary_keeps_raw_fragment_when_model_marks_it_missing() -> None:
+def test_markdown_summary_uses_a_minimal_document_specific_prompt() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
     captured = {}
@@ -1079,12 +1145,14 @@ def test_markdown_summary_keeps_raw_fragment_when_model_marks_it_missing() -> No
     evidence = reader._summarize_one("总结文档策略", chunk)
 
     assert captured["user"] == (
+        "notes.md · 文档策略\n"
         "Markdown 按标题和段落切块，默认只使用文档。\n\n"
-        "总结以上网页内容。只复述同一条记录明确对应的值，"
-        "不把不同表格行、版本或对象的信息拼在一起；"
-        "网页有表格时保留相关的完整行。\n网页摘要："
+        "问题：总结文档策略\n"
+        "概括这一段本身记录的信息，保留名称、数字和限定条件。"
+        "这段属于用户要求总结的文档，不要因为问题没有点名具体字段而判为无关。"
+        "只有段落没有实际信息时才写“无相关信息”。\n段落摘要："
     )
-    assert evidence.claim == "Markdown 按标题和段落切块，默认只使用文档。"
+    assert evidence.claim == "文档策略：无相关信息。"
 
 
 def test_source_summary_only_cleans_wrappers_and_exact_duplicates() -> None:
@@ -1181,32 +1249,186 @@ def test_contextualizer_puts_history_before_current_message_and_instruction() ->
     def complete(user, **kwargs):
         captured["user"] = user
         captured["stage"] = kwargs["stage"]
-        return "RWKV-7-G1 是什么时候发布的？"
+        return "A"
 
     reader._complete = complete
     question = reader.contextualize(
         "它是什么时候发布的？",
-        [{"question": "RWKV 最新版本？", "answer": "RWKV-7-G1。"}],
+        [
+            {
+                "question": "RWKV 最新版本？",
+                "answer": "RWKV-7-G1。",
+                "state": {
+                    "facts": [
+                        {
+                            "subject": "RWKV-7-G1",
+                            "field": "版本",
+                            "status": "supported",
+                            "fact": "RWKV-7-G1",
+                        }
+                    ]
+                },
+            }
+        ],
     )
 
     prompt = captured["user"]
-    assert prompt.index("RWKV 最新版本？") < prompt.index("它是什么时候发布的？")
-    assert prompt.index("它是什么时候发布的？") < prompt.index("把当前消息改写")
+    assert prompt.index("RWKV-7-G1") < prompt.index("它是什么时候发布的？")
+    assert prompt.index("它是什么时候发布的？") < prompt.index("只输出 A 或 B")
     assert captured["stage"] == "contextualize"
-    assert question == "RWKV-7-G1 是什么时候发布的？"
+    assert question == "关于RWKV-7-G1，它是什么时候发布的？"
 
 
 def test_contextualizer_falls_back_to_previous_question_if_pronoun_remains() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
-    reader._complete = lambda *args, **kwargs: "它是什么时候发布的？"
+    reader._complete = lambda *args, **kwargs: "无法判断"
 
     question = reader.contextualize(
         "它是什么时候发布的？",
         [{"question": "RWKV 最新版本是什么？", "answer": "RWKV-7-G1。"}],
     )
 
-    assert question == "上一问：RWKV 最新版本是什么；当前追问：它是什么时候发布的？"
+    assert question == "RWKV 最新版本是什么时候发布的？"
+
+
+def test_contextualizer_turns_document_pronoun_into_a_standalone_question() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "A"
+
+    question = reader.contextualize(
+        "它使用的数据集有多少个有效窗口？预热窗口是否包含在内？",
+        [
+            {
+                "question": "当前管线版本是什么？这个版本修复了什么？",
+                "answer": "当前版本是 2.7.3。",
+            }
+        ],
+    )
+
+    assert question == "当前管线版本使用的数据集有多少个有效窗口？预热窗口是否包含在内？"
+
+
+def test_contextualizer_rejects_rewrite_that_drops_the_current_question() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "无法判断"
+
+    question = reader.contextualize(
+        "它的售后在哪里，以及多久洗一次车？",
+        [
+            {
+                "question": "小米 SU7 Ultra 的正式售价是多少？",
+                "answer": "52.99 万元。",
+                "state": {
+                    "facts": [
+                        {
+                            "subject": "小米 SU7 Ultra",
+                            "field": "正式售价",
+                            "status": "supported",
+                            "fact": "52.99 万元",
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    assert question == "关于小米 SU7 Ultra，它的售后在哪里，以及多久洗一次车？"
+
+
+def test_contextualizer_resolves_an_omitted_subject_when_model_marks_related() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "A"
+
+    question = reader.contextualize(
+        "一般售后在什么地方？以及多久洗一次车比较好？",
+        [
+            {
+                "question": "小米 SU7 Ultra 的价格是多少？",
+                "answer": "52.99 万元。",
+                "state": {
+                    "facts": [
+                        {
+                            "subject": "小米 SU7 Ultra",
+                            "field": "价格",
+                            "status": "supported",
+                            "fact": "52.99 万元",
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    assert question.startswith("关于小米 SU7 Ultra，一般售后在什么地方")
+    assert "多久洗一次车" in question
+
+
+def test_contextualizer_keeps_an_independent_new_topic_exactly() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "B"
+
+    question = reader.contextualize(
+        "Python 3.14 是什么时候发布的？",
+        [{"question": "小米 SU7 Ultra 的价格是多少？", "answer": "52.99 万元。"}],
+    )
+
+    assert question == "Python 3.14 是什么时候发布的？"
+
+
+def test_contextualizer_does_not_prepend_a_broad_document_question_to_complete_followup() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "A"
+
+    question = reader.contextualize(
+        "当前管线版本是什么？这个版本修复了什么？",
+        [
+            {
+                "question": "总结这四份文档，分别说明它们负责的信息。",
+                "answer": "四份文档摘要。",
+            }
+        ],
+    )
+
+    assert question == "当前管线版本是什么？这个版本修复了什么？"
+
+
+def test_final_cleaner_removes_a_repeated_semicolon_list_item() -> None:
+    answer = (
+        "**局限性**：生成指令可能含有噪声 [S1]；依赖大型模型 [S2]；"
+        "生成指令可能含有噪声 [S1]。"
+    )
+
+    cleaned = _clean_final_answer(answer)
+
+    assert cleaned.count("生成指令可能含有噪声") == 1
+    assert "依赖大型模型 [S2]" in cleaned
+
+
+def test_internal_prompt_markers_are_detected_as_leakage() -> None:
+    assert _contains_prompt_leakage("当前检索点：售后地点\n检索要求：查询网点")
+    assert _contains_prompt_leakage("只回答这些检索点：版本、日期")
+    assert _contains_prompt_leakage("以下按问项组织，每个问项仅说明一次")
+    assert _contains_prompt_leakage("这段属于用户要求总结的文档")
+    assert not _contains_prompt_leakage("售后地点主要位于省会城市 [S1]。")
+
+
+def test_per_document_reader_rejects_copied_summary_instructions() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: (
+        "这段属于用户要求总结的文档，只有段落没有实际信息时才写无相关信息。"
+    )
+
+    with pytest.raises(SearchReaderError, match="copied summary instructions"):
+        reader._summarize_one(
+            "总结这份文档",
+            DocumentChunk(
+                "S1",
+                "项目说明",
+                "document://brief#chunk-1",
+                "项目代号为 Cobalt Finch。",
+            ),
+        )
 
 
 def test_contextualizer_merges_scope_acceptance_with_previous_user_task() -> None:
@@ -1784,7 +2006,7 @@ def test_contextualizer_receives_validated_previous_field_state() -> None:
 
     def complete(user, **kwargs):
         captured["user"] = user
-        return "原神在7.0版本之后的下一个版本是什么？"
+        return "A"
 
     reader._complete = complete
     rewritten = reader.contextualize(
@@ -1808,9 +2030,9 @@ def test_contextualizer_receives_validated_previous_field_state() -> None:
         ],
     )
 
-    assert "verified_state" in captured["user"]
-    assert "7.0版本" in captured["user"]
-    assert rewritten == "原神在7.0版本之后的下一个版本是什么？"
+    assert "此前对象：原神" in captured["user"]
+    assert '"fact": "7.0版本"' in rewritten
+    assert rewritten.endswith("当前追问：那下一个版本呢？")
 
 
 def test_model_call_budget_stops_unbounded_request_amplification() -> None:
@@ -1955,6 +2177,143 @@ def test_point_branches_are_aggregated_once_before_the_final_summary() -> None:
             assert prompt.index("事实") < prompt.index("问题：比较两个游戏")
             cue = "汇总材料：" if stage == "aggregate" else "最终回答："
             assert prompt.rstrip().endswith(cue)
+
+
+def test_document_branches_use_document_prompts_then_cross_document_summary() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    rows = [
+        Evidence(
+            "S1",
+            "alpha.pdf · Method",
+            "document://doc_alpha123#chunk-1",
+            "Alpha 方法使用线性注意力。",
+            "Alpha 方法使用线性注意力。",
+            retrieval_point="alpha.pdf",
+            retrieval_query="对比两篇论文",
+        ),
+        Evidence(
+            "S2",
+            "beta.pdf · Method",
+            "document://doc_beta123#chunk-1",
+            "Beta 方法使用多头注意力。",
+            "Beta 方法使用多头注意力。",
+            retrieval_point="beta.pdf",
+            retrieval_query="对比两篇论文",
+        ),
+    ]
+    calls: list[tuple[str, str]] = []
+
+    def complete(user, **kwargs):
+        stage = kwargs["stage"]
+        calls.append((stage, user))
+        if stage == "branch_finalize":
+            assert "当前日期" not in user
+            if "alpha.pdf" in user:
+                return "alpha.pdf：Alpha 方法使用线性注意力 [S1]。"
+            return "beta.pdf：Beta 方法使用多头注意力 [S2]。"
+        if stage == "aggregate":
+            return (
+                "alpha.pdf：Alpha 使用线性注意力 [S1]。\n"
+                "beta.pdf：Beta 使用多头注意力 [S2]。"
+            )
+        assert stage == "finalize"
+        if "初稿：" not in user:
+            assert "根据以上文档材料直接回答" in user
+        return "Alpha 使用线性注意力，Beta 使用多头注意力 [S1][S2]。"
+
+    reader._complete = complete
+    answer, warnings = reader.finalize("对比两篇论文", rows)
+
+    assert answer == "Alpha 使用线性注意力，Beta 使用多头注意力 [S1][S2]。"
+    assert warnings == []
+    assert [stage for stage, _ in calls] == [
+        "branch_finalize",
+        "branch_finalize",
+        "finalize",
+    ]
+
+
+def test_document_branch_keeps_one_direct_anchor_for_each_explicit_question_item() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    question = "请总结论文：说明研究问题、方法流程、数据规模、主要结果和局限性。"
+    rows = [
+        Evidence(
+            f"S{index}",
+            f"paper.pdf · {label}",
+            f"document://doc_paper#chunk-{index}",
+            claim,
+            claim,
+            retrieval_point="paper.pdf",
+            retrieval_query=question,
+        )
+        for index, (label, claim) in enumerate(
+            [
+                ("Problem", "研究问题是自动生成指令。"),
+                ("Method", "方法流程包括生成、过滤和微调。"),
+                ("Scale", "数据规模为 52,445 条指令和 82,000 个实例。"),
+                ("Results", "主要结果是在评测中达到 51.6 分。"),
+                ("Limitations", "局限性包括依赖大型模型并继承偏差。"),
+            ],
+            start=1,
+        )
+    ]
+    captured = {}
+
+    def complete(user, **kwargs):
+        assert kwargs["stage"] == "branch_finalize"
+        captured["user"] = user
+        return "论文覆盖研究问题、方法、规模、结果和局限性 [S1][S2][S3][S4][S5]。"
+
+    reader._complete = complete
+    node = _MaterialNode(
+        tuple(item.source_id for item in rows),
+        "漏斗摘要只保留了研究问题 [S1]。",
+        "paper.pdf",
+    )
+    reader._finalize_branch(
+        question,
+        node,
+        {item.source_id: item for item in rows},
+        3000,
+    )
+
+    assert _document_answer_points(question) == [
+        "研究问题",
+        "方法流程",
+        "数据规模",
+        "主要结果",
+        "局限性",
+    ]
+    prompt = captured["user"]
+    assert "问项锚点：数据规模" in prompt
+    assert "52,445 条指令和 82,000 个实例" in prompt
+    assert "问项锚点：局限性" in prompt
+    assert prompt.index("问项锚点：数据规模") < prompt.index("问题：")
+
+
+def test_broad_document_map_prompt_keeps_each_passage_in_scope() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "恢复演练必须在隔离环境执行。"
+
+    reader._complete = complete
+    evidence = reader._summarize_one(
+        "总结这四份文档，分别说明它们负责的信息。",
+        DocumentChunk(
+            "S1",
+            "operations.md · 恢复演练",
+            "document://doc_ops#chunk-1",
+            "恢复演练必须在隔离环境执行。",
+            retrieval_point="operations.md",
+            retrieval_query="总结这四份文档，分别说明它们负责的信息。",
+        ),
+    )
+
+    assert "不要因为问题没有点名具体字段而判为无关" in captured["user"]
+    assert evidence.claim == "恢复演练必须在隔离环境执行。"
 
 
 def test_retrieval_point_aggregate_retries_with_smaller_context_budget() -> None:
@@ -2177,7 +2536,7 @@ def test_atomic_field_binding_skips_procedural_and_open_ended_questions() -> Non
     assert not _field_binding_applicable("怎样配置 healthcheck？给出示例。", records)
 
 
-def test_final_reader_receives_resolved_question_without_duplicate_history() -> None:
+def test_final_reader_uses_current_turn_as_answer_contract() -> None:
     settings = replace(Settings(), rwkv_model="test")
     reader = RWKVReader(settings)
     captured = {}
@@ -2198,9 +2557,37 @@ def test_final_reader_receives_resolved_question_without_duplicate_history() -> 
     )
 
     prompt = captured["prompts"][0]
-    assert prompt.index("Fact 1") < prompt.index("适合回甘偏好的口粮茶有哪些？")
+    assert prompt.index("Fact 1") < prompt.index("我喜欢回甘好的")
+    assert "适合回甘偏好的口粮茶有哪些？" not in prompt
     assert "可以按六大茶类选择" not in prompt
-    assert "我喜欢回甘好的" not in prompt
+
+
+def test_final_reader_does_not_reanswer_previous_question_in_pronoun_followup() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "有效窗口为 48,600 个，不包含预热窗口 [S1]。"
+
+    reader._complete = complete
+    answer, _ = reader.finalize(
+        "上一问：当前管线版本是什么；当前追问：它使用的数据集有多少个有效窗口？预热窗口是否包含在内？",
+        [
+            Evidence(
+                "S1",
+                "实验结果",
+                "document://experiment#chunk-1",
+                "River-17C 有 48,600 个有效窗口，不包含 1,200 个预热窗口。",
+                "River-17C 有 48,600 个有效窗口，不包含 1,200 个预热窗口。",
+            )
+        ],
+        current_message="它使用的数据集有多少个有效窗口？预热窗口是否包含在内？",
+    )
+
+    assert "问题：它使用的数据集有多少个有效窗口？预热窗口是否包含在内？" in captured["user"]
+    assert "问题：上一问" not in captured["user"]
+    assert answer.startswith("有效窗口为 48,600 个")
 
 
 def test_conversation_answer_reads_history_before_request_without_citations() -> None:

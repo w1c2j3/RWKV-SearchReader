@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
 import sqlite3
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -512,7 +515,32 @@ class ConversationStore:
         content_base64: str = "",
         max_pdf_bytes: int = 20_000_000,
         max_pdf_pages: int = 200,
+        progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        if str(filename or "").casefold().endswith(".pdf") and content_base64:
+            try:
+                raw_pdf = base64.b64decode(content_base64, validate=True)
+            except (binascii.Error, ValueError):
+                raw_pdf = b""
+            if raw_pdf:
+                identity = _identity(conversation_id, "conversation id")
+                owner = _identity(client_id, "client id")
+                digest = hashlib.sha256(raw_pdf).hexdigest()
+                with self._lock, self._connect() as connection:
+                    existing = connection.execute(
+                        """SELECT d.* FROM documents d
+                           JOIN conversations c ON c.id = d.conversation_id
+                           WHERE d.conversation_id = ? AND c.client_id = ?
+                             AND d.sha256 = ?""",
+                        (identity, owner, digest),
+                    ).fetchone()
+                if existing is not None:
+                    if progress:
+                        progress(
+                            "pdf_cached",
+                            {"message": "该 PDF 已经解析，直接使用已保存结果"},
+                        )
+                    return self._document(existing)
         prepared = prepare_document(
             filename,
             content,
@@ -520,6 +548,7 @@ class ConversationStore:
             max_markdown_bytes=max_bytes,
             max_pdf_bytes=max_pdf_bytes,
             max_pdf_pages=max_pdf_pages,
+            progress=progress,
         )
         return self.add_prepared_document(
             conversation_id,
@@ -623,6 +652,14 @@ class ConversationStore:
         query: str,
         limit: int,
     ) -> list[MarkdownPassage]:
+        passages = self.document_passages(conversation_id, client_id)
+        return rank_markdown_passages(query, passages, limit)
+
+    def document_passages(
+        self, conversation_id: str, client_id: str
+    ) -> list[MarkdownPassage]:
+        """Load all attached-document passages in document and page order."""
+
         identity = _identity(conversation_id, "conversation id")
         owner = _identity(client_id, "client id")
         with self._lock, self._connect() as connection:
@@ -641,7 +678,7 @@ class ConversationStore:
                    ORDER BY d.created_at, c.ordinal""",
                 (identity,),
             ).fetchall()
-        passages = [
+        return [
             MarkdownPassage(
                 document_id=row["document_id"],
                 filename=row["filename"],
@@ -651,4 +688,3 @@ class ConversationStore:
             )
             for row in rows
         ]
-        return rank_markdown_passages(query, passages, limit)

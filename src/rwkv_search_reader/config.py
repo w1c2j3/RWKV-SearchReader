@@ -139,6 +139,7 @@ class Settings:
     document_pdf_max_pages: int = 200
     document_chunk_chars: int = 2400
     document_max_chunks: int = 12
+    document_full_read_max_chunks: int = 400
     api_host: str = "0.0.0.0"
     api_port: int = 8790
     trace_enabled: bool = True
@@ -183,6 +184,7 @@ class Settings:
             "reduce_chunk_chars": self.rwkv_reduce_chunk_chars,
             "reduce_fan_in": self.rwkv_reduce_fan_in,
             "final_material_chars": self.rwkv_final_material_chars,
+            "document_full_read_max_chunks": self.document_full_read_max_chunks,
             "review_max_rounds": self.review_max_rounds,
             "max_concurrent_requests": self.api_max_concurrent_requests,
             "max_model_calls_per_request": self.rwkv_max_calls_per_request,
@@ -284,6 +286,9 @@ def get_settings() -> Settings:
             "SEARCH_READER_DOCUMENT_CHUNK_CHARS", 2400, 600, 8000
         ),
         document_max_chunks=_integer("SEARCH_READER_DOCUMENT_MAX_CHUNKS", 12, 1, 30),
+        document_full_read_max_chunks=_integer(
+            "SEARCH_READER_DOCUMENT_FULL_READ_MAX_CHUNKS", 400, 12, 440
+        ),
         api_host=_text("SEARCH_READER_API_HOST", "0.0.0.0"),
         api_port=_integer("SEARCH_READER_API_PORT", 8790, 1, 65535),
         trace_enabled=_boolean("SEARCH_READER_TRACE_ENABLED", True),

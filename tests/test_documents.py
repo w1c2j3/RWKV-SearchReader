@@ -7,6 +7,8 @@ import pytest
 from rwkv_search_reader import documents
 from rwkv_search_reader.documents import (
     MarkdownPassage,
+    full_document_read_requested,
+    limit_full_document_passages,
     normalize_markdown,
     prepare_document,
     rank_markdown_passages,
@@ -54,7 +56,7 @@ def test_pdf_is_converted_to_markdown_for_existing_rag_flow(monkeypatch) -> None
     raw_pdf = b"%PDF-1.7\nminimal-test-payload"
     calls = []
 
-    def convert(filename, content, *, max_pages, max_bytes):
+    def convert(filename, content, *, max_pages, max_bytes, progress=None):
         calls.append((filename, content, max_pages, max_bytes))
         return "# 报告\n\n| 指标 | 数值 |\n| --- | --- |\n| 准确率 | 91% |"
 
@@ -73,6 +75,31 @@ def test_pdf_is_converted_to_markdown_for_existing_rag_flow(monkeypatch) -> None
     assert prepared.source_mime == "application/pdf"
     assert "准确率" in prepared.markdown
     assert calls == [("report.pdf", raw_pdf, 80, 20_000)]
+
+
+def test_full_document_read_detects_summary_and_comparison_requests() -> None:
+    assert full_document_read_requested("概括整篇论文")
+    assert full_document_read_requested("对比两篇论文的实验结果")
+    assert not full_document_read_requested("RWKV 的训练复杂度是什么？")
+
+
+def test_full_document_limit_balances_documents_and_preserves_order() -> None:
+    passages = [
+        MarkdownPassage(f"doc_{name}123", f"{name}.md", index, "", f"{name}-{index}")
+        for name in ("alpha", "beta")
+        for index in range(10)
+    ]
+
+    selected = limit_full_document_passages(passages, 6)
+
+    assert [item.content for item in selected] == [
+        "alpha-0",
+        "beta-0",
+        "alpha-4",
+        "beta-4",
+        "alpha-9",
+        "beta-9",
+    ]
 
 
 def test_pdf_upload_rejects_non_pdf_payload() -> None:

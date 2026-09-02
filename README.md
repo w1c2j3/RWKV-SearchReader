@@ -53,9 +53,10 @@ RWKV SearchReader 是一个“模型规划范围、程序执行检索、模型�
 - 所有 RWKV 用户提示均采用“材料在前、问题和要求在后”；
 - OpenAI 兼容 RWKV `/completions` 或 `/chat/completions`；
 - CLI、FastAPI、带本地历史记录和可折叠过程时间线的聊天 Web UI；
-- 聊天输入框可直接上传 `.md` / `.markdown` / `.pdf`：PDF 通过 Docling 转为保留标题、表格与阅读顺序的 Markdown，再进入同一套分块与文档 RAG；PDF 原文件和转换文本都保存在本机 SQLite，问题相关片段分别交给独立 RWKV 并发阅读；默认 Markdown/转换文本不超过 10 MB，PDF 不超过 20 MB、200 页；
+- 聊天输入框可直接上传 `.md` / `.markdown` / `.pdf`：PDF 通过 Docling 转为保留标题、表格与阅读顺序的 Markdown；已有文本层的论文跳过 OCR，扫描文档仍启用 OCR；前端在转换期间持续显示阶段和已用秒数；PDF 原文件和转换文本都保存在本机 SQLite，重复上传同一 PDF 直接使用缓存结果；默认 Markdown/转换文本不超过 10 MB，PDF 不超过 20 MB、200 页；
+- 具体文档问题只取相关分块；“总结整篇”、“对比两篇”等全局问题读取各文档全部分块，先为每个分块并发摘要，再按文档分支递归漏斗归并，最后进行跨文档总结；默认一次全局阅读最多 400 个原始分块；
 - 使用 SQLite 持久化一级 `conversation` 对象及其有序 `user` / `assistant` message items；侧栏直接列 conversation，点击后读取其 items，不再从单轮日志临时拼接聊天；
-- 多轮对话除文本历史外还保存上一轮已验证的对象、字段、事实和来源；“下一个”等追问会把该结构化状态作为基准交给字段整理器，而不是只依赖旧回答文本；
+- 多轮对话除文本历史外还保存上一轮已验证的对象、字段、事实和来源；只有包含“它、这个、前者”等指代的追问才会做上下文改写，完整的新问题始终保留原文；改写若遗失当前问题的实质词会被拒绝；
 - 支持独立的最终 RWKV 配置；当前本机使用 g1i-13.3B（16K context）承担最终综合、对话总结和文档成品生成，最终回答 `max_tokens` 统一封顶为 4090；
 - 浏览器保存独立的 client ID 和当前 conversation ID；公网只能列出该 client ID 所属 conversations，不能读取其他浏览器或本机历史；旧 JSONL `session_id` 会在首次打开时一次性迁移为 conversation；
 - 丰富结果接口 `/v1/answer` 和兼容接口 `/v1/chat/completions`；
@@ -96,6 +97,7 @@ SEARCH_READER_RWKV_REDUCE_FAN_IN=4
 SEARCH_READER_RWKV_FINAL_MATERIAL_CHARS=9000
 SEARCH_READER_RWKV_MAX_TOKENS=4090
 SEARCH_READER_RWKV_MAX_CALLS_PER_REQUEST=600
+SEARCH_READER_DOCUMENT_FULL_READ_MAX_CHUNKS=400
 SEARCH_READER_API_MAX_CONCURRENT_REQUESTS=4
 SEARCH_READER_API_RATE_LIMIT_PER_MINUTE=20
 

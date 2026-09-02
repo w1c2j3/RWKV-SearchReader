@@ -194,7 +194,7 @@ def _bind_queries_to_retrieval_points(
 
 
 def _document_sources(
-    passages: list[MarkdownPassage], start_index: int = 1
+    passages: list[MarkdownPassage], question: str, start_index: int = 1
 ) -> tuple[list[SearchHit], list[DocumentChunk]]:
     sources: list[SearchHit] = []
     chunks: list[DocumentChunk] = []
@@ -209,6 +209,8 @@ def _document_sources(
                 content=passage.content,
                 provider="local-markdown",
                 score=score,
+                retrieval_point=passage.filename,
+                retrieval_query=question,
             )
         )
         chunks.append(
@@ -219,6 +221,8 @@ def _document_sources(
                 text=passage.content,
                 score=score,
                 chunk_index=passage.ordinal,
+                retrieval_point=passage.filename,
+                retrieval_query=question,
             )
         )
     return sources, chunks
@@ -292,6 +296,9 @@ class SearchReaderPipeline:
             "reduce_chunk_chars": self.settings.rwkv_reduce_chunk_chars,
             "reduce_fan_in": self.settings.rwkv_reduce_fan_in,
             "final_material_chars": self.settings.rwkv_final_material_chars,
+            "document_full_read_max_chunks": (
+                self.settings.document_full_read_max_chunks
+            ),
             "max_tokens": self.settings.rwkv_max_tokens,
             "temperature": self.settings.rwkv_temperature,
             "max_model_calls_per_request": self.settings.rwkv_max_calls_per_request,
@@ -404,7 +411,7 @@ class SearchReaderPipeline:
                     )
                 return result
             effective_question = normalized
-            if history:
+            if history and self.reader.contextualization_required(normalized):
                 emit(
                     "contextualizing",
                     {"turn_count": len(history), "message": "正在衔接此前对话"},
@@ -690,7 +697,7 @@ class SearchReaderPipeline:
                     },
                 )
                 document_sources, document_chunks = _document_sources(
-                    local_passages, len(chunks) + 1
+                    local_passages, effective_question, len(chunks) + 1
                 )
                 sources.extend(document_sources)
                 chunks.extend(document_chunks)

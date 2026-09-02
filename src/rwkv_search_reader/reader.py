@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 from .config import Settings
+from .documents import full_document_read_requested
 from .model_client import OpenAICompatibleClient
 from .models import (
     DocumentChunk,
@@ -97,6 +98,10 @@ _CONTEXT_REFERENCE_RE = re.compile(
     r"它|它们|他们|她们|这个|那个|这些|那些|这两个|那两个|二者|两者|上述|前者|后者|"
     r"该(?:模型|版本|公司|产品|事件|人物|项目)|"
     r"^(?:那|那么|然后|为什么|什么时候|哪天|具体|价格呢|日期呢|版本呢)"
+)
+_PREVIOUS_TURN_REFERENCE_RE = re.compile(
+    r"^\s*(?:它|它们|他们|她们|这个|那个|这些|那些|这两个|那两个|"
+    r"二者|两者|那|那么|然后)|上述|前者|后者|刚才|前面|之前|此前"
 )
 _KNOWN_SECONDARY_HOSTS = (
     "wikipedia.org",
@@ -1368,6 +1373,99 @@ def _source_relevance(question: str, evidence: Evidence) -> float:
     return coverage * 0.65 + max(0.0, min(1.0, evidence.score)) * 0.35
 
 
+def _document_answer_points(question: str) -> list[str]:
+    """Recover an explicit user checklist without asking a model to plan again."""
+
+    text = " ".join(str(question or "").split()).strip()
+    if not text:
+        return []
+    match = re.search(r"[:：]\s*([^。！？!?]+)", text) or re.search(
+        r"(?:说明|包括|涵盖)\s*([^。！？!?]+)", text
+    )
+    if not match:
+        return []
+    candidate = match.group(1)
+    parts = [
+        re.sub(r"^(?:说明|回答|总结|比较)\s*", "", part).strip(" ：:。；;，,")
+        for part in re.split(r"\s*(?:、|，|,|；|;|以及|和)\s*", candidate)
+    ]
+    points = list(dict.fromkeys(part for part in parts if 2 <= len(part) <= 60))
+    return points if 2 <= len(points) <= 10 else []
+
+
+def _relevant_markdown_tables(question: str, material: str) -> str:
+    """Preserve exact document table rows beside a lossy model summary."""
+
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for line in str(material or "").splitlines():
+        if line.strip().startswith("|") and line.count("|") >= 2:
+            current.append(line.rstrip())
+        elif current:
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    question_terms = _claim_terms(question)
+    required_overlap = min(3, max(2, len(question_terms) // 4))
+    selected: list[str] = []
+    total = 0
+    for group in groups:
+        if len(group) < 2:
+            continue
+        table = "\n".join(group)
+        if question_terms and len(question_terms & _claim_terms(table)) < required_overlap:
+            continue
+        if selected and total + len(table) > 4000:
+            break
+        selected.append(table)
+        total += len(table)
+    return "\n\n".join(selected)
+
+
+def _document_point_anchors(
+    question: str, evidence: list[Evidence], max_anchors: int = 10
+) -> list[tuple[str, Evidence]]:
+    """Keep one direct map result near the final reader for every asked item."""
+
+    points = _document_answer_points(question)
+    if not points or not evidence:
+        return []
+    selected: list[tuple[str, Evidence]] = []
+    used: set[str] = set()
+    for point in points:
+        point_terms = frozenset(_claim_terms(point))
+
+        def rank(
+            item: Evidence,
+            selected_point: str = point,
+            selected_terms: frozenset[str] = point_terms,
+        ) -> tuple[float, float, float, float]:
+            material = f"{item.title} {item.claim}"
+            source_terms = _claim_terms(material)
+            overlap = len(selected_terms & source_terms) / max(1, len(selected_terms))
+            exact = float(
+                _normalized_text(selected_point) in _normalized_text(material)
+            )
+            numeric = float(bool(_normalized_numbers(item.claim)))
+            return (
+                exact,
+                overlap,
+                numeric,
+                _source_relevance(selected_point, item),
+            )
+
+        candidates = [item for item in evidence if item.source_id not in used]
+        if not candidates:
+            candidates = evidence
+        best = max(candidates, key=rank)
+        selected.append((point, best))
+        used.add(best.source_id)
+        if len(selected) >= max_anchors:
+            break
+    return selected
+
+
 def _recency_requested(question: str) -> bool:
     return bool(
         re.search(
@@ -1585,6 +1683,29 @@ def _clean_final_answer(value: str) -> str:
     return text
 
 
+def _contains_prompt_leakage(value: str) -> bool:
+    """Reject RWKV continuations that copy internal reducer instructions."""
+
+    text = str(value or "")
+    markers = (
+        "当前检索点：",
+        "检索要求：",
+        "只输出合并后的材料",
+        "根据以上材料直接回答问题",
+        "只回答这些检索点：",
+        "最终回答：",
+        "用户要求总结",
+        "概括这一段本身记录的信息",
+        "这段属于用户要求总结的文档",
+        "只有段落没有实际信息时",
+        "按问题中的问项组织",
+        "按问项组织，每个问项",
+        "每个问项仅说明一次",
+        "未提供的信息标注",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _deduplicate_final_output(value: str) -> str:
     """Remove exact generation loops without rewriting the model's answer."""
 
@@ -1627,24 +1748,41 @@ def _deduplicate_final_output(value: str) -> str:
 
 
 def _deduplicate_delimited_fragments(line: str) -> str:
-    """Collapse a repeated comma-delimited list emitted on a single line."""
+    """Collapse exact repeated items in a comma- or semicolon-delimited list."""
 
-    if line.count("、") < 3:
+    if sum(line.count(delimiter) for delimiter in ("、", "；", ";")) < 2:
         return line
-    fragments = line.split("、")
-    unique: list[str] = []
+    parts = re.split(r"([、；;])", line)
+    rendered: list[str] = []
     seen: set[str] = set()
-    for fragment in fragments:
+    pending_delimiter = ""
+    for index, fragment in enumerate(parts):
+        if index % 2:
+            pending_delimiter = fragment
+            continue
         if _has_unbalanced_delimiters(fragment):
             continue
         plain = re.sub(r"\[S\d+\]", "", fragment, flags=re.IGNORECASE)
+        plain = re.sub(
+            r"^\s*(?:[-*#]+\s*)?[^：:\n]{1,20}[:：]\s*", "", plain
+        )
         normalized = _normalized_text(plain)
-        if normalized and normalized in seen:
+        duplicate = len(normalized) >= 4 and any(
+            normalized == previous
+            or normalized in previous
+            or previous in normalized
+            for previous in seen
+        )
+        if duplicate:
+            pending_delimiter = ""
             continue
-        if normalized:
+        if len(normalized) >= 4:
             seen.add(normalized)
-        unique.append(fragment)
-    return "、".join(unique)
+        if rendered and pending_delimiter:
+            rendered.append(pending_delimiter)
+        rendered.append(fragment)
+        pending_delimiter = ""
+    return "".join(rendered)
 
 
 def _has_unbalanced_delimiters(value: str) -> bool:
@@ -1672,8 +1810,70 @@ def _clean_standalone_question(value: str, fallback: str) -> str:
     return first_line[:8000] or fallback
 
 
+def _parse_context_resolution(value: str, fallback: str) -> tuple[str, str]:
+    """Read the tiny relation + standalone-question contract leniently."""
+
+    text = str(value or "").strip()
+    relation_match = re.search(
+        r"(?:关系|relation)\s*[:：]\s*(承接|独立|related|independent)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    relation = ""
+    if relation_match:
+        relation = (
+            "related"
+            if relation_match.group(1).casefold() in {"承接", "related"}
+            else "independent"
+        )
+    question_match = re.search(
+        r"(?:问题|独立问题|question)\s*[:：]\s*(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    candidate = question_match.group(1).strip() if question_match else text
+    candidate = re.sub(
+        r"^(?:关系|relation)\s*[:：].*?(?:\r?\n|$)",
+        "",
+        candidate,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    return relation, _clean_standalone_question(candidate, fallback)
+
+
 def _needs_conversation_subject(value: str) -> bool:
     return bool(_CONTEXT_REFERENCE_RE.search(str(value or "").strip()))
+
+
+def _needs_previous_turn_context(value: str) -> bool:
+    return bool(_PREVIOUS_TURN_REFERENCE_RE.search(str(value or "").strip()))
+
+
+def _previous_question_anchor(value: str) -> str:
+    """Keep the subject phrase of the newest question for pronoun resolution."""
+
+    first_clause = re.split(r"[？?!！。；;\n]", str(value or "").strip(), maxsplit=1)[0]
+    anchor = re.sub(
+        r"(?:是|为)(?:什么|多少|谁|哪(?:个|些|里|一天)?|何时|什么时候).*$",
+        "",
+        first_clause,
+    ).strip(" ，,:：的")
+    if not anchor or len(anchor) > 160 or re.match(r"^(?:总结|概括|比较|分析)", anchor):
+        return ""
+    return anchor
+
+
+def _bind_previous_question_anchor(question: str, previous_question: str) -> str:
+    anchor = _previous_question_anchor(previous_question)
+    if not anchor:
+        return ""
+    return re.sub(
+        r"^\s*(?:这个版本|那个版本|该版本|这个项目|那个项目|该项目|它们|它)",
+        anchor,
+        str(question or "").strip(),
+        count=1,
+    )
 
 
 def _parse_audit_output(value: str, max_queries: int) -> EvidenceAudit:
@@ -2030,6 +2230,15 @@ class RWKVReader:
     def clarification_required(question: str) -> bool:
         return _needs_conversation_subject(question)
 
+    @staticmethod
+    def contextualization_required(question: str) -> bool:
+        text = str(question or "").strip()
+        # Chinese follow-ups commonly omit the subject altogether (for example,
+        # "售后在哪里？").  A pronoun-only gate therefore loses genuine
+        # continuations.  The resolver itself returns an explicit related /
+        # independent decision and is guarded against dropping current terms.
+        return bool(text)
+
     def call_records(self) -> list[dict[str, object]]:
         with self._call_lock:
             return [dict(record) for record in self._call_records]
@@ -2339,6 +2548,47 @@ class RWKVReader:
                 ),
             )
             designed = candidates[selected_index]
+        if designed and records:
+            record_terms: list[set[str]] = []
+            for record in records:
+                terms = _claim_terms(
+                    f"{record.question} {' '.join(record.fields)}"
+                ) - _claim_terms(record.subject)
+                record_terms.append(terms)
+
+            def covers(row: tuple[str, str], record_index: int) -> bool:
+                terms = record_terms[record_index]
+                return bool(terms and terms & _claim_terms(f"{row[0]} {row[1]}"))
+
+            for index, record in enumerate(records):
+                if any(covers(row, index) for row in designed):
+                    continue
+                point = (record.fields[0] if record.fields else record.question)[:160]
+                query = " ".join(
+                    f"{record.subject} {record.question} {' '.join(record.fields)}".split()
+                )[:800]
+                designed.append((point, query))
+
+            while len(designed) > self.settings.research_plan_max_queries:
+                removable = next(
+                    (
+                        index
+                        for index in range(len(designed) - 1, -1, -1)
+                        if all(
+                            not covers(designed[index], record_index)
+                            or any(
+                                other != index and covers(row, record_index)
+                                for other, row in enumerate(designed)
+                            )
+                            for record_index in range(len(records))
+                        )
+                    ),
+                    None,
+                )
+                if removable is None:
+                    break
+                designed.pop(removable)
+            designed = designed[: self.settings.research_plan_max_queries]
         return (
             [query for _point, query in designed],
             [point for point, _query in designed],
@@ -2701,55 +2951,63 @@ class RWKVReader:
                     f"{previous_question}；用户补充：公开资料能够确认的代表性对象都需要，"
                     "无需再次询问具体名单。"
                 )[:8000]
-        compact_history = history[-6:]
-        material = "\n".join(
-            json.dumps(
-                {
-                    "user": str(turn.get("question", ""))[:500],
-                    "assistant": str(turn.get("answer", ""))[:700],
-                },
-                ensure_ascii=False,
-            )
-            for turn in compact_history
-        )
         prior_facts = self.prior_facts(history)
-        compact_facts = [
-            {
-                "subject": str(item.get("subject") or "")[:200],
-                "field": str(item.get("field") or "")[:80],
-                "status": str(item.get("status") or "")[:20],
-                "fact": str(item.get("fact") or "")[:300],
-            }
-            for item in prior_facts[:32]
-        ]
-        user = f"""{material}
-
-verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
-
+        subjects = list(
+            dict.fromkeys(
+                str(item.get("subject") or "").strip()
+                for item in prior_facts
+                if str(item.get("subject") or "").strip()
+            )
+        )
+        previous_question = str(history[-1].get("question") or "").strip()
+        context = (
+            f"此前对象：{'、'.join(subjects[:8])}"
+            if subjects
+            else f"此前问题：{previous_question[:800]}"
+        )
+        user = f"""{context}
 当前消息：{question}
-结合此前对话和 verified_state，把当前消息改写成可独立理解的问题；“下一个”必须保留此前已确认对象和基准记录。只输出改写后的问题。
-独立问题："""
-        output = self._complete(user, max_tokens=160, stage="contextualize")
-        rewritten = _clean_standalone_question(output, question)
-        previous_answer = str(history[-1].get("answer") or "").strip()
-        if previous_answer and _normalized_text(rewritten) == _normalized_text(
-            previous_answer
-        ):
-            previous_question = str(history[-1].get("question") or "").strip()
-            if previous_question:
-                return f"上一问：{previous_question}；当前追问：{question}"[:8000]
-        if _needs_conversation_subject(question) and (
-            _normalized_text(rewritten) == _normalized_text(question)
-            or _needs_conversation_subject(rewritten)
-        ):
-            if prior_facts:
-                anchor = json.dumps(prior_facts, ensure_ascii=False)
+
+当前消息中的问题应由此前对象或此前问题承接，还是与它无关？只输出 A 或 B。
+A：承接
+B：无关
+答案："""
+        output = self._complete(user, max_tokens=8, stage="contextualize")
+        decision = str(output or "").strip().upper()
+        related = decision.startswith("A")
+        independent = decision.startswith("B")
+        if independent and not _needs_previous_turn_context(question):
+            return question
+        if related:
+            if subjects and any(
+                _normalized_text(subject) in _normalized_text(question)
+                for subject in subjects
+            ):
+                return question
+            if prior_facts and re.search(
+                r"下一个|之后|以前|相比|变化|前者|后者", question
+            ):
+                anchor = json.dumps(prior_facts[:32], ensure_ascii=False)
                 return f"此前已确认：{anchor}；当前追问：{question}"[:8000]
-            previous_question = str(history[-1].get("question") or "").strip()
-            if previous_question:
+            if subjects:
+                return f"关于{'、'.join(subjects[:8])}，{question}"[:8000]
+            if previous_question and _needs_previous_turn_context(question):
+                anchored = _bind_previous_question_anchor(question, previous_question)
+                if anchored and anchored != question:
+                    return anchored[:8000]
                 previous_question = previous_question.rstrip("。.!！?？")
                 return f"上一问：{previous_question}；当前追问：{question}"[:8000]
-        return rewritten
+            return question
+        if _needs_previous_turn_context(question):
+            if subjects:
+                return f"关于{'、'.join(subjects[:8])}，{question}"[:8000]
+            if previous_question:
+                anchored = _bind_previous_question_anchor(question, previous_question)
+                if anchored and anchored != question:
+                    return anchored[:8000]
+                previous_question = previous_question.rstrip("。.!！?？")
+                return f"上一问：{previous_question}；当前追问：{question}"[:8000]
+        return question
 
     def answer_from_history(
         self, question: str, history: list[dict[str, object]]
@@ -3677,14 +3935,33 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         return selections, warnings
 
     def _summarize_one(self, question: str, chunk: DocumentChunk) -> Evidence:
-        material = chunk.text[: self.settings.max_evidence_chars].strip()
+        document_source = chunk.url.startswith("document://")
+        raw_material = chunk.text.strip()
+        material = (
+            f"{chunk.title}\n{raw_material}" if document_source else raw_material
+        )[: self.settings.max_evidence_chars].strip()
         point = chunk.retrieval_point or chunk.retrieval_query
-        instruction = (
-            f"总结以上网页中与检索点“{point}”有关、可用于回答“{question}”的内容。"
-            if point
-            else "总结以上网页内容。"
-        )
-        user = f"""{material}
+        if document_source:
+            instruction = (
+                "概括这一段本身记录的信息，保留名称、数字和限定条件。"
+                "这段属于用户要求总结的文档，不要因为问题没有点名具体字段而判为无关。"
+                "只有段落没有实际信息时才写“无相关信息”。"
+                if full_document_read_requested(question)
+                else "只写这一段中能用于回答问题的内容，保留名称、数字和限定条件。"
+                "没有相关内容就只写“无相关信息”。"
+            )
+            user = f"""{material}
+
+问题：{question}
+{instruction}
+段落摘要："""
+        else:
+            instruction = (
+                f"总结以上网页中与检索点“{point}”有关、可用于回答“{question}”的内容。"
+                if point
+                else "总结以上网页内容。"
+            )
+            user = f"""{material}
 
 {instruction}只复述同一条记录明确对应的值，不把不同表格行、版本或对象的信息拼在一起；网页有表格时保留相关的完整行。
 网页摘要："""
@@ -3698,12 +3975,18 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             raise SearchReaderError(
                 "summarize", "RWKV returned an empty source summary"
             )
-        if chunk.url.startswith("document://"):
-            summary = material
-        else:
+        if _contains_prompt_leakage(summary):
+            raise SearchReaderError("summarize", "RWKV copied summary instructions")
+        if not document_source:
             summary = _remove_copied_temporal_qualifiers(
                 summary, f"{chunk.title}\n{material}"
             )
+        else:
+            exact_tables = _relevant_markdown_tables(question, raw_material)
+            if exact_tables and _normalized_text(exact_tables) not in _normalized_text(
+                summary
+            ):
+                summary = f"{summary}\n相关原始表格：\n{exact_tables}".strip()
         unsupported = _unsupported_summary_bindings(summary, material)
         if unsupported:
             summary = _remove_unsupported_number_sentences(summary, material)
@@ -3808,12 +4091,24 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             dict.fromkeys(source_id for node in group for source_id in node.source_ids)
         )
         requirement = _branch_requirement(source_ids, evidence_by_id, retrieval_point)
-        instruction = (
-            f"压缩以上同一检索点的材料，不超过 {target_chars} 个字符"
-            if target_chars
-            else "合并以上同一检索点的材料"
+        document_group = bool(source_ids) and all(
+            evidence_by_id.get(source_id)
+            and evidence_by_id[source_id].url.startswith("document://")
+            for source_id in source_ids
         )
-        user = f"""{material}
+        instruction = (
+            f"压缩以上同一{'文档' if document_group else '检索点'}的材料，不超过 {target_chars} 个字符"
+            if target_chars
+            else f"合并以上同一{'文档' if document_group else '检索点'}的材料"
+        )
+        if document_group:
+            user = f"""{material}
+
+问题：{requirement}
+{instruction}。同一问项只写一次，合并重复说法；保留能回答问题的名称、数字、方法、实验结果、局限性、限定条件和 [S1] 来源编号。某份材料写“无相关信息”但其他材料已给出事实时，删除“无相关信息”。只输出合并后的材料。
+{retrieval_point or '文档'}："""
+        else:
+            user = f"""{material}
 
 当前日期：{_today()}
 当前检索点：{retrieval_point or "未指定"}
@@ -3835,6 +4130,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         summary = _clean_final_answer(output)
         if not summary:
             raise SearchReaderError("reduce", "RWKV returned an empty group summary")
+        if _contains_prompt_leakage(summary):
+            raise SearchReaderError("reduce", "RWKV copied reducer instructions")
         if summary.lstrip().startswith("[[") or summary.count("检索点：") > 1:
             raise SearchReaderError("reduce", "RWKV copied reducer input")
         if retrieval_point:
@@ -3848,9 +4145,12 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 raise SearchReaderError(
                     "reduce", "RWKV returned only foreign retrieval points"
                 )
-        unsupported = _unsupported_summary_bindings(
-            summary, f"{material}\n当前日期：{_today()}"
+        validation_material = (
+            material
+            if document_group
+            else f"{material}\n当前日期：{_today()}"
         )
+        unsupported = _unsupported_summary_bindings(summary, validation_material)
         if unsupported:
             values = ", ".join(sorted(unsupported))
             raise SearchReaderError(
@@ -3869,6 +4169,62 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if source_id in evidence_by_id
         ]
         summary = _attach_missing_citations(summary, source_evidence)
+        if document_group and len(group) > 1:
+            reversed_material = _render_material_nodes(list(reversed(group)))
+            reversed_user = f"""{reversed_material}
+
+问题：{requirement}
+{instruction}。同一问项只写一次，合并重复说法；保留能回答问题的名称、数字、方法、实验结果、局限性、限定条件和 [S1] 来源编号。某份材料写“无相关信息”但其他材料已给出事实时，删除“无相关信息”。只输出合并后的材料。
+{retrieval_point or '文档'}："""
+            try:
+                second_output = self._complete(
+                    reversed_user,
+                    max_tokens=min(
+                        512,
+                        self.settings.rwkv_summary_max_tokens,
+                        max(128, target_chars // 4) if target_chars else 512,
+                    ),
+                    stage="reduce",
+                )
+                second_summary = _clean_final_answer(second_output)
+                if second_summary and not (
+                    _contains_prompt_leakage(second_summary)
+                    or
+                    second_summary.lstrip().startswith("[[")
+                    or second_summary.count("检索点：") > 1
+                    or _unsupported_summary_bindings(
+                        second_summary, reversed_material
+                    )
+                ):
+                    second_summary = re.sub(
+                        r"\[(S\d+)\]",
+                        lambda match: (
+                            match.group(0)
+                            if match.group(1).upper() in allowed
+                            else ""
+                        ),
+                        second_summary,
+                        flags=re.IGNORECASE,
+                    )
+                    second_summary = _attach_missing_citations(
+                        second_summary, source_evidence
+                    )
+                    combined_lines: list[str] = []
+                    seen_lines: set[str] = set()
+                    for line in f"{summary}\n{second_summary}".splitlines():
+                        key = _normalized_text(line)
+                        if key and key in seen_lines:
+                            continue
+                        if key:
+                            seen_lines.add(key)
+                        combined_lines.append(line)
+                    combined_limit = min(
+                        target_chars or self.settings.rwkv_reduce_chunk_chars,
+                        max(1200, self.settings.rwkv_reduce_chunk_chars // 2 - 500),
+                    )
+                    summary = "\n".join(combined_lines)[:combined_limit].rstrip()
+            except SearchReaderError:
+                pass
         return _MaterialNode(
             source_ids=source_ids,
             summary=summary,
@@ -3890,6 +4246,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         requirement = _branch_requirement(
             node.source_ids, evidence_by_id, node.retrieval_point
         )
+        document_branch = bool(branch_sources) and all(
+            item.url.startswith("document://") for item in branch_sources
+        )
         direct_anchors = sorted(
             branch_sources,
             key=lambda item: (
@@ -3901,17 +4260,42 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 ),
             ),
         )[-4:]
-        anchor_nodes = [
-            _MaterialNode(
-                source_ids=(item.source_id,),
-                summary=f"{item.title}\n{item.claim}"[:1200],
-                retrieval_point=node.retrieval_point,
-            )
-            for item in direct_anchors
-            if len(node.source_ids) > 1
-        ]
+        if document_branch:
+            point_anchors = _document_point_anchors(requirement, branch_sources)
+            if point_anchors:
+                document_anchors = point_anchors
+            else:
+                document_anchors = [
+                    ("原始段落", item) for item in branch_sources[:8]
+                ]
+            anchor_nodes = [
+                _MaterialNode(
+                    source_ids=(item.source_id,),
+                    summary=f"问项锚点：{point}\n{item.title}\n{item.claim}"[:1400],
+                    retrieval_point=node.retrieval_point,
+                )
+                for point, item in document_anchors
+                if len(node.source_ids) > 1
+            ]
+        else:
+            anchor_nodes = [
+                _MaterialNode(
+                    source_ids=(item.source_id,),
+                    summary=f"{item.title}\n{item.claim}"[:1200],
+                    retrieval_point=node.retrieval_point,
+                )
+                for item in direct_anchors
+                if len(node.source_ids) > 1
+            ]
         material = _render_material_nodes([node, *anchor_nodes])
-        user = f"""{material}
+        if document_branch:
+            user = f"""{material}
+
+问题：{requirement}
+把以上材料总结为这份文档的最终摘要，不超过 {target_chars} 个字符。按问题中的问项组织，每个问项只写一次；将多种相近的“研究问题”说法合成一个准确表述。保留具体数据规模、实验设置、指标、主要结果和局限性；只有全部材料都没有该问项时才说材料未提供。合并重复，保留事实后的 [S1] 来源编号。
+{node.retrieval_point}："""
+        else:
+            user = f"""{material}
 
 当前日期：{_today()}
 当前检索点：{node.retrieval_point}
@@ -3931,9 +4315,15 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             raise SearchReaderError(
                 "branch_finalize", "RWKV returned an empty branch summary"
             )
-        unsupported = _unsupported_summary_bindings(
-            summary, f"{material}\n当前日期：{_today()}"
+        if _contains_prompt_leakage(summary):
+            raise SearchReaderError(
+                "branch_finalize", "RWKV copied branch instructions"
+            )
+        validation_material = _final_validation_material(
+            material if document_branch else f"{material}\n当前日期：{_today()}",
+            requirement,
         )
+        unsupported = _unsupported_summary_bindings(summary, validation_material)
         if unsupported:
             values = ", ".join(sorted(unsupported))
             raise SearchReaderError(
@@ -4319,6 +4709,38 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         )
         return aggregated, warnings
 
+    def _aggregate_document_branches(
+        self,
+        question: str,
+        material: str,
+        document_names: list[str],
+    ) -> tuple[str, list[str]]:
+        """Join completed document branches losslessly before the final reader."""
+
+        del question
+        sections: list[str] = []
+        seen_names: set[str] = set()
+        for line in material.splitlines():
+            try:
+                _source_ids, summary = json.loads(line)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            summary = str(summary or "").strip()
+            point_match = re.search(r"^检索点：([^\n]+)\n?", summary)
+            name = point_match.group(1).strip() if point_match else ""
+            if name:
+                summary = summary[point_match.end() :].strip()
+                seen_names.add(name)
+            sections.append(f"## {name}\n{summary}" if name else summary)
+        missing = [name for name in document_names if name not in seen_names]
+        if not sections or missing:
+            return material, [
+                "document branch join omitted documents: " + ", ".join(missing)
+                if missing
+                else "document branch join returned empty material"
+            ]
+        return "\n\n".join(sections), []
+
     def finalize(
         self,
         question: str,
@@ -4334,7 +4756,20 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         if not evidence:
             raise SearchReaderError("read", "there are no source summaries to combine")
         eligible = _eligible_evidence(question, evidence)
-        ordered = _final_evidence_order(question, eligible)
+        document_only = all(item.url.startswith("document://") for item in eligible)
+        ordered = (
+            sorted(
+                eligible,
+                key=lambda item: (
+                    int(item.source_id[1:])
+                    if item.source_id.startswith("S")
+                    and item.source_id[1:].isdigit()
+                    else 0
+                ),
+            )
+            if document_only
+            else _final_evidence_order(question, eligible)
+        )
         reduced_material, reduction_warnings, group_count = self._reduce_evidence(
             question,
             ordered,
@@ -4354,11 +4789,20 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                         "branch_count": len(retrieval_points),
                     },
                 )
-            reduced_material, aggregate_warnings = self._aggregate_retrieval_points(
-                question,
-                reduced_material,
-                retrieval_points,
-            )
+            if document_only:
+                reduced_material, aggregate_warnings = (
+                    self._aggregate_document_branches(
+                        question,
+                        reduced_material,
+                        retrieval_points,
+                    )
+                )
+            else:
+                reduced_material, aggregate_warnings = self._aggregate_retrieval_points(
+                    question,
+                    reduced_material,
+                    retrieval_points,
+                )
             reduction_warnings.extend(aggregate_warnings)
             if on_progress:
                 on_progress(
@@ -4369,7 +4813,13 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                         "status": "degraded" if aggregate_warnings else "done",
                     },
                 )
-        del conversation_history, current_message
+        del conversation_history
+        # The resolved question is for retrieval and evidence reduction.  It may
+        # deliberately contain an earlier turn to disambiguate a pronoun, but
+        # that earlier turn is not a second question the final reader should
+        # answer again.  Keep the user's current message as the final answer
+        # contract so follow-ups do not grow into cumulative checklists.
+        answer_question = str(current_message or question).strip()
         scope_note = (
             "回答当轮材料能够确认的代表对象，不要声称已经穷举全部。"
             if representative_scope
@@ -4438,7 +4888,6 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         all_fields_verified = bool(evidence_selections) and all(
             item.status == "supported" for item in evidence_selections
         )
-        document_only = all(item.url.startswith("document://") for item in ordered)
         if (
             evidence_sufficient is True
             and all_fields_verified
@@ -4451,17 +4900,28 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if verified_rows
             else ""
         )
-        user = f"""{answer_material}
+        if document_only:
+            user = f"""{answer_material}
 
-问题：{question}
-根据以上材料直接回答问题；{verified_instruction}只回答所问内容。完整覆盖问题中的每个问项：表格条件查询先筛选符合条件的行，再只在这些行中比较目标列，并从同一行复制对象名和全部所问数值；比较变化同时写变化前和变化后。合并重复事实，每个独立事实只标一个最直接的 [S1] 来源；[S1] 只是来源编号，不是事实值。同一对象互相关联的字段采用同一条记录，不跨版本拼接。不要推断材料没有的信息，不同对象的事实不得混用；材料不足就说明。{final_point_scope}{scope_note}
+问题：{answer_question}
+根据以上文档材料直接回答。覆盖问题的每个问项，合并重复内容，不混用不同文档的事实；不补充材料没有的信息。每个独立事实保留一个最直接的 [S1] 来源编号。
+最终回答："""
+        else:
+            user = f"""{answer_material}
+
+问题：{answer_question}
+根据以上材料直接回答。{verified_instruction}覆盖每个问项，合并重复，只使用材料已有事实；每个事实保留一个最直接的 [S1] 来源编号。材料没有的信息就说明。{final_point_scope}{scope_note}
 最终回答："""
         if on_progress:
             on_progress(
                 "finalizing",
                 {"source_count": len(ordered), "group_count": group_count},
             )
-        requested_tokens = self.settings.rwkv_max_tokens
+        requested_tokens = (
+            min(self.settings.rwkv_max_tokens, 2048)
+            if document_only and len(ordered) <= 30
+            else self.settings.rwkv_max_tokens
+        )
         output_tokens = requested_tokens
         for attempt in range(4):
             try:
@@ -4483,18 +4943,47 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         answer = _clean_final_answer(output)
         if not answer:
             raise SearchReaderError("read", "RWKV returned an empty final answer")
+        if _contains_prompt_leakage(answer):
+            retry_user = f"""{answer_material}
+
+问题：{answer_question}
+只给出答案，不复述材料和要求。合并重复，保留事实后的 [S1]。
+回答："""
+            retried = _clean_final_answer(
+                self._complete(
+                    retry_user,
+                    max_tokens=min(output_tokens, 2048),
+                    stage="finalize",
+                )
+            )
+            if not retried or _contains_prompt_leakage(retried):
+                raise SearchReaderError("read", "RWKV copied the final prompt")
+            answer = retried
+            reduction_warnings.append(
+                "final answer was regenerated after copying prompt instructions"
+            )
         validation_material = _final_validation_material(
-            f"{answer_material}\n当前日期：{_today()}", question
+            f"{answer_material}\n当前日期：{_today()}", answer_question
         )
-        if (
-            document_only
-            and not all_fields_verified
-        ):
+        document_coverage_names = (
+            retrieval_points
+            if document_only
+            and len(retrieval_points) > 1
+            and full_document_read_requested(answer_question)
+            and bool(re.search(r"分别|每份|各份|不要混", answer_question))
+            else []
+        )
+        missing_document_names = [
+            name
+            for name in document_coverage_names
+            if _normalized_text(name) not in _normalized_text(answer)
+        ]
+        if document_only and not all_fields_verified and missing_document_names:
             review_user = f"""{answer_material}
 
 初稿：{answer}
 
-问题：{question}
+问题：{answer_question}
 核对初稿是否完整回答了问题中的每个对象、字段和值。表格条件查询先筛选符合条件的行，再只在这些行中比较目标列，并从同一行复制对象名和全部所问数值。材料标题和表格单元格也是事实；如果缺少问项，只补齐缺少项，不得删除初稿已有事实。不要增加未问内容，不要解释核对过程，不要使用表格，保留事实后的 [S1] 来源编号。
 最终回答："""
             try:
@@ -4528,6 +5017,17 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     reduction_warnings.append(
                         "final completeness review was discarded because it removed or introduced facts"
                     )
+        missing_document_names = [
+            name
+            for name in document_coverage_names
+            if _normalized_text(name) not in _normalized_text(answer)
+        ]
+        if missing_document_names:
+            answer = _clean_final_answer(answer_material)
+            reduction_warnings.append(
+                "final answer fell back to completed document branches after omitting: "
+                + ", ".join(missing_document_names)
+            )
         for correction_attempt in range(2):
             unsupported = _unsupported_summary_bindings(answer, validation_material)
             if not unsupported:
@@ -4536,7 +5036,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 
 待修正回答：{answer}
 
-问题：{question}
+问题：{answer_question}
 重新回答问题。完整覆盖每个问项；表格查询同时写对象名和数值，比较变化同时写变化前和变化后。[S1] 只是来源编号，不是事实值。只使用以上材料中的事实与数字，合并重复内容，并保留对应的 [S1] 来源；不要解释修改过程。
 最终回答："""
             corrected = self._complete(
@@ -4559,7 +5059,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         if remaining_unsupported:
             recovery_user = f"""{answer_material}
 
-问题：{question}
+问题：{answer_question}
 独立重新回答问题，不参考此前生成内容。完整覆盖每个问项，只使用以上材料中的事实与数字，合并重复内容，并保留事实后的 [S1] 来源编号；不要解释修改过程。
 最终回答："""
             for _attempt in range(2):

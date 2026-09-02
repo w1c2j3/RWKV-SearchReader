@@ -1030,7 +1030,7 @@
             signal: uploadController.signal,
             body: JSON.stringify({ client_id: clientId, conversation_id: conversationId }),
           });
-          const response = await fetch('/v1/documents/upload', {
+          const response = await fetch('/v1/documents/upload/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             signal: uploadController.signal,
@@ -1042,12 +1042,37 @@
               content_base64: contentBase64,
             }),
           });
-          if (!response.ok) {
+          if (!response.ok || !response.body) {
             const error = await response.json().catch(() => ({}));
-            throw new Error(error.detail || '文档上传失败');
+            throw new Error(typeof error.detail === 'string' ? error.detail : '文档上传失败');
           }
+          const streamReader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let uploadedDocument = null;
+          const consumeUploadLine = (line) => {
+            if (!line.trim()) return;
+            const event = JSON.parse(line);
+            if (event.type === 'progress') {
+              const detail = event.detail || {};
+              const elapsed = Number(detail.elapsed_seconds || 0);
+              documentNotice = `${detail.message || '正在解析文档'}${elapsed ? ` · ${elapsed} 秒` : ''}`;
+              renderDocuments();
+            }
+            if (event.type === 'result') uploadedDocument = event.result;
+            if (event.type === 'error') throw new Error(event.error?.message || '文档上传失败');
+          };
+          while (true) {
+            const { value, done } = await streamReader.read();
+            buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            lines.forEach(consumeUploadLine);
+            if (done) break;
+          }
+          if (buffer.trim()) consumeUploadLine(buffer);
+          if (!uploadedDocument) throw new Error('服务器未返回文档结果');
           if (generation !== requestGeneration) return;
-          const uploadedDocument = await response.json();
           documentNotice = '';
           if (!currentDocuments.some((item) => item.id === uploadedDocument.id)) currentDocuments.push(uploadedDocument);
           renderDocuments();
@@ -1056,7 +1081,24 @@
           questionInput.focus();
         } catch (error) {
           if (error.name === 'AbortError' || generation !== requestGeneration) return;
-          documentNotice = String(error.message || '文档上传失败');
+          let recovered = false;
+          try {
+            const record = await fetchConversation(conversationId);
+            const saved = (record.documents || []).find((item) => item.filename === file.name);
+            if (saved) {
+              currentDocuments = record.documents || [];
+              documentNotice = '';
+              recovered = true;
+              renderDocuments();
+              await loadHistory(false);
+            }
+          } catch (_) {}
+          if (!recovered) {
+            const message = String(error.message || '文档上传失败');
+            documentNotice = /Failed to fetch/i.test(message)
+              ? '连接中断，解析可能仍在后台继续，请稍后查看当前记录'
+              : message;
+          }
           renderDocuments();
         } finally {
           if (generation !== requestGeneration) return;

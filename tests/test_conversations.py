@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import threading
 
@@ -201,6 +202,47 @@ def test_conversation_store_accepts_a_preconverted_pdf(tmp_path) -> None:
     assert document["source_mime"] == "application/pdf"
     assert passages[0].heading == "指标"
     assert "91%" in passages[0].content
+
+
+def test_reuploading_the_same_pdf_uses_the_saved_conversion(tmp_path, monkeypatch) -> None:
+    from rwkv_search_reader import conversations
+
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = "conv_cachedpdf123"
+    client_id = "client_cachedpdf123"
+    raw_pdf = b"%PDF-1.7\ncached-source"
+    store.ensure(conversation_id, client_id)
+    first = store.add_prepared_document(
+        conversation_id,
+        client_id,
+        PreparedDocument(
+            filename="report.pdf",
+            markdown="# 报告\n\n已保存的转换结果。",
+            source_bytes=raw_pdf,
+            source_mime="application/pdf",
+        ),
+        chunk_chars=600,
+    )
+    monkeypatch.setattr(
+        conversations,
+        "prepare_document",
+        lambda *args, **kwargs: pytest.fail("cached PDF must not be converted again"),
+    )
+    progress = []
+
+    repeated = store.add_document(
+        conversation_id,
+        client_id,
+        "report.pdf",
+        "",
+        content_base64=base64.b64encode(raw_pdf).decode("ascii"),
+        max_bytes=10_000,
+        chunk_chars=600,
+        progress=lambda stage, detail: progress.append((stage, detail)),
+    )
+
+    assert repeated["id"] == first["id"]
+    assert progress[0][0] == "pdf_cached"
 
 
 def test_conversation_history_keeps_relevant_older_turns(tmp_path) -> None:

@@ -19,7 +19,13 @@ import requests
 
 from .config import PROJECT_ROOT, get_settings
 from .conversations import ConversationStore
-from .documents import PreparedDocument, prepare_document
+from .documents import (
+    PreparedDocument,
+    full_document_read_requested,
+    limit_full_document_passages,
+    prepare_document,
+    rank_markdown_passages,
+)
 from .pipeline import SearchReaderPipeline
 from .rag_evaluation import _grade_turn, _match_text
 
@@ -190,11 +196,15 @@ def _run_case(
         document_query = " ".join(
             [*(turn["question"] for turn in history[-2:]), question]
         )
-        passages = store.search_documents(
-            conversation_id,
-            client_id,
-            document_query,
-            settings.document_max_chunks,
+        all_passages = store.document_passages(conversation_id, client_id)
+        passages = (
+            limit_full_document_passages(
+                all_passages, settings.document_full_read_max_chunks
+            )
+            if full_document_read_requested(question)
+            else rank_markdown_passages(
+                document_query, all_passages, settings.document_max_chunks
+            )
         )
         turn_started = time.perf_counter()
         result = SearchReaderPipeline(settings).answer(

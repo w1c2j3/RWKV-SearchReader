@@ -690,3 +690,54 @@ def test_pipeline_resolves_followup_from_same_session_before_search(tmp_path) ->
         "contextualizing",
         "context_resolved",
     ]
+
+
+def test_pipeline_resolves_every_new_turn_but_preserves_an_independent_topic(
+    tmp_path,
+) -> None:
+    append_trace(
+        tmp_path,
+        {
+            "status": "ok",
+            "session_id": "new-topic-chat",
+            "question": "小米 SU7 Ultra 的价格是多少？",
+            "answer": "52.99 万元。",
+        },
+    )
+    settings = replace(
+        Settings(),
+        rwkv_model="rwkv-test",
+        trace_enabled=False,
+        trace_directory=tmp_path,
+    )
+    pipeline = SearchReaderPipeline(settings)
+    received = []
+
+    def contextualize(question, history):
+        received.append((question, history))
+        return question
+
+    pipeline.reader.contextualize = contextualize
+    hit = SearchHit(source_id="S1", title="Care", url="https://example.com/care")
+    chunk = DocumentChunk("S1", hit.title, hit.url, "洗车与售后信息")
+
+    def retrieve(question):
+        assert question == "Python 3.14 是什么时候发布的？"
+        return [question], [hit], [chunk], []
+
+    pipeline.retriever.run = retrieve
+    pipeline.reader.summarize = lambda *args, **kwargs: (
+        [Evidence("S1", hit.title, hit.url, "洗车与售后信息", "洗车与售后信息")],
+        [],
+    )
+    pipeline.reader.audit = lambda *args: EvidenceAudit(sufficient=True)
+    pipeline.reader.finalize = lambda *args, **kwargs: ("新问题回答 [S1]", [])
+
+    result = pipeline.answer(
+        "Python 3.14 是什么时候发布的？",
+        session_id="new-topic-chat",
+    )
+
+    assert result.answer == "新问题回答 [S1]"
+    assert received[0][0] == "Python 3.14 是什么时候发布的？"
+    assert "contextualizing" in [event["stage"] for event in result.trace]
