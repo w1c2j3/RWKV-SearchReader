@@ -4438,7 +4438,13 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         all_fields_verified = bool(evidence_selections) and all(
             item.status == "supported" for item in evidence_selections
         )
-        if evidence_sufficient is True and all_fields_verified and verified_material:
+        document_only = all(item.url.startswith("document://") for item in ordered)
+        if (
+            evidence_sufficient is True
+            and all_fields_verified
+            and verified_material
+            and not document_only
+        ):
             answer_material = verified_material
         verified_instruction = (
             "末尾的对象字段二元组已经逐来源核对，出现冲突时采用二元组中的值。"
@@ -4481,7 +4487,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             f"{answer_material}\n当前日期：{_today()}", question
         )
         if (
-            all(item.url.startswith("document://") for item in ordered)
+            document_only
             and not all_fields_verified
         ):
             review_user = f"""{answer_material}
