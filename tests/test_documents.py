@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import base64
+
+import pytest
+
+from rwkv_search_reader import documents
 from rwkv_search_reader.documents import (
     MarkdownPassage,
     normalize_markdown,
+    prepare_document,
     rank_markdown_passages,
     split_markdown,
 )
@@ -31,11 +37,53 @@ def test_markdown_is_split_by_heading_and_paragraph() -> None:
     ]
 
 
+def test_heading_only_document_keeps_heading_as_passage_title() -> None:
+    assert split_markdown("## Dummy PDF file", target_chars=600) == [
+        ("Dummy PDF file", "## Dummy PDF file")
+    ]
+
+
 def test_document_validation_accepts_only_nonempty_markdown() -> None:
     assert normalize_markdown("folder/notes.md", "\r\n# Notes\r\nText") == (
         "notes.md",
         "# Notes\nText",
     )
+
+
+def test_pdf_is_converted_to_markdown_for_existing_rag_flow(monkeypatch) -> None:
+    raw_pdf = b"%PDF-1.7\nminimal-test-payload"
+    calls = []
+
+    def convert(filename, content, *, max_pages, max_bytes):
+        calls.append((filename, content, max_pages, max_bytes))
+        return "# 报告\n\n| 指标 | 数值 |\n| --- | --- |\n| 准确率 | 91% |"
+
+    monkeypatch.setattr(documents, "_convert_pdf_bytes", convert)
+
+    prepared = prepare_document(
+        "folder/report.pdf",
+        content_base64=base64.b64encode(raw_pdf).decode("ascii"),
+        max_markdown_bytes=10_000,
+        max_pdf_bytes=20_000,
+        max_pdf_pages=80,
+    )
+
+    assert prepared.filename == "report.pdf"
+    assert prepared.source_bytes == raw_pdf
+    assert prepared.source_mime == "application/pdf"
+    assert "准确率" in prepared.markdown
+    assert calls == [("report.pdf", raw_pdf, 80, 20_000)]
+
+
+def test_pdf_upload_rejects_non_pdf_payload() -> None:
+    with pytest.raises(ValueError, match="not a PDF"):
+        prepare_document(
+            "report.pdf",
+            content_base64=base64.b64encode(b"not really a pdf").decode("ascii"),
+            max_markdown_bytes=10_000,
+            max_pdf_bytes=20_000,
+            max_pdf_pages=80,
+        )
 
 
 def test_specific_document_query_ranks_matching_section_first() -> None:

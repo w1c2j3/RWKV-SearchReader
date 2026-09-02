@@ -64,7 +64,8 @@ class DocumentUploadRequest(BaseModel):
     client_id: str = Field(min_length=8, max_length=128)
     conversation_id: str = Field(min_length=8, max_length=128)
     filename: str = Field(min_length=1, max_length=180)
-    content: str = Field(min_length=1, max_length=10_000_000)
+    content: str = Field(default="", max_length=30_000_000)
+    content_base64: str = Field(default="", max_length=70_000_000)
 
 
 app = FastAPI(
@@ -459,9 +460,14 @@ def upload_document(request: DocumentUploadRequest) -> dict[str, Any]:
             request.content,
             max_bytes=settings.document_max_bytes,
             chunk_chars=settings.document_chunk_chars,
+            content_base64=request.content_base64,
+            max_pdf_bytes=settings.document_pdf_max_bytes,
+            max_pdf_pages=settings.document_pdf_max_pages,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

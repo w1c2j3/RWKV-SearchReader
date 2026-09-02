@@ -12,7 +12,7 @@ from typing import Any
 
 from .documents import (
     MarkdownPassage,
-    normalize_markdown,
+    prepare_document,
     rank_markdown_passages,
     split_markdown,
 )
@@ -113,20 +113,22 @@ def _compact_answer_payload(payload: object) -> dict[str, Any]:
 
 
 def _answer_payload(result: dict[str, Any]) -> dict[str, Any]:
-    return _compact_answer_payload({
-        key: result.get(key)
-        for key in (
-            "request_id",
-            "sources",
-            "queries",
-            "reader_mode",
-            "degraded",
-            "warnings",
-            "timings_ms",
-            "trace",
-            "conversation_state",
-        )
-    })
+    return _compact_answer_payload(
+        {
+            key: result.get(key)
+            for key in (
+                "request_id",
+                "sources",
+                "queries",
+                "reader_mode",
+                "degraded",
+                "warnings",
+                "timings_ms",
+                "trace",
+                "conversation_state",
+            )
+        }
+    )
 
 
 class ConversationStore:
@@ -185,6 +187,8 @@ class ConversationStore:
                     size_bytes INTEGER NOT NULL,
                     char_count INTEGER NOT NULL,
                     chunk_count INTEGER NOT NULL,
+                    source_mime TEXT NOT NULL DEFAULT 'text/markdown',
+                    source_blob BLOB,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(conversation_id) REFERENCES conversations(id)
                         ON DELETE CASCADE,
@@ -209,6 +213,17 @@ class ConversationStore:
                     ON document_chunks(conversation_id, document_id, ordinal);
                 """
             )
+            document_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(documents)")
+            }
+            if "source_mime" not in document_columns:
+                connection.execute(
+                    "ALTER TABLE documents ADD COLUMN source_mime "
+                    "TEXT NOT NULL DEFAULT 'text/markdown'"
+                )
+            if "source_blob" not in document_columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN source_blob BLOB")
 
     @staticmethod
     def _conversation(
@@ -234,6 +249,7 @@ class ConversationStore:
             "size_bytes": row["size_bytes"],
             "char_count": row["char_count"],
             "chunk_count": row["chunk_count"],
+            "source_mime": row["source_mime"] or "text/markdown",
             "created_at": row["created_at"],
         }
 
@@ -411,9 +427,7 @@ class ConversationStore:
                 (owner, limit),
             ).fetchall()
             return [
-                self._conversation(
-                    row, row["message_count"], row["document_count"]
-                )
+                self._conversation(row, row["message_count"], row["document_count"])
                 for row in rows
             ]
 
@@ -437,9 +451,7 @@ class ConversationStore:
                 "SELECT * FROM documents WHERE conversation_id = ? ORDER BY created_at",
                 (identity,),
             ).fetchall()
-            conversation["documents"] = [
-                self._document(item) for item in document_rows
-            ]
+            conversation["documents"] = [self._document(item) for item in document_rows]
             conversation["document_count"] = len(document_rows)
             return conversation
 
@@ -496,17 +508,26 @@ class ConversationStore:
         *,
         max_bytes: int,
         chunk_chars: int,
+        content_base64: str = "",
+        max_pdf_bytes: int = 20_000_000,
+        max_pdf_pages: int = 200,
     ) -> dict[str, Any]:
         identity = _identity(conversation_id, "conversation id")
         owner = _identity(client_id, "client id")
-        clean_name, clean_content = normalize_markdown(filename, content)
-        encoded = clean_content.encode("utf-8")
-        if len(encoded) > max_bytes:
-            raise ValueError(f"document exceeds {max_bytes} bytes")
+        prepared = prepare_document(
+            filename,
+            content,
+            content_base64,
+            max_markdown_bytes=max_bytes,
+            max_pdf_bytes=max_pdf_bytes,
+            max_pdf_pages=max_pdf_pages,
+        )
+        clean_name = prepared.filename
+        clean_content = prepared.markdown
         chunks = split_markdown(clean_content, chunk_chars)
         if not chunks:
             raise ValueError("document has no readable content")
-        digest = hashlib.sha256(encoded).hexdigest()
+        digest = hashlib.sha256(prepared.source_bytes).hexdigest()
         with self._lock, self._connect() as connection:
             conversation = connection.execute(
                 "SELECT * FROM conversations WHERE id = ? AND client_id = ?",
@@ -525,17 +546,23 @@ class ConversationStore:
             connection.execute(
                 """INSERT INTO documents
                    (id, conversation_id, filename, content, sha256, size_bytes,
-                    char_count, chunk_count, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    char_count, chunk_count, source_mime, source_blob, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     document_id,
                     identity,
                     clean_name,
                     clean_content,
                     digest,
-                    len(encoded),
+                    len(prepared.source_bytes),
                     len(clean_content),
                     len(chunks),
+                    prepared.source_mime,
+                    (
+                        prepared.source_bytes
+                        if prepared.source_mime == "application/pdf"
+                        else None
+                    ),
                     timestamp,
                 ),
             )

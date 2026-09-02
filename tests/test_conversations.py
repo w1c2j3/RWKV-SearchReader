@@ -179,6 +179,7 @@ def test_conversation_store_persists_and_searches_markdown(tmp_path) -> None:
     assert listed[0]["document_count"] == 1
     assert listed[0]["message_count"] == 0
     assert restored["documents"][0]["filename"] == "tea.md"
+    assert restored["documents"][0]["source_mime"] == "text/markdown"
 
 
 def test_conversation_history_keeps_relevant_older_turns(tmp_path) -> None:

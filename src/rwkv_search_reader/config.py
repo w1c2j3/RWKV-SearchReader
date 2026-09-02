@@ -134,7 +134,9 @@ class Settings:
     chunk_chars: int = 2600
     chunk_overlap_chars: int = 260
     max_evidence_chars: int = 12000
-    document_max_bytes: int = 2_000_000
+    document_max_bytes: int = 10_000_000
+    document_pdf_max_bytes: int = 20_000_000
+    document_pdf_max_pages: int = 200
     document_chunk_chars: int = 2400
     document_max_chunks: int = 12
     api_host: str = "0.0.0.0"
@@ -236,18 +238,14 @@ def get_settings() -> Settings:
         rwkv_api_key=_text("SEARCH_READER_RWKV_API_KEY", "local"),
         rwkv_model=_text("SEARCH_READER_RWKV_MODEL"),
         rwkv_protocol=protocol,
-        rwkv_summary_workers=_integer(
-            "SEARCH_READER_RWKV_SUMMARY_WORKERS", 10, 1, 32
-        ),
+        rwkv_summary_workers=_integer("SEARCH_READER_RWKV_SUMMARY_WORKERS", 10, 1, 32),
         rwkv_summary_max_tokens=_integer(
             "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 1024, 96, 2048
         ),
         rwkv_reduce_chunk_chars=_integer(
             "SEARCH_READER_RWKV_REDUCE_CHUNK_CHARS", 6000, 1200, 12000
         ),
-        rwkv_reduce_fan_in=_integer(
-            "SEARCH_READER_RWKV_REDUCE_FAN_IN", 4, 2, 8
-        ),
+        rwkv_reduce_fan_in=_integer("SEARCH_READER_RWKV_REDUCE_FAN_IN", 4, 2, 8),
         rwkv_final_material_chars=_integer(
             "SEARCH_READER_RWKV_FINAL_MATERIAL_CHARS", 9000, 3000, 12000
         ),
@@ -271,14 +269,21 @@ def get_settings() -> Settings:
             "SEARCH_READER_MAX_EVIDENCE_CHARS", 12000, 2000, 12000
         ),
         document_max_bytes=_integer(
-            "SEARCH_READER_DOCUMENT_MAX_BYTES", 2_000_000, 10_000, 10_000_000
+            "SEARCH_READER_DOCUMENT_MAX_BYTES", 10_000_000, 10_000, 30_000_000
+        ),
+        document_pdf_max_bytes=_integer(
+            "SEARCH_READER_DOCUMENT_PDF_MAX_BYTES",
+            20_000_000,
+            100_000,
+            50_000_000,
+        ),
+        document_pdf_max_pages=_integer(
+            "SEARCH_READER_DOCUMENT_PDF_MAX_PAGES", 200, 1, 1000
         ),
         document_chunk_chars=_integer(
             "SEARCH_READER_DOCUMENT_CHUNK_CHARS", 2400, 600, 8000
         ),
-        document_max_chunks=_integer(
-            "SEARCH_READER_DOCUMENT_MAX_CHUNKS", 12, 1, 30
-        ),
+        document_max_chunks=_integer("SEARCH_READER_DOCUMENT_MAX_CHUNKS", 12, 1, 30),
         api_host=_text("SEARCH_READER_API_HOST", "0.0.0.0"),
         api_port=_integer("SEARCH_READER_API_PORT", 8790, 1, 65535),
         trace_enabled=_boolean("SEARCH_READER_TRACE_ENABLED", True),

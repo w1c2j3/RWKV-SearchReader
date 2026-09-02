@@ -16,6 +16,9 @@ dependencies = [
   "uvicorn>=0.34,<1",
 ]
 
+[project.optional-dependencies]
+pdf = ["docling>=2.70,<3"]
+
 [dependency-groups]
 dev = ["pytest>=8,<10"]
 

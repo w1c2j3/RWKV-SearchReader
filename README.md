@@ -53,7 +53,7 @@ RWKV SearchReader 是一个“模型规划范围、程序执行检索、模型�
 - 所有 RWKV 用户提示均采用“材料在前、问题和要求在后”；
 - OpenAI 兼容 RWKV `/completions` 或 `/chat/completions`；
 - CLI、FastAPI、带本地历史记录和可折叠过程时间线的聊天 Web UI；
-- 聊天输入框可直接上传 `.md` / `.markdown`：原文保存在本机 SQLite，按 Markdown 标题路径与段落切块，问题相关片段分别交给独立 RWKV 并发阅读；默认单文档不超过 2 MB；
+- 聊天输入框可直接上传 `.md` / `.markdown` / `.pdf`：PDF 通过 Docling 转为保留标题、表格与阅读顺序的 Markdown，再进入同一套分块与文档 RAG；PDF 原文件和转换文本都保存在本机 SQLite，问题相关片段分别交给独立 RWKV 并发阅读；默认 Markdown/转换文本不超过 10 MB，PDF 不超过 20 MB、200 页；
 - 使用 SQLite 持久化一级 `conversation` 对象及其有序 `user` / `assistant` message items；侧栏直接列 conversation，点击后读取其 items，不再从单轮日志临时拼接聊天；
 - 多轮对话除文本历史外还保存上一轮已验证的对象、字段、事实和来源；“下一个”等追问会把该结构化状态作为基准交给字段整理器，而不是只依赖旧回答文本；
 - 支持独立的最终 RWKV 配置；当前本机使用 g1i-13.3B（16K context）承担最终综合、对话总结和文档成品生成，最终回答 `max_tokens` 统一封顶为 4090；
@@ -69,7 +69,7 @@ RWKV SearchReader 是一个“模型规划范围、程序执行检索、模型�
 
 ```bash
 cd /home/chase/GitHub/RWKV-SearchReader
-uv sync --dev
+uv sync --dev --extra pdf
 cp .env.example .env.local
 chmod 600 .env.local
 ```
@@ -151,7 +151,7 @@ curl -s http://127.0.0.1:8790/v1/answer \
 
 返回内容包含 `answer`、实际检索词 `queries`、`sources`、逐来源 RWKV 摘要 `evidence`、`reader_mode`、降级信息和各阶段耗时。
 
-上传 Markdown 到当前 conversation：
+上传 Markdown 到当前 conversation（PDF 由网页端读取为 base64 后调用同一接口）：
 
 ```bash
 curl -s http://127.0.0.1:8790/v1/documents/upload \
