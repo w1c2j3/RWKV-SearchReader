@@ -6,6 +6,7 @@ import threading
 import pytest
 
 from rwkv_search_reader.conversations import ConversationStore
+from rwkv_search_reader.documents import PreparedDocument
 
 
 def test_conversation_store_persists_ordered_message_items(tmp_path) -> None:
@@ -78,9 +79,7 @@ def test_restored_conversation_omits_large_source_bodies(tmp_path) -> None:
             "request_id": "request-compact",
             "answer": "回答 [S1]",
             "sources": [source],
-            "trace": [
-                {"stage": "sources_found", "detail": {"sources": [source]}}
-            ],
+            "trace": [{"stage": "sources_found", "detail": {"sources": [source]}}],
             "conversation_state": {"facts": [{"fact": "保留状态"}]},
         },
     )
@@ -167,9 +166,7 @@ def test_conversation_store_persists_and_searches_markdown(tmp_path) -> None:
         chunk_chars=600,
     )
 
-    passages = store.search_documents(
-        conversation_id, client_id, "预算是多少", limit=2
-    )
+    passages = store.search_documents(conversation_id, client_id, "预算是多少", limit=2)
     listed = store.list(client_id)
     restored = store.get(conversation_id, client_id)
 
@@ -180,6 +177,30 @@ def test_conversation_store_persists_and_searches_markdown(tmp_path) -> None:
     assert listed[0]["message_count"] == 0
     assert restored["documents"][0]["filename"] == "tea.md"
     assert restored["documents"][0]["source_mime"] == "text/markdown"
+
+
+def test_conversation_store_accepts_a_preconverted_pdf(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = "conv_preparedpdf123"
+    client_id = "client_preparedpdf123"
+    store.ensure(conversation_id, client_id)
+
+    document = store.add_prepared_document(
+        conversation_id,
+        client_id,
+        PreparedDocument(
+            filename="report.pdf",
+            markdown="# 指标\n\n准确率为 91%。",
+            source_bytes=b"%PDF-1.7\nsource",
+            source_mime="application/pdf",
+        ),
+        chunk_chars=600,
+    )
+
+    passages = store.search_documents(conversation_id, client_id, "准确率", limit=2)
+    assert document["source_mime"] == "application/pdf"
+    assert passages[0].heading == "指标"
+    assert "91%" in passages[0].content
 
 
 def test_conversation_history_keeps_relevant_older_turns(tmp_path) -> None:
@@ -234,9 +255,7 @@ def test_concurrent_turn_writes_keep_every_message_pair(tmp_path) -> None:
     for thread in threads:
         thread.join()
 
-    conversation = ConversationStore(path).get(
-        "conv_parallel123", "client_parallel123"
-    )
+    conversation = ConversationStore(path).get("conv_parallel123", "client_parallel123")
     assert errors == []
     assert len(conversation["items"]) == 24
 

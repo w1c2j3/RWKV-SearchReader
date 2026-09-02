@@ -56,3 +56,19 @@ def test_rag_grade_rejects_web_fallback_and_unknown_citation() -> None:
     assert grade["content_pass"] is True
     assert grade["structural_pass"] is False
     assert grade["pass"] is False
+
+
+def test_rag_grade_rejects_unclosed_code_fence() -> None:
+    grade = _grade_turn(
+        {"must_include_all": ["function add"]},
+        {
+            "answer": "```js\nfunction add(a, b) { return a + b; }",
+            "retrieval_mode": "document",
+            "search_provider": "local-markdown",
+            "sources": [{"source_id": "S1", "url": "document://doc#chunk-1"}],
+            "evidence": [{"source_id": "S1"}],
+        },
+    )
+
+    assert grade["checks"]["balanced_code_fences"] is False
+    assert grade["structural_pass"] is False

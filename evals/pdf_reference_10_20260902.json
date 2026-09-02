@@ -1,0 +1,171 @@
+{
+  "schema_version": "rwkv-search-reader-pdf-eval.v1",
+  "documents": {
+    "ocr_english": {
+      "filename": "ocr_test.pdf",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/c09ddfabff27b1ba6217ab47e207cb646b4ba023/tests/data/ocr/sources/ocr_test.pdf",
+      "sha256": "73f23122e9edbdb0a115b448e03c8064a0ea8bdc21d02917ce220cf032454f31",
+      "conversion_must_include_all": ["PDF document conversion", "JSON", "Markdown"]
+    },
+    "complex_table": {
+      "filename": "tableformer_page9.pdf",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/c09ddfabff27b1ba6217ab47e207cb646b4ba023/tests/data/pdf/sources/2305.03393v1-pg9.pdf",
+      "sha256": "a07f5c34601ba2c234d898cbfaa9e29a7045996ccd82ccab3012516220a1f3a4",
+      "conversion_must_include_all": ["Inference time", "1.22", "5.39"]
+    },
+    "code_formula": {
+      "filename": "code_and_formula.pdf",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/c09ddfabff27b1ba6217ab47e207cb646b4ba023/tests/data/pdf/sources/code_and_formula.pdf",
+      "sha256": "6cb63fba2ad42dd0e0afe6a26dcf3b3bff5a86919c4c06157c71c65ebc0fc9e6",
+      "conversion_must_include_all": ["function add(a, b)", "console.log(add(3, 5))"]
+    },
+    "multi_page": {
+      "filename": "word_processor_history.pdf",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/c09ddfabff27b1ba6217ab47e207cb646b4ba023/tests/data/pdf/sources/multi_page.pdf",
+      "sha256": "956846c28f9ed9d3b5cbe071865c082bd415f56e3e299c479aeea1f615eefa61",
+      "conversion_must_include_all": ["Christopher Latham Sholes", "Google Docs (2006)"]
+    },
+    "long_104_pages": {
+      "filename": "word_processor_history_104_pages.pdf",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/c09ddfabff27b1ba6217ab47e207cb646b4ba023/tests/data/pdf/sources/multi_page.pdf",
+      "sha256": "956846c28f9ed9d3b5cbe071865c082bd415f56e3e299c479aeea1f615eefa61",
+      "transform": {"repeat_pages": 26},
+      "conversion_must_include_all": ["WordStar (1978)", "Microsoft Word (1983)"]
+    },
+    "korean_layout": {
+      "filename": "covid_insurance_korean.pdf",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/c09ddfabff27b1ba6217ab47e207cb646b4ba023/tests/data/pdf/sources/normal_4pages.pdf",
+      "sha256": "ca9c83b1653221a66b30cdb543c1ef7b116827762ae65fca36b87b332532b51e",
+      "conversion_must_include_all": ["김 창 호", "U07.1", "17종"]
+    },
+    "chinese_bilingual": {
+      "filename": "2025_government_report_cn_en.pdf",
+      "url": "https://fao.zibo.gov.cn/module/download/downfile.jsp?classid=0&filename=409499bee29a4554ad30f4196f4d4823.pdf",
+      "sha256": "9c54ad610f09c280df5233de017114fe5ccd468f33784e187d2856ebf7cbfac9",
+      "conversion_must_include_all": ["国内生产总值增长 5% 左右", "城镇调查失业率 5.5%", "1200 万人以上"]
+    },
+    "chinese_scanned": {
+      "filename": "2025_government_report_scan_page1.pdf",
+      "url": "https://fao.zibo.gov.cn/module/download/downfile.jsp?classid=0&filename=409499bee29a4554ad30f4196f4d4823.pdf",
+      "sha256": "9c54ad610f09c280df5233de017114fe5ccd468f33784e187d2856ebf7cbfac9",
+      "transform": {"scan_first_page": true},
+      "conversion_must_include_all": ["创新驱动发展", "政府建设和治理创新"]
+    }
+  },
+  "cases": [
+    {
+      "case_id": "pdf_ocr_english",
+      "category": "ocr",
+      "documents": ["ocr_english"],
+      "turns": [
+        {
+          "question": "这份扫描 PDF 说 Docling 可以把 PDF 转换成哪两种输出格式？",
+          "must_include_all": ["JSON", "Markdown"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_complex_table",
+      "category": "table",
+      "documents": ["complex_table"],
+      "turns": [
+        {
+          "question": "表 1 中，编码器 4 层、解码器 2 层时，OTSL 和 HTML 的推理时间分别是多少秒？",
+          "must_include_all": ["1.22"],
+          "must_include_any": ["2 秒", "2.0 秒", "2.00", "2 secs"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_code",
+      "category": "code",
+      "documents": ["code_formula"],
+      "turns": [
+        {
+          "question": "请给出材料中的 JavaScript add 函数和它的 console.log 调用。",
+          "must_include_all": ["function add(a, b)", "return a + b", "console.log(add(3, 5))"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_multi_page_followup",
+      "category": "multi_page_multi_turn",
+      "documents": ["multi_page"],
+      "turns": [
+        {
+          "question": "材料说打字机是谁在什么时候取得专利的？",
+          "must_include_all": ["Christopher Latham Sholes", "1868"]
+        },
+        {
+          "question": "那 Google Docs 是哪年出现的，它带来了什么协作变化？",
+          "must_include_all": ["2006"],
+          "must_include_any": ["实时编辑", "real-time editing", "实时协作"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_long_104_pages",
+      "category": "long_document",
+      "documents": ["long_104_pages"],
+      "turns": [
+        {
+          "question": "这份长 PDF 中，WordStar 和 Microsoft Word 分别在哪一年出现？",
+          "must_include_all": ["1978", "1983"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_korean_layout",
+      "category": "multilingual_layout",
+      "documents": ["korean_layout"],
+      "turns": [
+        {
+          "question": "这份韩文材料的作者是谁，发布日期是什么？",
+          "must_include_all": ["김", "창", "호", "2020", "4", "2"],
+          "must_not_include": ["작성자 불명", "推断作者", "未给出具体姓名"]
+        },
+        {
+          "question": "材料给出的 COVID-19 疾病分类代码是什么？",
+          "must_include_all": ["U07.1"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_chinese_multi_turn",
+      "category": "chinese_multi_turn",
+      "documents": ["chinese_bilingual"],
+      "turns": [
+        {
+          "question": "报告提出的 GDP 增长、城镇调查失业率和城镇新增就业目标分别是多少？",
+          "must_include_all": ["5%", "5.5%", "1200 万"]
+        },
+        {
+          "question": "同一段里，粮食产量和单位 GDP 能耗降低目标呢？",
+          "must_include_all": ["1.4 万亿斤", "3%"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_chinese_scanned",
+      "category": "chinese_ocr",
+      "documents": ["chinese_scanned"],
+      "turns": [
+        {
+          "question": "扫描页在 2024 年工作回顾中列出的第三项和第七项工作分别是什么？",
+          "must_include_all": ["创新驱动发展", "政府建设和治理创新"]
+        }
+      ]
+    },
+    {
+      "case_id": "pdf_multiple_documents",
+      "category": "multiple_pdf",
+      "documents": ["complex_table", "chinese_bilingual"],
+      "turns": [
+        {
+          "question": "两份 PDF 中，一份给出的 2025 年 GDP 增长目标是多少，另一份表 1 中 OTSL 6/6 层的推理时间是多少？",
+          "must_include_all": ["5%", "2.73"]
+        }
+      ]
+    }
+  ]
+}

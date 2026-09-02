@@ -93,6 +93,7 @@ def _grade_turn(expected: dict[str, Any], result: dict[str, Any]) -> dict[str, A
         and all(str(item.get("url") or "").startswith("document://") for item in sources),
         "valid_citations": references <= evidence_ids,
         "no_reasoning_markup": "<think" not in answer.casefold(),
+        "balanced_code_fences": answer.count("```") % 2 == 0,
     }
     return {
         "content_pass": all(exact_checks.values()),

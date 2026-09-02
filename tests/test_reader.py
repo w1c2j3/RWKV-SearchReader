@@ -29,6 +29,8 @@ from rwkv_search_reader.reader import (
     _copied_fact_supported,
     _eligible_evidence,
     _field_binding_applicable,
+    _field_qualifier_supported,
+    _field_source_snippets,
     _final_evidence_order,
     _final_validation_material,
     _is_explicit_benefit_fact,
@@ -444,9 +446,7 @@ def test_final_answer_removes_repeated_list_generation_and_empty_source_footer()
 **来源**：、、、、 [S1][S2][S3]"""
 
     assert _clean_final_answer(value) == (
-        "最近动态：\n"
-        "1. 机器人产业正在落地 [S1]。\n"
-        "2. 新型抽血机器人获批 [S2]。"
+        "最近动态：\n1. 机器人产业正在落地 [S1]。\n2. 新型抽血机器人获批 [S2]。"
     )
 
 
@@ -457,8 +457,7 @@ def test_final_answer_deduplicates_single_line_delimited_generation() -> None:
     )
 
     assert _clean_final_answer(value) == (
-        "- 新增代理人 **维琳娜**（风·异常）、**诺姆**（火·击破）、"
-        "**维琳娜**（风·异常）"
+        "- 新增代理人 **维琳娜**（风·异常）、**诺姆**（火·击破）、**维琳娜**（风·异常）"
     )
 
 
@@ -471,9 +470,7 @@ def test_context_retry_budget_reserves_space_below_model_limit() -> None:
     assert _context_retry_tokens(error, 4090) == 2045
 
 
-def test_final_reader_retries_with_smaller_output_budget_on_context_rejection() -> (
-    None
-):
+def test_final_reader_retries_with_smaller_output_budget_on_context_rejection() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test", rwkv_max_tokens=4090))
     requested: list[int] = []
 
@@ -600,9 +597,7 @@ def test_failed_summary_keeps_the_full_bounded_page_material() -> None:
 
 
 def test_audit_material_is_bounded_before_the_model_call() -> None:
-    settings = replace(
-        Settings(), rwkv_model="test", rwkv_reduce_chunk_chars=6000
-    )
+    settings = replace(Settings(), rwkv_model="test", rwkv_reduce_chunk_chars=6000)
     reader = RWKVReader(settings)
     captured = {}
 
@@ -630,9 +625,7 @@ def test_audit_material_is_bounded_before_the_model_call() -> None:
 def test_audit_cannot_mark_missing_atomic_fields_as_enough() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     reader._complete = lambda *args, **kwargs: "ENOUGH"
-    missing = [
-        FieldEvidenceSelection("对象", "发布日期", "", "missing", "未找到", [])
-    ]
+    missing = [FieldEvidenceSelection("对象", "发布日期", "", "missing", "未找到", [])]
 
     audit = reader.audit(
         "对象发布日期是什么？",
@@ -660,6 +653,111 @@ def test_supported_atomic_fields_stop_redundant_audit_search() -> None:
         _evidence(1),
         ["对象 发布日期"],
         research_records=[ResearchRecord("对象", "发布日期", ["发布日期"])],
+        field_selections=supported,
+    )
+
+    assert audit.sufficient is True
+    assert audit.queries == []
+
+
+def test_latest_release_page_requires_freshness_evidence() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "ENOUGH"
+    supported = [
+        FieldEvidenceSelection(
+            "Node.js", "最新补丁版本", "S1", "supported", "24.19.0", ["S1"]
+        )
+    ]
+    evidence = [
+        Evidence(
+            "S1",
+            "Node.js 24.19.0 (LTS)",
+            "https://nodejs.org/en/blog/release/v24.19.0",
+            "Node.js 24.19.0 (LTS) 于 2026-08-03 发布。",
+            "Node.js 24.19.0 (LTS)",
+        )
+    ]
+
+    audit = reader.audit(
+        "Node.js 当前 LTS 最新补丁版本是什么？",
+        evidence,
+        ["Node.js 当前 LTS 最新补丁版本"],
+        research_records=[ResearchRecord("Node.js", "查 LTS", ["最新补丁版本"])],
+        field_selections=supported,
+    )
+
+    assert audit.sufficient is False
+    assert audit.queries == [
+        "Node.js 最新补丁版本 官方 releases index 版本列表 最新"
+    ]
+    assert "24.19.0" not in audit.queries[0]
+
+
+def test_lts_field_rejects_upcoming_lts_row() -> None:
+    record = ResearchRecord(
+        "Node.js", "当前 LTS 主版本和最新补丁版本", ["LTS 主版本"]
+    )
+    table = (
+        "| 26 (Upcoming LTS) | 26.8.1 |\n"
+        "| 24 (LTS) | Krypton | 24.20.0 |"
+    )
+
+    assert not _field_qualifier_supported(record, "LTS 主版本", "26", table)
+    assert _field_qualifier_supported(record, "LTS 主版本", "24", table)
+    assert not _field_qualifier_supported(record, "最新补丁版本", "26.8.1", table)
+    assert _field_qualifier_supported(record, "最新补丁版本", "24.20.0", table)
+    assert not _field_qualifier_supported(
+        record,
+        "LTS 主版本",
+        "26",
+        "Node.js 26 will eventually get LTS treatment.\n"
+        "| Node.js 26 | May 5, 2026 | Current |",
+    )
+
+
+def test_lts_field_reader_gets_compact_record_rows_before_the_summary() -> None:
+    record = ResearchRecord(
+        "Node.js", "当前 LTS 主版本和最新补丁版本", ["最新补丁版本"]
+    )
+    material = (
+        "Long policy text without a record.\n"
+        "* Version 26.8.1 (Current)\n"
+        "* Version 24.20.0 'Krypton' (LTS)\n"
+        "* Version 24.19.0 'Krypton' (LTS)"
+    )
+
+    assert _field_source_snippets(record, "最新补丁版本", material) == (
+        "* Version 24.19.0 'Krypton' (LTS)\n"
+        "* Version 24.20.0 'Krypton' (LTS)"
+    )
+
+
+def test_explicit_latest_release_evidence_passes_freshness_review() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "SEARCH: 再查一次"
+    supported = [
+        FieldEvidenceSelection(
+            "Node.js", "最新补丁版本", "S1", "supported", "24.20.0", ["S1"]
+        )
+    ]
+    evidence = [
+        Evidence(
+            "S1",
+            "Node.js releases",
+            "https://nodejs.org/en/blog/release",
+            "最新 LTS 版本为 Node.js 24.20.0。",
+            "Latest LTS: v24.20.0",
+        )
+    ]
+
+    audit = reader.audit(
+        "Node.js 当前 LTS 最新补丁版本是什么？",
+        evidence,
+        [
+            "Node.js 当前 LTS 最新补丁版本",
+            "Node.js 最新补丁版本 官方 releases index 版本列表 最新",
+        ],
+        research_records=[ResearchRecord("Node.js", "查 LTS", ["最新补丁版本"])],
         field_selections=supported,
     )
 
@@ -705,9 +803,7 @@ def test_final_summary_retries_when_it_invents_a_numeric_value() -> None:
 
 
 def test_field_selection_maps_one_webpage_per_call_then_resolves_one_record() -> None:
-    reader = RWKVReader(
-        replace(Settings(), rwkv_model="test", rwkv_summary_workers=4)
-    )
+    reader = RWKVReader(replace(Settings(), rwkv_model="test", rwkv_summary_workers=4))
     rows = [
         Evidence(
             "S1",
@@ -738,10 +834,14 @@ def test_field_selection_maps_one_webpage_per_call_then_resolves_one_record() ->
                 return "宇树科技上市首日开盘价为1100元。"
             return "NONE"
         assert kwargs["stage"] == "evidence_resolve"
-        assert ("字段：发行价\n" in user) != ("字段：上市首日开盘价\n" in user)
-        if "字段：发行价\n" in user:
-            return '{"fact":"150.8元/股","source_ids":["S1"]}'
-        return '{"fact":"1100元","source_ids":["S2"]}'
+        assert '"发行价": ["宇树科技发行价为150.8元/股。"]' in user
+        assert '"上市首日开盘价": ["宇树科技上市首日开盘价为1100元。"]' in user
+        return (
+            '{"facts":['
+            '{"field":"发行价","fact":"150.8元/股","source_ids":["S1","S2"]},'
+            '{"field":"上市首日开盘价","fact":"1100元","source_ids":["S1","S2"]}'
+            "]}"
+        )
 
     reader._complete = complete
     selections, warnings = reader.select_evidence(
@@ -758,10 +858,80 @@ def test_field_selection_maps_one_webpage_per_call_then_resolves_one_record() ->
     ]
 
 
-def test_repeated_audit_round_reuses_page_field_extractions() -> None:
-    reader = RWKVReader(
-        replace(Settings(), rwkv_model="test", rwkv_summary_workers=4)
+def test_current_patch_is_selected_within_the_resolved_main_version() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test", rwkv_summary_workers=8))
+    rows = [
+        Evidence(
+            "S1",
+            "Node.js v24 Krypton",
+            "https://example.com/v24",
+            "SOURCE_ONE Node.js 的 LTS 主版本是 v24，代号 Krypton，补丁版本为 24.18.0。",
+            "SOURCE_ONE Node.js 的 LTS 主版本是 v24，代号 Krypton，补丁版本为 24.18.0。",
+        ),
+        Evidence(
+            "S2",
+            "Node.js 24.15.0",
+            "https://example.com/old",
+            "SOURCE_TWO Node.js v24 的补丁版本为 24.15.0。",
+            "SOURCE_TWO Node.js v24 的补丁版本为 24.15.0。",
+        ),
+        Evidence(
+            "S3",
+            "Node.js 24.20.0",
+            "https://example.com/new",
+            "SOURCE_THREE Node.js v24 的补丁版本为 24.20.0。",
+            "SOURCE_THREE Node.js v24 的补丁版本为 24.20.0。",
+        ),
+    ]
+
+    def complete(user, **kwargs):
+        if kwargs["stage"] == "evidence_extract":
+            request = user.rsplit("\n\n", 1)[-1]
+            if "LTS 主版本" in request and "SOURCE_ONE" in user:
+                return "v24"
+            if "代号" in request and "SOURCE_ONE" in user:
+                return "Krypton"
+            if "最新补丁版本" in request:
+                if "SOURCE_ONE" in user:
+                    return "24.18.0"
+                if "SOURCE_TWO" in user:
+                    return "24.15.0"
+                if "SOURCE_THREE" in user:
+                    return "24.20.0"
+            return "NONE"
+        assert kwargs["stage"] == "evidence_resolve"
+        assert '"fields"' in user
+        return (
+            '{"facts":['
+            '{"field":"LTS 主版本","fact":"v24","source_ids":["S1"]},'
+            '{"field":"代号","fact":"Krypton","source_ids":["S1"]},'
+            '{"field":"最新补丁版本","fact":"24.15.0","source_ids":["S2"]}'
+            "]}"
+        )
+
+    reader._complete = complete
+    selections, warnings = reader.select_evidence(
+        "Node.js 当前 LTS 主版本、代号和最新补丁版本分别是什么？",
+        [
+            ResearchRecord(
+                "Node.js",
+                "当前 LTS 信息",
+                ["LTS 主版本", "代号", "最新补丁版本"],
+            )
+        ],
+        rows,
     )
+
+    assert warnings == []
+    assert [(item.field, item.fact, item.source_ids) for item in selections] == [
+        ("LTS 主版本", "v24", ["S1"]),
+        ("代号", "Krypton", ["S1"]),
+        ("最新补丁版本", "24.20.0", ["S3"]),
+    ]
+
+
+def test_repeated_audit_round_reuses_page_field_extractions() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test", rwkv_summary_workers=4))
     rows = [
         Evidence(
             "S1",
@@ -932,9 +1102,7 @@ def test_source_summary_removes_repeated_search_prompt_boilerplate() -> None:
 
 def test_foreign_branch_clauses_are_removed_without_losing_current_branch() -> None:
     summary = (
-        "原神当前为7.0版本。"
-        "崩坏：星穹铁道当前为4.5版本。"
-        "原神主题为无神怜爱的雪国。"
+        "原神当前为7.0版本。崩坏：星穹铁道当前为4.5版本。原神主题为无神怜爱的雪国。"
     )
 
     cleaned = _without_foreign_points(summary, {"崩坏：星穹铁道"})
@@ -1077,14 +1245,30 @@ def test_summary_numbers_must_exist_in_the_source_material() -> None:
 def test_summary_numbers_ignore_markdown_latex_and_unicode_formatting() -> None:
     material = "发行价为 **１５０．８０** 元，开盘价为 $1{,}100$ 元。"
 
-    assert _unsupported_summary_numbers("发行价150.8元，开盘价1\\,100元。", material) == set()
+    assert (
+        _unsupported_summary_numbers("发行价150.8元，开盘价1\\,100元。", material)
+        == set()
+    )
 
 
 def test_summary_numbers_normalize_english_month_names() -> None:
-    assert _unsupported_summary_numbers(
-        "正式发布日期为2024年10月7日。",
-        "Release date: Oct. 7, 2024",
-    ) == set()
+    assert (
+        _unsupported_summary_numbers(
+            "正式发布日期为2024年10月7日。",
+            "Release date: Oct. 7, 2024",
+        )
+        == set()
+    )
+
+
+def test_summary_dates_accept_korean_and_iso_equivalence() -> None:
+    material = "발행일 2020년 4월 2일"
+
+    assert _unsupported_summary_bindings("发布日期：2020-04-02", material) == set()
+
+
+def test_final_answer_closes_an_unbalanced_code_fence() -> None:
+    assert _clean_final_answer("示例：\n```js\nconst value = 1;").endswith("\n```")
 
 
 def test_summary_bindings_reject_unseen_semver_and_mixed_dates() -> None:
@@ -1093,25 +1277,35 @@ def test_summary_bindings_reject_unseen_semver_and_mixed_dates() -> None:
         "v24 Krypton May 06, 2025 Aug 26, 2026 LTS"
     )
 
-    assert _unsupported_summary_bindings(
-        "v24.20.0 发布于2026年8月26日。", material + " v24.20.0"
-    ) == set()
-    assert _unsupported_summary_bindings(
-        "v26.9.0 发布于2025年8月26日。", material
-    ) == {"version:26.9.0", "date:2025-08-26"}
-    assert _unsupported_summary_numbers(
-        "正式发布日期为2026年9月2日。",
-        "Published September 2, 2026",
-    ) == set()
+    assert (
+        _unsupported_summary_bindings(
+            "v24.20.0 发布于2026年8月26日。", material + " v24.20.0"
+        )
+        == set()
+    )
+    assert _unsupported_summary_bindings("v26.9.0 发布于2025年8月26日。", material) == {
+        "version:26.9.0",
+        "date:2025-08-26",
+    }
+    assert (
+        _unsupported_summary_numbers(
+            "正式发布日期为2026年9月2日。",
+            "Published September 2, 2026",
+        )
+        == set()
+    )
 
 
 def test_summary_numbers_compare_scaled_units_and_percentages() -> None:
     material = "发行4044.64万股，占比5.74%，估值为1.5亿美元。"
 
-    assert _unsupported_summary_numbers(
-        "发行40,446,400股，占比5.74％，估值150 million美元。",
-        material,
-    ) == set()
+    assert (
+        _unsupported_summary_numbers(
+            "发行40,446,400股，占比5.74％，估值150 million美元。",
+            material,
+        )
+        == set()
+    )
 
     assert _unsupported_summary_numbers("普通数值0.0574。", material) == {"0.0574"}
 
@@ -1131,9 +1325,10 @@ def test_extreme_scientific_markup_does_not_overflow_number_validation() -> None
 def test_summary_numbers_still_reject_changed_scaled_values() -> None:
     material = "发行4044.64万股，占比5.74%。"
 
-    assert _unsupported_summary_numbers(
-        "发行40,446,401股，占比5.75%。", material
-    ) == {"40446401", "5.75"}
+    assert _unsupported_summary_numbers("发行40,446,401股，占比5.75%。", material) == {
+        "40446401",
+        "5.75",
+    }
 
 
 def test_copied_fact_support_normalizes_decimal_zeros_but_not_word_order() -> None:
@@ -1149,13 +1344,17 @@ def test_semantic_version_numbers_support_their_major_version() -> None:
 
 
 def test_summary_list_numbers_are_not_treated_as_factual_numbers() -> None:
-    assert _unsupported_summary_numbers("1. 事实一\n6. 事实六", "事实一 事实六") == set()
+    assert (
+        _unsupported_summary_numbers("1. 事实一\n6. 事实六", "事实一 事实六") == set()
+    )
 
 
 def test_final_validation_accepts_identifiers_copied_from_question() -> None:
     material = _final_validation_material("09:12 首次报警。", "概括 Indigo 042 事件。")
 
-    assert _unsupported_summary_bindings("Indigo 042 于 09:12 报警。", material) == set()
+    assert (
+        _unsupported_summary_bindings("Indigo 042 于 09:12 报警。", material) == set()
+    )
 
 
 def test_final_validation_accepts_requested_date_difference() -> None:
@@ -1236,9 +1435,7 @@ def test_funnel_groups_interleaved_materials_within_each_search_point_first() ->
         _MaterialNode(("S4",), "崩铁材料二", "崩坏：星穹铁道"),
     ]
 
-    groups = _chunk_material_nodes_by_retrieval_point(
-        nodes, max_chars=10_000, fan_in=4
-    )
+    groups = _chunk_material_nodes_by_retrieval_point(nodes, max_chars=10_000, fan_in=4)
 
     assert [[node.source_ids[0] for node in group] for group in groups] == [
         ["S1", "S3"],
@@ -1272,9 +1469,7 @@ def test_funnel_never_crosses_search_points_when_point_summaries_need_compressio
         prompt_points.append(found)
         source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
         body = "压缩材料" * (
-            20
-            if "压缩以上" in user or kwargs["stage"] == "branch_finalize"
-            else 120
+            20 if "压缩以上" in user or kwargs["stage"] == "branch_finalize" else 120
         )
         return body + "".join(f"[{source_id}]" for source_id in source_ids)
 
@@ -1398,9 +1593,7 @@ def test_atomic_citations_inherit_subject_and_use_one_primary_field_source() -> 
 
 def test_atomic_citations_merge_identical_fields_into_one_source() -> None:
     selections = [
-        FieldEvidenceSelection(
-            "原神", "当前版本", "S7", "supported", "无神怜爱的雪国"
-        ),
+        FieldEvidenceSelection("原神", "当前版本", "S7", "supported", "无神怜爱的雪国"),
         FieldEvidenceSelection(
             "原神", "版本主题", "S7", "supported", "无神怜爱的雪国", ["S10"]
         ),
@@ -1415,15 +1608,9 @@ def test_atomic_citations_merge_identical_fields_into_one_source() -> None:
 
 def test_identical_adjacent_atomic_fields_are_merged_before_citation_binding() -> None:
     selections = [
-        FieldEvidenceSelection(
-            "原神", "当前版本", "S7", "supported", "无神怜爱的雪国"
-        ),
-        FieldEvidenceSelection(
-            "原神", "版本主题", "S7", "supported", "无神怜爱的雪国"
-        ),
-        FieldEvidenceSelection(
-            "原神", "上线时间", "S1", "supported", "2026-08-12"
-        ),
+        FieldEvidenceSelection("原神", "当前版本", "S7", "supported", "无神怜爱的雪国"),
+        FieldEvidenceSelection("原神", "版本主题", "S7", "supported", "无神怜爱的雪国"),
+        FieldEvidenceSelection("原神", "上线时间", "S1", "supported", "2026-08-12"),
     ]
 
     merged = _merge_duplicate_atomic_fields(
@@ -1433,8 +1620,7 @@ def test_identical_adjacent_atomic_fields_are_merged_before_citation_binding() -
     )
 
     assert merged == (
-        "原神：当前版本及版本主题均为无神怜爱的雪国，"
-        "上线时间为2026-08-12。"
+        "原神：当前版本及版本主题均为无神怜爱的雪国，上线时间为2026-08-12。"
     )
 
 
@@ -1515,15 +1701,13 @@ def test_retrieval_point_citations_cannot_cross_plain_answer_branches() -> None:
     rows[1].claim = "崩坏：星穹铁道当前为4.5版本。"
 
     bound, rebound = _bind_retrieval_point_citations(
-        "原神：当前为7.0版本 [S1]。\n"
-        "崩坏：星穹铁道：当前为4.5版本 [S1][S10]。",
+        "原神：当前为7.0版本 [S1]。\n崩坏：星穹铁道：当前为4.5版本 [S1][S10]。",
         rows,
     )
 
     assert rebound is True
     assert bound == (
-        "原神：当前为7.0版本 [S1]。\n"
-        "崩坏：星穹铁道：当前为4.5版本 [S10]。"
+        "原神：当前为7.0版本 [S1]。\n崩坏：星穹铁道：当前为4.5版本 [S10]。"
     )
 
 
@@ -1666,9 +1850,7 @@ def test_funnel_reduces_twenty_source_summaries_to_five_lineage_pairs() -> None:
 
     reader._complete = complete
 
-    material, warnings, group_count = reader._reduce_evidence(
-        "question", _evidence(20)
-    )
+    material, warnings, group_count = reader._reduce_evidence("question", _evidence(20))
 
     assert group_count == 5
     assert warnings == []
@@ -1677,9 +1859,7 @@ def test_funnel_reduces_twenty_source_summaries_to_five_lineage_pairs() -> None:
     assert all(f'"S{index}"' in material for index in range(1, 21))
 
 
-def test_funnel_uses_another_parallel_level_when_final_material_is_too_large() -> (
-    None
-):
+def test_funnel_uses_another_parallel_level_when_final_material_is_too_large() -> None:
     settings = replace(
         Settings(),
         rwkv_model="test",
@@ -1695,14 +1875,10 @@ def test_funnel_uses_another_parallel_level_when_final_material_is_too_large() -
         assert kwargs["stage"] == "reduce"
         calls.append(user)
         source_ids = list(dict.fromkeys(re.findall(r'"(S\d+)"', user)))
-        return ("归并信息" * 80) + "".join(
-            f"[{source_id}]" for source_id in source_ids
-        )
+        return ("归并信息" * 80) + "".join(f"[{source_id}]" for source_id in source_ids)
 
     reader._complete = complete
-    material, warnings, group_count = reader._reduce_evidence(
-        "question", _evidence(20)
-    )
+    material, warnings, group_count = reader._reduce_evidence("question", _evidence(20))
 
     assert warnings == []
     assert group_count < 5
@@ -1799,8 +1975,8 @@ def test_retrieval_point_aggregate_retries_with_smaller_context_budget() -> None
 
     reader._complete = complete
     material = (
-        '[[' + '"S1"], "检索点：原神\\n原神事实 [S1]"]\n'
-        '[[' + '"S2"], "检索点：绝区零\\n绝区零事实 [S2]"]'
+        "[[" + '"S1"], "检索点：原神\\n原神事实 [S1]"]\n'
+        "[[" + '"S2"], "检索点：绝区零\\n绝区零事实 [S2]"]'
     )
     aggregated, warnings = reader._aggregate_retrieval_points(
         "比较两个游戏", material, ["原神", "绝区零"]
@@ -1809,9 +1985,7 @@ def test_retrieval_point_aggregate_retries_with_smaller_context_budget() -> None
     assert requested == [2048, 1024]
     assert "原神事实 [S1]" in aggregated
     assert "绝区零事实 [S2]" in aggregated
-    assert warnings == [
-        "aggregate output budget reduced to 1024 tokens to fit context"
-    ]
+    assert warnings == ["aggregate output budget reduced to 1024 tokens to fit context"]
 
 
 def test_field_review_is_appended_without_replacing_final_summary_material() -> None:
@@ -1828,9 +2002,7 @@ def test_field_review_is_appended_without_replacing_final_summary_material() -> 
         "question",
         rows,
         evidence_selections=[
-            FieldEvidenceSelection(
-                "对象", "字段", "S2", "supported", "SELECTED ONLY"
-            )
+            FieldEvidenceSelection("对象", "字段", "S2", "supported", "SELECTED ONLY")
         ],
         research_records=[ResearchRecord("对象", "question", ["字段"])],
     )
@@ -1844,10 +2016,53 @@ def test_field_review_is_appended_without_replacing_final_summary_material() -> 
     assert answer == "综合两份材料得到 Fact 1 和 Fact 2 [S1][S2]"
 
 
-def test_atomic_material_never_exceeds_the_configured_final_budget() -> None:
-    settings = replace(
-        Settings(), rwkv_model="test", rwkv_final_material_chars=9000
+def test_sufficient_verified_fields_replace_rejected_web_material_for_final_reader() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    captured = {}
+
+    def complete(user, **kwargs):
+        captured["user"] = user
+        return "Node.js 当前 LTS 主版本为24，代号为Krypton，最新补丁为24.20.0。"
+
+    reader._complete = complete
+    answer, _ = reader.finalize(
+        "Node.js 当前 LTS 主版本、代号和最新补丁版本分别是什么？",
+        [
+            Evidence(
+                "S1",
+                "被淘汰的旧材料",
+                "https://example.com/old",
+                "Node.js 16 是旧 LTS。",
+                "Node.js 16 是旧 LTS。",
+            )
+        ],
+        evidence_sufficient=True,
+        evidence_selections=[
+            FieldEvidenceSelection("Node.js", "LTS 主版本", "S2", "supported", "24"),
+            FieldEvidenceSelection("Node.js", "代号", "S3", "supported", "Krypton"),
+            FieldEvidenceSelection(
+                "Node.js", "最新补丁版本", "S4", "supported", "24.20.0"
+            ),
+        ],
+        research_records=[
+            ResearchRecord(
+                "Node.js",
+                "当前 LTS",
+                ["LTS 主版本", "代号", "最新补丁版本"],
+            )
+        ],
     )
+
+    assert "Node.js 16 是旧 LTS" not in captured["user"]
+    assert '"fact": "24.20.0"' in captured["user"]
+    assert answer == (
+        "Node.js 当前 LTS 主版本为24 [S2]，代号为Krypton [S3]，"
+        "最新补丁为24.20.0 [S4]。"
+    )
+
+
+def test_atomic_material_never_exceeds_the_configured_final_budget() -> None:
+    settings = replace(Settings(), rwkv_model="test", rwkv_final_material_chars=9000)
     reader = RWKVReader(settings)
     captured = {}
 

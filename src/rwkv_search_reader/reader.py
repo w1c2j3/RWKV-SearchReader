@@ -310,8 +310,8 @@ def _normalized_full_dates(value: str) -> set[str]:
     text = unicodedata.normalize("NFKC", str(value or ""))
     dates: set[str] = set()
     for match in re.finditer(
-        r"(?<!\d)(20\d{2})\s*(?:年|[-/.])\s*(1[0-2]|0?[1-9])"
-        r"\s*(?:月|[-/.])\s*(3[01]|[12]\d|0?[1-9])\s*日?",
+        r"(?<!\d)(20\d{2})\s*(?:年|년|[-/.])\s*(1[0-2]|0?[1-9])"
+        r"\s*(?:月|월|[-/.])\s*(3[01]|[12]\d|0?[1-9])\s*(?:日|일)?",
         text,
     ):
         year, month, day = (int(part) for part in match.groups())
@@ -349,14 +349,12 @@ def _normalized_semantic_versions(value: str) -> set[str]:
 
 def _unsupported_summary_bindings(summary: str, material: str) -> set[str]:
     unsupported = _unsupported_summary_numbers(summary, material)
-    unsupported_versions = (
-        _normalized_semantic_versions(summary)
-        - _normalized_semantic_versions(material)
-    )
+    unsupported_versions = _normalized_semantic_versions(
+        summary
+    ) - _normalized_semantic_versions(material)
     for version in unsupported_versions:
         unsupported.difference_update(
-            _decimal_key(Decimal(part))
-            for part in re.findall(r"\d+", version)
+            _decimal_key(Decimal(part)) for part in re.findall(r"\d+", version)
         )
         unsupported.add(f"version:{version}")
     unsupported.update(
@@ -556,9 +554,7 @@ def _bind_atomic_citations(
         plain = re.sub(r"\s*(?:\[S\d+\])+", "", clause, flags=re.IGNORECASE)
         plain_key = _normalized_text(plain)
         mentioned_subjects = [
-            subject
-            for subject in subjects
-            if _normalized_text(subject) in plain_key
+            subject for subject in subjects if _normalized_text(subject) in plain_key
         ]
         if len(mentioned_subjects) == 1:
             current_subject = mentioned_subjects[0]
@@ -589,9 +585,7 @@ def _bind_atomic_citations(
             fact_numbers = _normalized_numbers(selection.fact)
             fact_terms = _claim_terms(selection.fact)
             exact_match = bool(fact_key and fact_key in plain_key)
-            number_match = bool(
-                fact_numbers and fact_numbers.issubset(clause_numbers)
-            )
+            number_match = bool(fact_numbers and fact_numbers.issubset(clause_numbers))
             term_match = bool(fact_terms) and len(clause_terms & fact_terms) >= max(
                 1, min(3, len(fact_terms) // 3)
             )
@@ -602,22 +596,22 @@ def _bind_atomic_citations(
                 + float(number_match) * 6
                 + len(clause_terms & fact_terms)
                 + float(selection.field in explicit_fields) * 4
+                + min(len(fact_key), 100) / 1000
             )
             matches.append((score, selection))
         selected_matches: list[FieldEvidenceSelection] = []
         if explicit_fields:
             for field in explicit_fields:
-                field_matches = [
-                    item for item in matches if item[1].field == field
-                ]
+                field_matches = [item for item in matches if item[1].field == field]
                 if field_matches:
-                    selected_matches.append(max(field_matches, key=lambda item: item[0])[1])
+                    selected_matches.append(
+                        max(field_matches, key=lambda item: item[0])[1]
+                    )
         elif matches:
             selected_matches.append(max(matches, key=lambda item: item[0])[1])
         matched_ids = list(
             dict.fromkeys(
-                selection.source_id
-                or next(iter(_selection_source_ids(selection)), "")
+                selection.source_id or next(iter(_selection_source_ids(selection)), "")
                 for selection in selected_matches
             )
         )
@@ -659,9 +653,7 @@ def _merge_duplicate_atomic_fields(
             (selection.subject, _normalized_text(selection.fact)), []
         ).append(selection)
     duplicate_groups = [
-        rows
-        for rows in grouped.values()
-        if len({row.field for row in rows}) > 1
+        rows for rows in grouped.values() if len({row.field for row in rows}) > 1
     ]
     if not duplicate_groups:
         return answer
@@ -702,9 +694,7 @@ def _merge_duplicate_atomic_fields(
             for match in matches:
                 if current_run:
                     bridge = line[current_run[-1][1] : match[0]]
-                    if not re.fullmatch(
-                        r"\s*(?:\[S\d+\]\s*)*[，,；;]\s*", bridge
-                    ):
+                    if not re.fullmatch(r"\s*(?:\[S\d+\]\s*)*[，,；;]\s*", bridge):
                         if len(current_run) > 1:
                             runs.append(current_run)
                         current_run = []
@@ -810,7 +800,9 @@ def _atomic_fallback_answer(selections: list[FieldEvidenceSelection]) -> str:
             citations = "".join(
                 f"[{source_id}]" for source_id in _selection_source_ids(item)
             )
-            lines.append(f"- {item.subject} · {item.field}：{item.fact} {citations}".rstrip())
+            lines.append(
+                f"- {item.subject} · {item.field}：{item.fact} {citations}".rstrip()
+            )
         elif item.status == "conflict":
             citations = "".join(
                 f"[{source_id}]" for source_id in _selection_source_ids(item)
@@ -852,7 +844,10 @@ def _bounded_audit_material(
         return _bounded_field_material(selections, max_chars)[0]
     if not evidence:
         return ""
-    overhead = sum(len(item.source_id) + len(item.published_date or "unknown") + 40 for item in evidence)
+    overhead = sum(
+        len(item.source_id) + len(item.published_date or "unknown") + 40
+        for item in evidence
+    )
     per_claim = max(120, (max_chars - overhead) // max(1, len(evidence)))
     rows = "\n".join(
         json.dumps(
@@ -889,8 +884,7 @@ def _branch_requirement(
         dict.fromkeys(
             evidence_by_id[source_id].retrieval_query
             for source_id in source_ids
-            if source_id in evidence_by_id
-            and evidence_by_id[source_id].retrieval_query
+            if source_id in evidence_by_id and evidence_by_id[source_id].retrieval_query
         )
     )
     return min(queries, key=len) if queries else retrieval_point
@@ -906,8 +900,7 @@ def _without_foreign_points(
     for index in range(0, len(parts), 2):
         clause_key = _normalized_text(parts[index])
         if any(
-            _normalized_text(point)
-            and _normalized_text(point) in clause_key
+            _normalized_text(point) and _normalized_text(point) in clause_key
             for point in foreign_points
         ):
             parts[index] = ""
@@ -925,6 +918,7 @@ class _FieldFactCandidate:
     relevance: float
     title: str = ""
     published_date: str = ""
+    lineage: tuple[int, ...] | None = None
 
 
 def _render_material_nodes(nodes: list[_MaterialNode]) -> str:
@@ -966,7 +960,11 @@ def _render_field_selections(
     for selection in selections:
         subject_ids.setdefault(selection.subject, f"R{len(subject_ids) + 1}")
     header = json.dumps(
-        {"records": [[record_id, subject] for subject, record_id in subject_ids.items()]},
+        {
+            "records": [
+                [record_id, subject] for subject, record_id in subject_ids.items()
+            ]
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -1080,9 +1078,7 @@ def _field_fact_signature(field: str, fact: str) -> str:
             fact,
         )
         if full_date:
-            return "date:" + "-".join(
-                str(int(value)) for value in full_date.groups()
-            )
+            return "date:" + "-".join(str(int(value)) for value in full_date.groups())
     numbers = sorted(_normalized_numbers(fact))
     if numbers:
         return "numbers:" + ",".join(numbers)
@@ -1110,6 +1106,208 @@ def _version_title_fact(value: str) -> str:
 def _version_order(value: str) -> tuple[int, ...] | None:
     match = re.search(r"(?<!\d)(\d+(?:\.\d+)+)(?!\d)", str(value or ""))
     return tuple(int(part) for part in match.group(1).split(".")) if match else None
+
+
+def _version_lineage(value: str) -> tuple[int, ...] | None:
+    """Read a release lineage from either v24 or a dotted patch version."""
+
+    dotted = _version_order(value)
+    if dotted:
+        return dotted
+    plain = re.fullmatch(r"\s*(\d{1,3})\s*", str(value or ""))
+    if plain:
+        return (int(plain.group(1)),)
+    match = re.search(r"(?<![\w.])[vV](\d+)(?![\w.])", str(value or ""))
+    return (int(match.group(1)),) if match else None
+
+
+def _candidate_supports_resolved_fact(
+    fact: str, candidate: _FieldFactCandidate
+) -> bool:
+    """Validate one fact-source tuple before sources are ever combined."""
+
+    material = f"{candidate.title} {candidate.fact}"
+    return _copied_fact_supported(fact, material) and not bool(
+        _unsupported_summary_bindings(fact, material)
+    )
+
+
+def _field_qualifier_supported(
+    record: ResearchRecord,
+    field: str,
+    fact: str,
+    source_material: str,
+) -> bool:
+    """Keep status qualifiers on the same local row/sentence as the fact."""
+
+    if not re.search(r"LTS|长期支持", f"{record.question} {field}", re.IGNORECASE):
+        return True
+    target = ""
+    version_target = False
+    if re.search(r"版本|补丁|patch|release", field, re.IGNORECASE):
+        version = re.search(r"(?<!\d)v?(\d+(?:\.\d+)*)(?!\d)", fact, re.IGNORECASE)
+        if version:
+            target = version.group(1)
+            version_target = True
+    if not target:
+        compact_fact = " ".join(str(fact or "").split()).strip(" ，；。:：")
+        if len(compact_fact) <= 80:
+            target = compact_fact
+    if not target:
+        return False
+    target_pattern = re.compile(
+        rf"(?<![\d.])v?\s*{re.escape(target)}(?![\d.])"
+        if version_target
+        else re.escape(target),
+        re.IGNORECASE,
+    )
+    contexts: list[str] = []
+    for line in source_material.splitlines():
+        if target_pattern.search(line):
+            contexts.append(line)
+    if not contexts:
+        for match in target_pattern.finditer(source_material):
+            contexts.append(
+                source_material[max(0, match.start() - 160) : match.end() + 160]
+            )
+    patch_field = bool(re.search(r"补丁|patch", field, re.IGNORECASE))
+    conflicting_status = any(
+        re.search(
+            r"upcoming\s+LTS|即将(?:成为|进入)?\s*LTS|"
+            r"\(\s*Current\s*\)|\|\s*Current\s*\|",
+            context,
+            re.IGNORECASE,
+        )
+        for context in contexts
+    )
+    if conflicting_status:
+        return False
+    for context in contexts:
+        if re.search(
+            r"\(\s*LTS\s*\)|\|\s*LTS\s*\||"
+            r"\b(?:Active|Maintenance)\s+LTS\b|"
+            r"\bLTS\b|活跃的?\s*LTS|维护中的?\s*LTS|长期支持",
+            context,
+            re.IGNORECASE,
+        ):
+            return True
+    # A neutral patch page can inherit the already resolved LTS major lineage.
+    return patch_field and bool(contexts)
+
+
+def _local_fact_lineage(field: str, fact: str, source_material: str) -> tuple[int, ...] | None:
+    """Recover the version lineage from the same row as a copied field value."""
+
+    if re.search(r"版本|补丁|patch|release", field, re.IGNORECASE):
+        return _version_lineage(fact) or (
+            (int(match.group(1)),)
+            if (match := re.search(r"(?<!\d)v?(\d{1,3})(?!\d)", fact, re.IGNORECASE))
+            else None
+        )
+    compact_fact = " ".join(str(fact or "").split()).strip(" ，；。:：")
+    if not compact_fact or len(compact_fact) > 80:
+        return None
+    for line in source_material.splitlines():
+        if not re.search(re.escape(compact_fact), line, re.IGNORECASE):
+            continue
+        versions = list(
+            re.finditer(
+                r"(?<![\d.])v?(\d{1,3}(?:\.\d+)*)(?![\d.])",
+                line,
+                re.IGNORECASE,
+            )
+        )
+        if versions:
+            return tuple(int(part) for part in versions[0].group(1).split("."))
+    return None
+
+
+def _field_source_snippets(
+    record: ResearchRecord, field: str, source_material: str, max_chars: int = 3000
+) -> str:
+    """Expose only compact, qualifier-bearing source rows to the field reader."""
+
+    requires_lts = bool(
+        re.search(r"LTS|长期支持", f"{record.question} {field}", re.IGNORECASE)
+    )
+    if not requires_lts:
+        return ""
+    rows: list[str] = []
+    total = 0
+    for raw_line in source_material.splitlines():
+        line = " ".join(raw_line.split()).strip()
+        if not line or not re.search(r"LTS|长期支持", line, re.IGNORECASE):
+            continue
+        if re.search(
+            r"版本|补丁|patch|release|代号|codename", field, re.IGNORECASE
+        ) and not re.search(
+            r"(?<!\d)v?\d+(?:\.\d+)*(?!\d)", line, re.IGNORECASE
+        ):
+            continue
+        if re.search(r"代号|codename", field, re.IGNORECASE) and not (
+            line.count("|") >= 3
+            or re.search(r"['\"“”‘’][A-Za-z][^'\"“”‘’]{1,40}['\"“”‘’]", line)
+        ):
+            continue
+        line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
+        if re.search(r"代号|codename", field, re.IGNORECASE):
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if len(cells) >= 2 and cells[1] and cells[1] != "-":
+                line = f"代号：{cells[1]}；版本：{cells[0]}；状态：LTS"
+            elif quoted := re.search(
+                r"['\"“”‘’]([A-Za-z][^'\"“”‘’]{1,40})['\"“”‘’]", line
+            ):
+                line = f"代号：{quoted.group(1)}；记录：{line}"
+        if line in rows:
+            continue
+        if rows and total + len(line) > max_chars:
+            break
+        rows.append(line)
+        total += len(line)
+    selected_rows = rows[:16]
+    if _recency_requested(record.question):
+        selected_rows.sort(
+            key=lambda item: _version_order(item)
+            or _version_lineage(item)
+            or ()
+        )
+    return "\n".join(selected_rows)
+
+
+def _structured_field_candidates(
+    record: ResearchRecord,
+    field: str,
+    evidence: Evidence,
+    relevance: float,
+) -> list[_FieldFactCandidate]:
+    """Preserve exact version-codename pairs already present in Markdown tables."""
+
+    if not re.search(r"代号|codename", field, re.IGNORECASE):
+        return []
+    source_material = f"{evidence.title}\n{evidence.quote}"
+    snippets = _field_source_snippets(record, field, source_material)
+    candidates: list[_FieldFactCandidate] = []
+    for match in re.finditer(
+        r"代号：(?P<fact>[^；\n]{1,60})；版本：v?(?P<version>\d{1,3}(?:\.\d+)*)",
+        snippets,
+        re.IGNORECASE,
+    ):
+        fact = match.group("fact").strip()
+        if not fact or fact == "-" or re.search(r"\d", fact):
+            continue
+        candidates.append(
+            _FieldFactCandidate(
+                subject=record.subject,
+                field=field,
+                source_id=evidence.source_id,
+                fact=fact,
+                relevance=relevance,
+                title=evidence.title,
+                published_date=evidence.published_date,
+                lineage=tuple(int(part) for part in match.group("version").split(".")),
+            )
+        )
+    return candidates
 
 
 def _chunk_material_nodes(
@@ -1148,9 +1346,7 @@ def _chunk_material_nodes_by_retrieval_point(
         return _chunk_material_nodes(nodes, max_chars=max_chars, fan_in=fan_in)
     groups: list[list[_MaterialNode]] = []
     for items in point_groups.values():
-        groups.extend(
-            _chunk_material_nodes(items, max_chars=max_chars, fan_in=fan_in)
-        )
+        groups.extend(_chunk_material_nodes(items, max_chars=max_chars, fan_in=fan_in))
     return groups
 
 
@@ -1179,6 +1375,63 @@ def _recency_requested(question: str) -> bool:
             question,
         )
     )
+
+
+def _freshness_review_queries(
+    question: str,
+    evidence: list[Evidence],
+    tried_queries: list[str],
+    field_selections: list[FieldEvidenceSelection] | None,
+    limit: int,
+) -> list[str]:
+    """Require an explicit current/latest statement for release-like fields.
+
+    A product release page proves that a release exists, but not that no newer
+    release exists.  Keep the guard answer-neutral: it asks for an index/list
+    and never copies the candidate version into the next search query.
+    """
+
+    if not _recency_requested(question) or not field_selections:
+        return []
+    evidence_by_id = {item.source_id: item for item in evidence}
+    tried = {_normalized_text(item) for item in tried_queries}
+    freshness_challenge_tried = any(
+        re.search(r"releases?index|releaseschedule|版本列表|发布列表", item)
+        for item in tried
+    )
+    queries: list[str] = []
+    for selection in field_selections:
+        if selection.status != "supported" or not re.search(
+            r"版本|补丁|patch|release", selection.field, re.IGNORECASE
+        ):
+            continue
+        raw_support = [
+            f"{item.title}\n{item.quote}"
+            for source_id in _selection_source_ids(selection)
+            if (item := evidence_by_id.get(source_id)) is not None
+        ]
+        explicitly_current = any(
+            re.search(r"最新|当前|latest|current", material, re.IGNORECASE)
+            and _copied_fact_supported(selection.fact, material)
+            for material in raw_support
+        )
+        if explicitly_current and (
+            freshness_challenge_tried
+            or len(_selection_source_ids(selection)) >= 2
+        ):
+            continue
+        candidates = [
+            f"{selection.subject} {selection.field} 官方 releases index 版本列表 最新",
+            f"{selection.subject} {selection.field} 官方 download release schedule 当前",
+        ]
+        query = next(
+            (item for item in candidates if _normalized_text(item) not in tried), ""
+        )
+        if query and query not in queries:
+            queries.append(query)
+        if len(queries) >= limit:
+            break
+    return queries
 
 
 def _broad_question(question: str) -> bool:
@@ -1238,9 +1491,7 @@ def _latest_effective_material_timestamp(value: str) -> float:
         year, month, raw_day = match.groups()
         try:
             day = int(raw_day) if raw_day else 1
-            parsed_at = datetime(
-                int(year), int(month), day, tzinfo=local_now.tzinfo
-            )
+            parsed_at = datetime(int(year), int(month), day, tzinfo=local_now.tzinfo)
             parsed = parsed_at.date()
         except ValueError:
             continue
@@ -1273,11 +1524,7 @@ def _final_evidence_order(question: str, evidence: list[Evidence]) -> list[Evide
     point_groups: dict[str, list[Evidence]] = {}
     for item in evidence:
         point_groups.setdefault(item.retrieval_point, []).append(item)
-    return [
-        item
-        for group in point_groups.values()
-        for item in order_group(group)
-    ]
+    return [item for group in point_groups.values() for item in order_group(group)]
 
 
 def _verified_source_relation(url: str, model_relation: str) -> str:
@@ -1332,7 +1579,10 @@ def _clean_final_answer(value: str) -> str:
         r" \2\1",
         text,
     )
-    return _deduplicate_final_output(text).strip()
+    text = _deduplicate_final_output(text).strip()
+    if text.count("```") % 2:
+        text = f"{text}\n```"
+    return text
 
 
 def _deduplicate_final_output(value: str) -> str:
@@ -1699,8 +1949,7 @@ def _bind_retrieval_point_citations(
             mentioned = [
                 point
                 for point in points
-                if _normalized_text(point)
-                and _normalized_text(point) in clause_key
+                if _normalized_text(point) and _normalized_text(point) in clause_key
             ]
             if len(mentioned) == 1:
                 current_point = mentioned[0]
@@ -1716,9 +1965,7 @@ def _bind_retrieval_point_citations(
             allowed_ids = {item.source_id.upper() for item in allowed_rows}
             cited_ids = {
                 source_id.upper()
-                for source_id in re.findall(
-                    r"\[(S\d+)\]", clause, flags=re.IGNORECASE
-                )
+                for source_id in re.findall(r"\[(S\d+)\]", clause, flags=re.IGNORECASE)
             }
             if any(
                 source_id in source_point and source_id not in allowed_ids
@@ -1926,7 +2173,9 @@ class RWKVReader:
             )
         if plan.decision == "search" and _unexpanded_collection_plan(question, plan):
             suggested_points = list(
-                dict.fromkeys(record.subject for record in plan.records if record.subject)
+                dict.fromkeys(
+                    record.subject for record in plan.records if record.subject
+                )
             )
             suggested_requirements = {
                 record.subject: record.question
@@ -2060,9 +2309,7 @@ class RWKVReader:
                     and query not in {"检索词", "查询"}
                 ):
                     rows.append((point[:160], query[:800]))
-            return list(dict.fromkeys(rows))[
-                : self.settings.research_plan_max_queries
-            ]
+            return list(dict.fromkeys(rows))[: self.settings.research_plan_max_queries]
 
         candidates: dict[int, list[tuple[str, str]]] = {}
         with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
@@ -2185,8 +2432,7 @@ class RWKVReader:
                             (
                                 query
                                 for query in fallback_queries
-                                if _normalized_text(point)
-                                in _normalized_text(query)
+                                if _normalized_text(point) in _normalized_text(query)
                             ),
                             f"{point} {question}"[:800],
                         ),
@@ -2209,6 +2455,7 @@ class RWKVReader:
                 for point in suggested_points
                 if point not in present
             )
+
         def complete_query(name: str, query: str) -> str:
             value = query
             if _normalized_text(name) not in _normalized_text(value):
@@ -2220,9 +2467,7 @@ class RWKVReader:
                 value = f"{value} {requirement}"
             return " ".join(value.split())[:800]
 
-        designed = [
-            (name, complete_query(name, query)) for name, query in designed
-        ]
+        designed = [(name, complete_query(name, query)) for name, query in designed]
         designed = designed[: self.settings.research_plan_max_queries]
         queries = list(dict.fromkeys(query for _, query in designed))
         point_by_query = {query: name for name, query in designed}
@@ -2506,7 +2751,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 return f"上一问：{previous_question}；当前追问：{question}"[:8000]
         return rewritten
 
-    def answer_from_history(self, question: str, history: list[dict[str, object]]) -> str:
+    def answer_from_history(
+        self, question: str, history: list[dict[str, object]]
+    ) -> str:
         """Answer a request about this conversation without external retrieval."""
 
         rows: list[str] = []
@@ -2577,7 +2824,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 已检索：{tried}
 当前日期：{_today()}
 
-判断材料是否足以覆盖问题和记录中的字段。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。
+判断材料是否足以覆盖问题和记录中的字段。“当前/最新”必须有明确写着当前/最新的材料或版本列表；某一个发布页只能证明该版本存在。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。
 审核结果："""
         output = self._complete(user, max_tokens=192, stage="audit")
         audit = _parse_audit_output(output, self.settings.review_max_queries)
@@ -2586,8 +2833,18 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             for item in (field_selections or [])
             if item.status != "supported"
         ][: self.settings.review_max_queries]
-        if audit.sufficient and missing_queries:
-            return EvidenceAudit(sufficient=False, queries=missing_queries)
+        freshness_queries = _freshness_review_queries(
+            question,
+            evidence,
+            tried_queries,
+            field_selections,
+            self.settings.review_max_queries,
+        )
+        required_queries = list(
+            dict.fromkeys(missing_queries + freshness_queries)
+        )[: self.settings.review_max_queries]
+        if required_queries:
+            return EvidenceAudit(sufficient=False, queries=required_queries)
         if field_selections and all(
             item.status == "supported" for item in field_selections
         ):
@@ -2603,12 +2860,32 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
     ) -> _FieldFactCandidate | None:
         """Ask one RWKV to copy one field from one webpage summary."""
 
-        material = f"{evidence.title}\n{evidence.claim}".strip()
+        source_material = f"{evidence.title}\n{evidence.quote}".strip()[
+            : self.settings.max_evidence_chars
+        ]
+        source_snippets = _field_source_snippets(
+            record, field, source_material
+        )
+        material = "\n".join(
+            item
+            for item in (evidence.title, source_snippets or evidence.claim)
+            if item.strip()
+        ).strip()
         if re.search(r"日期|时间|上线|发布|上市", field):
             request = (
                 f"待查项是“{record.subject}：{record.question}”。"
                 f"复制明确写着字段“{field}”的完整原句。"
                 "相关活动、申购日期不算；没有则输出 NONE。"
+            )
+        elif re.search(r"补丁|patch", field, re.IGNORECASE):
+            request = (
+                f"待查项是“{record.subject}：{record.question}”。"
+                f"复制字段“{field}”的补丁版本号本身；没有则输出 NONE。"
+            )
+        elif re.search(r"代号|codename", field, re.IGNORECASE):
+            request = (
+                f"待查项是“{record.subject}：{record.question}”。"
+                "复制代号本身，不要版本号和描述；没有则输出 NONE。"
             )
         else:
             request = (
@@ -2616,14 +2893,29 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 f"复制字段“{field}”的值，只保留包含答案的最短原句。"
                 "没有则输出 NONE。"
             )
+        continuation = (
+            "代号："
+            if re.search(r"代号|codename", field, re.IGNORECASE)
+            else "字段原句："
+        )
         output = self._complete(
-            f"{material}\n\n{request}\n字段原句：",
+            f"{material}\n\n{request}\n{continuation}",
             max_tokens=min(256, self.settings.rwkv_summary_max_tokens),
             stage="evidence_extract",
         )
         fact = _parse_source_summary(output).strip()
         if _is_missing_fact_output(fact):
             return None
+
+        if re.search(r"补丁|patch", field, re.IGNORECASE):
+            version = _SEMANTIC_VERSION_RE.search(fact)
+            if version:
+                fact = version.group("version")
+        elif re.search(r"代号|codename", field, re.IGNORECASE):
+            fact = re.sub(r"^(?:代号|codename)\s*[:：为是-]*\s*", "", fact, flags=re.IGNORECASE)
+            fact = fact.strip(" '\"“”‘’。，；")
+            if re.search(r"\d", fact) or len(fact) > 60:
+                return None
 
         if re.search(r"版本名称|版本名", field):
             titled = _version_title_fact(evidence.title)
@@ -2638,6 +2930,8 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 "evidence_extract",
                 f"RWKV copied unsupported numbers: {values}",
             )
+        if not _field_qualifier_supported(record, field, fact, source_material):
+            return None
         return _FieldFactCandidate(
             subject=record.subject,
             field=field,
@@ -2646,6 +2940,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             relevance=relevance,
             title=evidence.title,
             published_date=evidence.published_date,
+            lineage=_local_fact_lineage(field, fact, source_material),
         )
 
     @staticmethod
@@ -2664,9 +2959,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             )
         groups: dict[str, list[_FieldFactCandidate]] = {}
         for candidate in candidates:
-            groups.setdefault(
-                _field_fact_signature(field, candidate.fact), []
-            ).append(candidate)
+            groups.setdefault(_field_fact_signature(field, candidate.fact), []).append(
+                candidate
+            )
         if len(groups) > 1:
             source_ids = list(
                 dict.fromkeys(candidate.source_id for candidate in candidates)
@@ -2697,9 +2992,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 -len(item.fact),
             ),
         )
-        source_ids = list(
-            dict.fromkeys(item.source_id for item in selected_group)
-        )
+        source_ids = list(dict.fromkeys(item.source_id for item in selected_group))
         return FieldEvidenceSelection(
             subject=record.subject,
             field=field,
@@ -2730,20 +3023,25 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         if not all_candidates:
             return [fallback[field] for field in record.fields]
 
-        material = "\n".join(
-            json.dumps(
-                [
-                    [candidate.source_id],
-                    {
-                        "subject": candidate.subject,
-                        "field": candidate.field,
-                        "source": candidate.title,
-                        "fact": candidate.fact,
-                    },
-                ],
-                ensure_ascii=False,
+        source_records: dict[str, dict[str, object]] = {}
+        for candidate in all_candidates:
+            source_record = source_records.setdefault(
+                candidate.source_id,
+                {
+                    "source": candidate.title,
+                    "published_date": candidate.published_date or "unknown",
+                    "fields": {},
+                },
             )
-            for candidate in all_candidates
+            fields = source_record["fields"]
+            assert isinstance(fields, dict)
+            values = fields.setdefault(candidate.field, [])
+            assert isinstance(values, list)
+            if candidate.fact not in values:
+                values.append(candidate.fact)
+        material = "\n".join(
+            json.dumps([[source_id], row], ensure_ascii=False)
+            for source_id, row in source_records.items()
         )
         temporal_rule = ""
         record_subject = _normalized_text(record.subject)
@@ -2764,9 +3062,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if (version := _version_order(str(item.get("fact") or "")))
         ]
         if next_version_requested:
-            temporal_rule = (
-                "“下一个”必须晚于此前已确认记录；如果没有比此前记录更晚的材料，就标记缺失。"
-            )
+            temporal_rule = "“下一个”必须晚于此前已确认记录；如果没有比此前记录更晚的材料，就标记缺失。"
         elif _recency_requested(question):
             temporal_rule = "“当前/最新”只选择当前日期前已经生效的同一记录。"
         user = f"""{material}
@@ -2774,7 +3070,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
 此前已确认：{prior_material}
 当前日期：{_today()}
 问题：{question}
-整理成一个一致的记录。每个字段只使用该字段下的值，不交换字段。{temporal_rule}
+先确定“{record.subject}”的一条一致记录，再填写字段。主版本、代号、补丁和日期必须属于同一版本谱系；如果一个来源不完整，只能与主版本一致的来源互补。对于“当前/最新补丁”，在已生效且主版本相同的候选中选择版本号最高者。每个字段只使用该字段下的值，不交换字段。{temporal_rule}
 只输出 JSON：{{"facts":[{{"field":"","fact":"","source_ids":[]}}]}}
 记录 JSON："""
         output = self._complete(user, max_tokens=768, stage="evidence_resolve")
@@ -2808,10 +3104,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             source_ids = [
                 source_id
                 for source_id in source_ids
-                if _copied_fact_supported(
-                    fact,
-                    f"{allowed[source_id].title} {allowed[source_id].fact}",
-                )
+                if _candidate_supports_resolved_fact(fact, allowed[source_id])
             ]
             if not source_ids:
                 signature = _field_fact_signature(field, fact)
@@ -2850,7 +3143,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     field=field,
                     source_id=source_ids[0],
                     status="supported",
-                    fact=fact,
+                    fact=_narrow_selected_fact(field, fact),
                     source_ids=source_ids,
                 )
             )
@@ -2885,7 +3178,172 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 reverse=True,
             )
             selections.append(options[0])
-        return selections
+        return self._cohere_record_selections(
+            question,
+            record,
+            selections,
+            candidates_by_field,
+        )
+
+    @staticmethod
+    def _cohere_record_selections(
+        question: str,
+        record: ResearchRecord,
+        selections: list[FieldEvidenceSelection],
+        candidates_by_field: dict[str, list[_FieldFactCandidate]],
+    ) -> list[FieldEvidenceSelection]:
+        """Keep dependent release fields on one version lineage."""
+
+        del record
+        if not _recency_requested(question):
+            return selections
+        coherent = list(selections)
+        for index, selection in enumerate(coherent):
+            if not re.search(
+                r"主版本|LTS\s*版本", selection.field, re.IGNORECASE
+            ) or re.search(r"补丁|patch|小版本", selection.field, re.IGNORECASE):
+                continue
+            version_candidates = [
+                candidate
+                for candidate in candidates_by_field.get(selection.field, [])
+                if candidate.lineage
+            ]
+            if not version_candidates:
+                continue
+            newest_major = max(candidate.lineage[0] for candidate in version_candidates)
+            newest_candidates = [
+                candidate
+                for candidate in version_candidates
+                if candidate.lineage and candidate.lineage[0] == newest_major
+            ]
+            selected = max(
+                newest_candidates,
+                key=lambda item: (item.relevance, -len(item.fact)),
+            )
+            main_fact = (
+                f"v{newest_major}"
+                if re.search(r"(?<!\w)v\d+", selected.fact, re.IGNORECASE)
+                else str(newest_major)
+            )
+            coherent[index] = FieldEvidenceSelection(
+                subject=selection.subject,
+                field=selection.field,
+                source_id=selected.source_id,
+                status="supported",
+                fact=main_fact,
+                source_ids=list(
+                    dict.fromkeys(item.source_id for item in newest_candidates)
+                ),
+            )
+        anchor = next(
+            (
+                item
+                for item in coherent
+                if item.status == "supported"
+                and re.search(
+                    r"主版本|LTS\s*版本|当前版本|正式版本",
+                    item.field,
+                    re.IGNORECASE,
+                )
+                and not re.search(r"补丁|patch|小版本", item.field, re.IGNORECASE)
+                and _version_lineage(item.fact)
+            ),
+            None,
+        )
+        if anchor is None:
+            return selections
+        anchor_lineage = _version_lineage(anchor.fact)
+        if not anchor_lineage:
+            return coherent
+        anchor_major = anchor_lineage[0]
+        for index, selection in enumerate(coherent):
+            if re.search(r"代号|codename", selection.field, re.IGNORECASE):
+                compatible_names = [
+                    candidate
+                    for candidate in candidates_by_field.get(selection.field, [])
+                    if candidate.lineage and candidate.lineage[0] == anchor_major
+                ]
+                if compatible_names:
+                    selected_name = max(
+                        compatible_names,
+                        key=lambda item: (item.relevance, -len(item.fact)),
+                    )
+                    coherent[index] = FieldEvidenceSelection(
+                        subject=selection.subject,
+                        field=selection.field,
+                        source_id=selected_name.source_id,
+                        status="supported",
+                        fact=_narrow_selected_fact(selection.field, selected_name.fact),
+                        source_ids=list(
+                            dict.fromkeys(
+                                item.source_id
+                                for item in compatible_names
+                                if _field_fact_signature(
+                                    selection.field, item.fact
+                                )
+                                == _field_fact_signature(
+                                    selection.field, selected_name.fact
+                                )
+                            )
+                        ),
+                    )
+                elif selection.status == "supported":
+                    coherent[index] = FieldEvidenceSelection(
+                        subject=selection.subject,
+                        field=selection.field,
+                        source_id="",
+                        status="conflict",
+                        fact="材料没有给出与主版本一致的代号记录。",
+                        source_ids=_selection_source_ids(selection),
+                    )
+                continue
+            if not re.search(r"补丁|patch|小版本", selection.field, re.IGNORECASE):
+                continue
+            compatible = [
+                candidate
+                for candidate in candidates_by_field.get(selection.field, [])
+                if (lineage := _version_lineage(candidate.fact))
+                and lineage[0] == anchor_major
+                and len(lineage) > 1
+            ]
+            if not compatible:
+                if selection.status == "supported":
+                    coherent[index] = FieldEvidenceSelection(
+                        subject=selection.subject,
+                        field=selection.field,
+                        source_id="",
+                        status="conflict",
+                        fact="材料没有给出与主版本一致的补丁记录。",
+                        source_ids=_selection_source_ids(selection),
+                    )
+                continue
+            newest = max(
+                _version_lineage(candidate.fact) or () for candidate in compatible
+            )
+            newest_candidates = [
+                candidate
+                for candidate in compatible
+                if _version_lineage(candidate.fact) == newest
+            ]
+            selected = max(
+                newest_candidates,
+                key=lambda item: (
+                    bool(item.published_date),
+                    item.relevance,
+                    -len(item.fact),
+                ),
+            )
+            coherent[index] = FieldEvidenceSelection(
+                subject=selection.subject,
+                field=selection.field,
+                source_id=selected.source_id,
+                status="supported",
+                fact=_narrow_selected_fact(selection.field, selected.fact),
+                source_ids=list(
+                    dict.fromkeys(item.source_id for item in newest_candidates)
+                ),
+            )
+        return coherent
 
     def _resolve_record_fields(
         self,
@@ -2982,18 +3440,13 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             source_ids = [
                 source_id
                 for source_id in source_ids
-                if _copied_fact_supported(
-                    fact,
-                    f"{allowed[source_id].title} {allowed[source_id].fact}",
-                )
+                if _candidate_supports_resolved_fact(fact, allowed[source_id])
             ]
             if not source_ids:
                 source_ids = [
                     candidate.source_id
                     for candidate in candidates
-                    if _copied_fact_supported(
-                        fact, f"{candidate.title} {candidate.fact}"
-                    )
+                    if _candidate_supports_resolved_fact(fact, candidate)
                 ]
             if not source_ids:
                 return fallback
@@ -3054,7 +3507,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         extracted: dict[tuple[int, str], list[_FieldFactCandidate]] = {}
         field_tasks: list[tuple[int, ResearchRecord, str, Evidence, float]] = []
         for record_index, record in enumerate(records):
-            alias_keys = [_normalized_text(alias) for alias in _subject_aliases(record.subject)]
+            alias_keys = [
+                _normalized_text(alias) for alias in _subject_aliases(record.subject)
+            ]
             related = [
                 item
                 for item in useful
@@ -3075,6 +3530,14 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     reverse=True,
                 )[:10]
                 for item in ranked:
+                    relevance = _source_relevance(f"{record.subject} {field}", item)
+                    structured = _structured_field_candidates(
+                        record, field, item, relevance
+                    )
+                    if structured:
+                        extracted.setdefault((record_index, field), []).extend(
+                            structured
+                        )
                     cache_key = (
                         _normalized_text(record.subject),
                         _normalized_text(field),
@@ -3083,7 +3546,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     if cache_key in self._field_candidate_cache:
                         cached = self._field_candidate_cache[cache_key]
                         if cached:
-                            extracted.setdefault((record_index, field), []).append(cached)
+                            extracted.setdefault((record_index, field), []).append(
+                                cached
+                            )
                         continue
                     field_tasks.append(
                         (
@@ -3091,7 +3556,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                             record,
                             field,
                             item,
-                            _source_relevance(f"{record.subject} {field}", item),
+                            relevance,
                         )
                     )
         if not field_tasks and not extracted:
@@ -3152,7 +3617,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         with ThreadPoolExecutor(max_workers=resolve_workers) as pool:
             futures = {
                 pool.submit(
-                    self._resolve_record_fields,
+                    self._resolve_record_fields_together,
                     question,
                     record,
                     {
@@ -3163,9 +3628,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 ): (record_index, record)
                 for record_index, record in enumerate(records)
             }
-            for resolved_completed, future in enumerate(
-                as_completed(futures), start=1
-            ):
+            for resolved_completed, future in enumerate(as_completed(futures), start=1):
                 record_index, record = futures[future]
                 try:
                     selections_by_record[record_index] = future.result()
@@ -3241,9 +3704,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             summary = _remove_copied_temporal_qualifiers(
                 summary, f"{chunk.title}\n{material}"
             )
-        unsupported = _unsupported_summary_bindings(
-            summary, material
-        )
+        unsupported = _unsupported_summary_bindings(summary, material)
         if unsupported:
             summary = _remove_unsupported_number_sentences(summary, material)
             if not summary:
@@ -3344,13 +3805,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         material = _render_material_nodes(group)
         retrieval_point = _combined_retrieval_point(group)
         source_ids = tuple(
-            dict.fromkeys(
-                source_id for node in group for source_id in node.source_ids
-            )
+            dict.fromkeys(source_id for node in group for source_id in node.source_ids)
         )
-        requirement = _branch_requirement(
-            source_ids, evidence_by_id, retrieval_point
-        )
+        requirement = _branch_requirement(source_ids, evidence_by_id, retrieval_point)
         instruction = (
             f"压缩以上同一检索点的材料，不超过 {target_chars} 个字符"
             if target_chars
@@ -3359,10 +3816,10 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         user = f"""{material}
 
 当前日期：{_today()}
-当前检索点：{retrieval_point or '未指定'}
+当前检索点：{retrieval_point or "未指定"}
 检索要求：{requirement}
 {instruction}。删除重复，保留名称、日期、数字和 [S1] 来源编号。只写当前检索点；当前状态只采用已生效信息，冲突则保留。只输出合并后的材料。
-{retrieval_point or '分支'}："""
+{retrieval_point or "分支"}："""
         output = self._complete(
             user,
             max_tokens=(
@@ -3384,8 +3841,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             foreign_points = {
                 item.retrieval_point
                 for item in evidence_by_id.values()
-                if item.retrieval_point
-                and item.retrieval_point != retrieval_point
+                if item.retrieval_point and item.retrieval_point != retrieval_point
             }
             summary = _without_foreign_points(summary, foreign_points)
             if not summary:
@@ -3403,9 +3859,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         allowed = set(source_ids)
         summary = re.sub(
             r"\[(S\d+)\]",
-            lambda match: match.group(0)
-            if match.group(1).upper() in allowed
-            else "",
+            lambda match: match.group(0) if match.group(1).upper() in allowed else "",
             summary,
             flags=re.IGNORECASE,
         )
@@ -3489,8 +3943,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         foreign_points = {
             item.retrieval_point
             for item in evidence_by_id.values()
-            if item.retrieval_point
-            and item.retrieval_point != node.retrieval_point
+            if item.retrieval_point and item.retrieval_point != node.retrieval_point
         }
         summary = _without_foreign_points(summary, foreign_points)
         if not summary:
@@ -3500,9 +3953,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         allowed = set(node.source_ids)
         summary = re.sub(
             r"\[(S\d+)\]",
-            lambda match: match.group(0)
-            if match.group(1).upper() in allowed
-            else "",
+            lambda match: match.group(0) if match.group(1).upper() in allowed else "",
             summary,
             flags=re.IGNORECASE,
         )
@@ -3570,10 +4021,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 )
                 compression_target = max(
                     160,
-                    (
-                        material_limit - label_overhead
-                    )
-                    // max(1, len(nodes)),
+                    (material_limit - label_overhead) // max(1, len(nodes)),
                 )
                 groups = [[node] for node in nodes]
             else:
@@ -3644,9 +4092,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     index, group = futures[future]
                     source_ids = tuple(
                         dict.fromkeys(
-                            source_id
-                            for node in group
-                            for source_id in node.source_ids
+                            source_id for node in group for source_id in node.source_ids
                         )
                     )
                     try:
@@ -3655,8 +4101,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                     except SearchReaderError as exc:
                         per_node = max(
                             240,
-                            self.settings.rwkv_reduce_chunk_chars
-                            // max(2, len(group))
+                            self.settings.rwkv_reduce_chunk_chars // max(2, len(group))
                             - 80,
                         )
                         node = _MaterialNode(
@@ -3700,17 +4145,14 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             )
             target_chars = max(
                 320,
-                (material_limit - label_overhead)
-                // max(1, len(nodes)),
+                (material_limit - label_overhead) // max(1, len(nodes)),
             )
             if on_progress:
                 on_progress(
                     "branch_finalizing",
                     {
                         "branch_count": len(nodes),
-                        "retrieval_points": [
-                            node.retrieval_point for node in nodes
-                        ],
+                        "retrieval_points": [node.retrieval_point for node in nodes],
                     },
                 )
             finalized_nodes: dict[int, _MaterialNode] = {}
@@ -3836,9 +4278,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if point_match:
                 for source_id in source_ids:
                     source_points[str(source_id).upper()] = point_match.group(1)
-        heading_matches = list(
-            re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", aggregated)
-        )
+        heading_matches = list(re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", aggregated))
         for index, heading_match in enumerate(heading_matches):
             heading = heading_match.group(1)
             point = next(
@@ -3859,9 +4299,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             section = aggregated[heading_match.end() : end]
             crossed = [
                 source_id
-                for source_id in re.findall(
-                    r"\[(S\d+)\]", section, flags=re.IGNORECASE
-                )
+                for source_id in re.findall(r"\[(S\d+)\]", section, flags=re.IGNORECASE)
                 if source_points.get(source_id.upper(), point) != point
             ]
             if crossed:
@@ -3873,9 +4311,9 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         allowed_ids = set(re.findall(r"S\d+", material, flags=re.IGNORECASE))
         aggregated = re.sub(
             r"\[(S\d+)\]",
-            lambda match: match.group(0)
-            if match.group(1).upper() in allowed_ids
-            else "",
+            lambda match: (
+                match.group(0) if match.group(1).upper() in allowed_ids else ""
+            ),
             aggregated,
             flags=re.IGNORECASE,
         )
@@ -3904,9 +4342,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         )
         retrieval_points = list(
             dict.fromkeys(
-                item.retrieval_point
-                for item in ordered
-                if item.retrieval_point
+                item.retrieval_point for item in ordered if item.retrieval_point
             )
         )
         if len(retrieval_points) > 1:
@@ -3933,11 +4369,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                         "status": "degraded" if aggregate_warnings else "done",
                     },
                 )
-        del (
-            conversation_history,
-            current_message,
-            evidence_sufficient,
-        )
+        del conversation_history, current_message
         scope_note = (
             "回答当轮材料能够确认的代表对象，不要声称已经穷举全部。"
             if representative_scope
@@ -3947,9 +4379,7 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             "只回答这些检索点："
             + "、".join(
                 dict.fromkeys(
-                    item.retrieval_point
-                    for item in ordered
-                    if item.retrieval_point
+                    item.retrieval_point for item in ordered if item.retrieval_point
                 )
             )
             + "；不要增加其他对象。"
@@ -3964,25 +4394,30 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             if derived_material
             else reduced_material
         )
-        verified_rows = [
-            json.dumps(
-                [
-                    list(item.source_ids or ([item.source_id] if item.source_id else [])),
-                    {
-                        "subject": item.subject,
-                        "field": item.field,
-                        "fact": item.fact,
-                    },
-                ],
-                ensure_ascii=False,
-            )
-            for item in (evidence_selections or [])
-            if item.status == "supported" and item.fact
-        ] if _field_binding_applicable(question, research_records or []) else []
+        verified_rows = (
+            [
+                json.dumps(
+                    [
+                        list(
+                            item.source_ids
+                            or ([item.source_id] if item.source_id else [])
+                        ),
+                        {
+                            "subject": item.subject,
+                            "field": item.field,
+                            "fact": item.fact,
+                        },
+                    ],
+                    ensure_ascii=False,
+                )
+                for item in (evidence_selections or [])
+                if item.status == "supported" and item.fact
+            ]
+            if _field_binding_applicable(question, research_records or [])
+            else []
+        )
         if verified_rows:
-            verified_budget = max(
-                1000, self.settings.rwkv_final_material_chars // 2
-            )
+            verified_budget = max(1000, self.settings.rwkv_final_material_chars // 2)
             bounded_verified: list[str] = []
             verified_chars = 0
             for row in verified_rows:
@@ -3995,13 +4430,16 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
             verified_material = "\n".join(bounded_verified)
             base_budget = max(
                 0,
-                self.settings.rwkv_final_material_chars
-                - len(verified_material)
-                - 1,
+                self.settings.rwkv_final_material_chars - len(verified_material) - 1,
             )
             answer_material = answer_material[:base_budget].rstrip()
             if verified_material:
                 answer_material += "\n" + verified_material
+        all_fields_verified = bool(evidence_selections) and all(
+            item.status == "supported" for item in evidence_selections
+        )
+        if evidence_sufficient is True and all_fields_verified and verified_material:
+            answer_material = verified_material
         verified_instruction = (
             "末尾的对象字段二元组已经逐来源核对，出现冲突时采用二元组中的值。"
             if verified_rows
@@ -4042,7 +4480,10 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
         validation_material = _final_validation_material(
             f"{answer_material}\n当前日期：{_today()}", question
         )
-        if all(item.url.startswith("document://") for item in ordered):
+        if (
+            all(item.url.startswith("document://") for item in ordered)
+            and not all_fields_verified
+        ):
             review_user = f"""{answer_material}
 
 初稿：{answer}
@@ -4070,16 +4511,19 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                 introduces_numbers = bool(
                     _unsupported_summary_bindings(reviewed, validation_material)
                 )
-                if reviewed and keeps_terms and keeps_numbers and not introduces_numbers:
+                if (
+                    reviewed
+                    and keeps_terms
+                    and keeps_numbers
+                    and not introduces_numbers
+                ):
                     answer = reviewed
                 elif reviewed:
                     reduction_warnings.append(
                         "final completeness review was discarded because it removed or introduced facts"
                     )
         for correction_attempt in range(2):
-            unsupported = _unsupported_summary_bindings(
-                answer, validation_material
-            )
+            unsupported = _unsupported_summary_bindings(answer, validation_material)
             if not unsupported:
                 break
             correction_user = f"""{answer_material}
@@ -4129,6 +4573,26 @@ verified_state：{json.dumps(compact_facts, ensure_ascii=False)}
                         "final answer was independently regenerated after repeated numeric mismatch"
                     )
                     break
+        if remaining_unsupported:
+            cleaned = _remove_unsupported_number_sentences(answer, validation_material)
+            if cleaned and not _unsupported_summary_bindings(
+                cleaned, validation_material
+            ):
+                answer = cleaned
+                remaining_unsupported = set()
+                reduction_warnings.append(
+                    "unsupported numeric clauses were removed from the final answer"
+                )
+        if remaining_unsupported and evidence_selections:
+            fallback = _atomic_fallback_answer(evidence_selections)
+            if fallback and not _unsupported_summary_bindings(
+                fallback, validation_material
+            ):
+                answer = fallback
+                remaining_unsupported = set()
+                reduction_warnings.append(
+                    "final answer fell back to verified atomic fields after repeated numeric mismatch"
+                )
         if remaining_unsupported:
             values = ", ".join(sorted(remaining_unsupported))
             raise SearchReaderError(

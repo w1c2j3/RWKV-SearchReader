@@ -12,6 +12,7 @@ from typing import Any
 
 from .documents import (
     MarkdownPassage,
+    PreparedDocument,
     prepare_document,
     rank_markdown_passages,
     split_markdown,
@@ -512,8 +513,6 @@ class ConversationStore:
         max_pdf_bytes: int = 20_000_000,
         max_pdf_pages: int = 200,
     ) -> dict[str, Any]:
-        identity = _identity(conversation_id, "conversation id")
-        owner = _identity(client_id, "client id")
         prepared = prepare_document(
             filename,
             content,
@@ -522,6 +521,25 @@ class ConversationStore:
             max_pdf_bytes=max_pdf_bytes,
             max_pdf_pages=max_pdf_pages,
         )
+        return self.add_prepared_document(
+            conversation_id,
+            client_id,
+            prepared,
+            chunk_chars=chunk_chars,
+        )
+
+    def add_prepared_document(
+        self,
+        conversation_id: str,
+        client_id: str,
+        prepared: PreparedDocument,
+        *,
+        chunk_chars: int,
+    ) -> dict[str, Any]:
+        """Persist a validated document that has already been converted."""
+
+        identity = _identity(conversation_id, "conversation id")
+        owner = _identity(client_id, "client id")
         clean_name = prepared.filename
         clean_content = prepared.markdown
         chunks = split_markdown(clean_content, chunk_chars)
