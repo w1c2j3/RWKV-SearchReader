@@ -253,12 +253,16 @@ def _answer_events(
     cancel_event: threading.Event | None = None,
 ) -> Iterator[str]:
     events: queue.Queue[dict[str, Any]] = queue.Queue()
-    cancelled = cancel_event or threading.Event()
+    stream_closed = threading.Event()
+    # The stream is only a view of the job. A browser refresh or a proxy-side
+    # SSE disconnect must not cancel an answer that has already consumed search
+    # credits and model time; the completed turn is persisted and can be
+    # recovered from the conversation endpoint.
+    del cancel_event
 
     def progress(stage: str, detail: dict[str, object]) -> None:
-        if cancelled.is_set():
-            raise SearchReaderError("cancelled", "request was cancelled")
-        events.put({"type": "progress", "stage": stage, "detail": detail})
+        if not stream_closed.is_set():
+            events.put({"type": "progress", "stage": stage, "detail": detail})
 
     def work() -> None:
         try:
@@ -289,24 +293,29 @@ def _answer_events(
             )
             payload = result.to_dict()
             payload["conversation_id"] = identity
-            if cancelled.is_set():
-                return
             store.append_turn(identity, owner, question, payload)
-            events.put({"type": "result", "result": payload})
+            if not stream_closed.is_set():
+                events.put({"type": "result", "result": payload})
         except SearchReaderError as exc:
-            events.put(
-                {
-                    "type": "error",
-                    "error": {"stage": exc.stage, "message": str(exc)},
-                }
-            )
+            if not stream_closed.is_set():
+                events.put(
+                    {
+                        "type": "error",
+                        "error": {"stage": exc.stage, "message": str(exc)},
+                    }
+                )
         except Exception:  # noqa: BLE001 - preserve the stream response contract
-            events.put(
-                {
-                    "type": "error",
-                    "error": {"stage": "unexpected", "message": "服务暂时不可用"},
-                }
-            )
+            if not stream_closed.is_set():
+                events.put(
+                    {
+                        "type": "error",
+                        "error": {"stage": "unexpected", "message": "服务暂时不可用"},
+                    }
+                )
+        finally:
+            # The worker owns the concurrency slot, not the HTTP connection.
+            # This also releases the slot when the client has disconnected.
+            _release_request_slot()
 
     threading.Thread(target=work, daemon=True).start()
     try:
@@ -320,8 +329,7 @@ def _answer_events(
             if event["type"] in {"result", "error"}:
                 break
     finally:
-        cancelled.set()
-        _release_request_slot()
+        stream_closed.set()
 
 
 @app.get("/", include_in_schema=False)

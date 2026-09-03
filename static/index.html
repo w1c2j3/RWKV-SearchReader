@@ -319,6 +319,7 @@
       const serviceStatus = document.querySelector('#service-status');
       const conversationStorageKey = 'rwkv-search-reader-session';
       const clientStorageKey = 'rwkv-search-reader-client';
+      const pendingAnswerStorageKey = 'rwkv-search-reader-pending-answer';
       const randomToken = () => (crypto.randomUUID?.() || `${Date.now()}${Math.random()}`).replace(/[^A-Za-z0-9]/g, '');
       const createConversationId = () => `conv_${randomToken()}`;
       const createClientId = () => `client_${randomToken()}`;
@@ -336,6 +337,37 @@
           localStorage.setItem(clientStorageKey, clientId);
         } catch (_) {}
       };
+      const readPendingAnswer = () => {
+        try {
+          const value = JSON.parse(localStorage.getItem(pendingAnswerStorageKey) || 'null');
+          if (!value?.conversationId || !value?.question || !Number.isInteger(value.turnIndex)) return null;
+          if (Date.now() - Number(value.startedAt || 0) > 30 * 60 * 1000) {
+            localStorage.removeItem(pendingAnswerStorageKey);
+            return null;
+          }
+          return value;
+        } catch (_) { return null; }
+      };
+      const savePendingAnswer = (value) => {
+        try {
+          if (value) localStorage.setItem(pendingAnswerStorageKey, JSON.stringify(value));
+          else localStorage.removeItem(pendingAnswerStorageKey);
+        } catch (_) {}
+      };
+      const clearPendingAnswer = (value) => {
+        const saved = readPendingAnswer();
+        if (!saved || (saved.conversationId === value.conversationId && saved.turnIndex === value.turnIndex)) savePendingAnswer(null);
+      };
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const fetchWithTimeout = async (url, options = {}, timeoutMs = 10000) => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          return await fetch(url, { ...options, signal: controller.signal });
+        } finally {
+          clearTimeout(timeout);
+        }
+      };
       let pending = false;
       let uploading = false;
       let activeController = null;
@@ -348,6 +380,7 @@
       let conversationRecords = [];
       let currentDocuments = [];
       let documentNotice = '';
+      let detachedRecoveryKey = '';
 
       const scrollToBottom = () => requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
       const formatTime = (value) => {
@@ -361,8 +394,14 @@
       };
       const closeSidebar = () => { sidebar.classList.remove('open'); scrim.classList.remove('open'); };
       const loadReadiness = async () => {
+        if (!navigator.onLine) {
+          serviceStatus.classList.add('offline');
+          serviceStatus.querySelector('span:last-child').textContent = '网络已断开';
+          return;
+        }
         try {
-          const response = await fetch('/readyz', { cache: 'no-store' });
+          const response = await fetchWithTimeout('/readyz', { cache: 'no-store' }, 8000);
+          if (!response.ok) throw new Error('readiness unavailable');
           const data = await response.json();
           serviceStatus.classList.toggle('offline', !data.ready);
           serviceStatus.querySelector('span:last-child').textContent = data.ready ? '可以提问' : '暂时不可用';
@@ -462,6 +501,8 @@
         if (stage === 'evidence_page_checked') return [`已检查网页 ${detail.completed || 0}/${detail.total || 0} · ${detail.subject || '对象'} · ${detail.field || '字段'}`, `${detail.source_id || '材料'}：${detail.status === 'found' ? '找到候选事实' : detail.status === 'degraded' ? '本页读取未完成' : '本页没有该字段'}`];
         if (stage === 'evidence_record_resolved') return [`已整理对象 ${detail.completed || 0}/${detail.total || 0}`, detail.subject || '字段记录已经整理'];
         if (stage === 'evidence_field_selected') return [`已核对 ${detail.completed || 0}/${detail.total || 0} · ${detail.subject || '对象'} · ${detail.field || '字段'}`, detail.status === 'supported' ? `绑定来源 ${detail.source_id || ''}：${detail.fact_preview || '已有直接证据'}` : `${detail.status === 'conflict' ? '材料存在冲突' : '材料尚未覆盖'}：${detail.fact_preview || ''}`];
+        if (stage === 'recovering') return ['连接中断，正在恢复回答', '后台仍在继续处理，完成后会自动显示'];
+        if (stage === 'recovered') return ['回答已经恢复', '已从本地保存记录载入完整结果'];
         if (stage === 'completed') return ['回答已经完成', '完整记录已写入本机'];
         if (stage === 'failed') return ['本次回答未完成', detail.message || '处理过程中出现错误'];
         return [stage, ''];
@@ -749,21 +790,30 @@
         body.appendChild(answer);
       };
 
-      const requestAnswer = async (question, onProgress, signal) => {
+      const serverError = (message) => {
+        const error = new Error(message);
+        error.serverReported = true;
+        return error;
+      };
+
+      const requestAnswer = async (question, requestConversationId, onProgress, signal) => {
         const response = await fetch('/v1/answer/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal,
           body: JSON.stringify({
             question,
-            conversation_id: conversationId,
+            conversation_id: requestConversationId,
             client_id: clientId,
           }),
         });
-        if (!response.ok || !response.body) {
-          const error = await response.json().catch(() => ({}));
-          throw new Error(typeof error.detail === 'string' ? error.detail : '请求失败');
+        if (!response.ok) {
+          const error = await response.json().catch(() => null);
+          const detail = typeof error?.detail === 'string' ? error.detail : error?.detail?.message;
+          if (detail) throw serverError(detail);
+          throw new Error(`连接服务失败（${response.status}）`);
         }
+        if (!response.body) throw new Error('未建立回答连接');
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -774,7 +824,7 @@
           const event = JSON.parse(line.slice(6));
           if (event.type === 'progress') onProgress(event.stage, event.detail || {});
           if (event.type === 'result') result = event.result;
-          if (event.type === 'error') throw new Error(event.error?.message || '请求失败');
+          if (event.type === 'error') throw serverError(event.error?.message || '请求失败');
         };
         while (true) {
           const { value, done } = await reader.read();
@@ -800,6 +850,8 @@
             turns.push({
               question,
               answer: item.content || '',
+              created_at: item.created_at || '',
+              request_id: item.request_id || '',
               sources: payload.sources || [],
               trace: payload.trace || [],
               timings_ms: payload.timings_ms || {},
@@ -824,6 +876,7 @@
 
       const showConversation = (record) => {
         if (pending || uploading) {
+          const detachedAnswer = readPendingAnswer();
           requestGeneration += 1;
           activeController?.abort();
           activeUploadController?.abort();
@@ -834,6 +887,7 @@
           submit.disabled = false;
           attach.disabled = false;
           questionInput.disabled = false;
+          if (detachedAnswer) monitorDetachedAnswer(detachedAnswer);
         }
         const turns = conversationTurns(record);
         conversation.querySelectorAll('.message').forEach((node) => node.remove());
@@ -864,17 +918,49 @@
       };
 
       const fetchConversation = async (identity) => {
-        const response = await fetch('/v1/conversations/get', {
+        const response = await fetchWithTimeout('/v1/conversations/get', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           cache: 'no-store',
           body: JSON.stringify({ client_id: clientId, conversation_id: identity }),
-        });
+        }, 10000);
         if (!response.ok) {
           const error = await response.json().catch(() => ({}));
           throw new Error(typeof error.detail === 'string' ? error.detail : '历史对话暂时无法打开');
         }
         return response.json();
+      };
+
+      const savedAnswerFor = (record, descriptor) => {
+        const turn = conversationTurns(record)[descriptor.turnIndex];
+        if (!turn || turn.question.trim() !== descriptor.question.trim()) return null;
+        return turn;
+      };
+
+      const waitForSavedAnswer = async (descriptor, attempts = 150) => {
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          try {
+            const record = await fetchConversation(descriptor.conversationId);
+            const turn = savedAnswerFor(record, descriptor);
+            if (turn) return { record, turn };
+          } catch (_) {}
+          await delay(navigator.onLine ? 2000 : 4000);
+        }
+        return null;
+      };
+
+      const monitorDetachedAnswer = async (descriptor) => {
+        const key = `${descriptor.conversationId}:${descriptor.turnIndex}`;
+        if (detachedRecoveryKey === key) return;
+        detachedRecoveryKey = key;
+        try {
+          const recovered = await waitForSavedAnswer(descriptor);
+          if (!recovered) return;
+          clearPendingAnswer(descriptor);
+          await loadHistory(false);
+        } finally {
+          if (detachedRecoveryKey === key) detachedRecoveryKey = '';
+        }
       };
 
       const renderHistory = () => {
@@ -933,22 +1019,20 @@
 
       const loadHistory = async (restoreCurrent = true) => {
         try {
-          await fetch('/v1/conversations/create', {
+          await fetchWithTimeout('/v1/conversations/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ client_id: clientId, conversation_id: conversationId }),
-          });
-          const response = await fetch('/v1/conversations/list', {
+          }, 10000);
+          const response = await fetchWithTimeout('/v1/conversations/list', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ client_id: clientId, limit: 60 }),
-          });
+          }, 10000);
           if (!response.ok) throw new Error('conversation list unavailable');
           const data = await response.json();
           conversationRecords = data.data || [];
-        } catch (_) {
-          conversationRecords = [];
-        }
+        } catch (_) {}
         renderHistory();
         const current = conversationRecords.find((record) => record.id === conversationId);
         if (restoreCurrent && (current?.message_count || current?.document_count) && !conversation.querySelector('.message')) {
@@ -958,6 +1042,7 @@
       };
 
       const resetChat = () => {
+        const detachedAnswer = readPendingAnswer();
         requestGeneration += 1;
         activeController?.abort();
         activeController = null;
@@ -980,6 +1065,7 @@
         chatTitle.textContent = '新的对话';
         closeSidebar();
         questionInput.focus();
+        if (detachedAnswer) monitorDetachedAnswer(detachedAnswer);
       };
 
       document.querySelector('#new-chat').addEventListener('click', resetChat);
@@ -1128,6 +1214,14 @@
         const question = questionInput.value.trim();
         if (!question || pending) return;
         const isNewConversation = !conversation.querySelector('.message.user');
+        const requestConversationId = conversationId;
+        const pendingDescriptor = {
+          conversationId: requestConversationId,
+          question,
+          turnIndex: conversation.querySelectorAll('.message.user').length,
+          startedAt: Date.now(),
+        };
+        savePendingAnswer(pendingDescriptor);
         const generation = ++requestGeneration;
         const controller = new AbortController();
         activeController?.abort();
@@ -1146,17 +1240,44 @@
         body.appendChild(trace.details);
         scrollToBottom();
         try {
-          const data = await requestAnswer(question, trace.update, controller.signal);
+          const data = await requestAnswer(question, requestConversationId, trace.update, controller.signal);
           if (generation !== requestGeneration) return;
           finishAssistant(body, data);
-          conversationId = data.conversation_id || conversationId;
+          clearPendingAnswer(pendingDescriptor);
+          conversationId = data.conversation_id || requestConversationId;
           saveConversationIdentity();
           await loadHistory(false);
         } catch (error) {
-          if (error.name === 'AbortError' || generation !== requestGeneration) return;
-          if (!trace.isTerminal()) trace.update('failed', { message: error.message || '未知错误' });
-          appendError(body, error.message || '未知错误');
-          loadHistory(false);
+          if (error.name === 'AbortError' || generation !== requestGeneration) {
+            monitorDetachedAnswer(pendingDescriptor);
+            return;
+          }
+          if (error.serverReported) {
+            clearPendingAnswer(pendingDescriptor);
+            if (!trace.isTerminal()) trace.update('failed', { message: error.message || '未知错误' });
+            appendError(body, error.message || '未知错误');
+            loadHistory(false);
+            return;
+          }
+          if (!trace.isTerminal()) trace.update('recovering');
+          const recovered = await waitForSavedAnswer(pendingDescriptor);
+          if (generation !== requestGeneration) {
+            if (recovered) {
+              clearPendingAnswer(pendingDescriptor);
+              loadHistory(false);
+            } else monitorDetachedAnswer(pendingDescriptor);
+            return;
+          }
+          if (recovered) {
+            trace.update('recovered');
+            finishAssistant(body, recovered.turn);
+            clearPendingAnswer(pendingDescriptor);
+            await loadHistory(false);
+          } else {
+            trace.update('failed', { message: '连接恢复超时，后台可能仍在继续' });
+            appendError(body, '连接恢复超时；完成后可在历史记录中查看');
+            monitorDetachedAnswer(pendingDescriptor);
+          }
         } finally {
           if (generation !== requestGeneration) return;
           activeController = null;
@@ -1169,9 +1290,79 @@
         }
       });
 
-      resizeComposer();
-      loadHistory();
-      loadReadiness();
+      const restorePendingAnswer = async () => {
+        const descriptor = readPendingAnswer();
+        if (!descriptor) return;
+        try {
+          const record = await fetchConversation(descriptor.conversationId);
+          if (savedAnswerFor(record, descriptor)) {
+            clearPendingAnswer(descriptor);
+            if (descriptor.conversationId === conversationId) showConversation(record);
+            await loadHistory(false);
+            return;
+          }
+        } catch (_) {}
+        if (descriptor.conversationId !== conversationId || pending) {
+          monitorDetachedAnswer(descriptor);
+          return;
+        }
+        const generation = ++requestGeneration;
+        pending = true;
+        submit.disabled = true;
+        attach.disabled = true;
+        questionInput.disabled = true;
+        welcome.hidden = true;
+        appendUser(descriptor.question);
+        const { body } = assistantShell();
+        const trace = createTrace([], true);
+        body.appendChild(trace.details);
+        trace.update('recovering');
+        scrollToBottom();
+        const recovered = await waitForSavedAnswer(descriptor);
+        if (generation !== requestGeneration) {
+          if (recovered) clearPendingAnswer(descriptor);
+          else monitorDetachedAnswer(descriptor);
+          return;
+        }
+        if (recovered) {
+          trace.update('recovered');
+          finishAssistant(body, recovered.turn);
+          clearPendingAnswer(descriptor);
+          await loadHistory(false);
+        } else {
+          trace.update('failed', { message: '连接恢复超时，后台可能仍在继续' });
+          appendError(body, '连接恢复超时；完成后可在历史记录中查看');
+          monitorDetachedAnswer(descriptor);
+        }
+        pending = false;
+        submit.disabled = false;
+        attach.disabled = false;
+        questionInput.disabled = false;
+        questionInput.focus();
+        scrollToBottom();
+      };
+
+      const initialize = async () => {
+        resizeComposer();
+        loadReadiness();
+        await loadHistory();
+        await restorePendingAnswer();
+      };
+      window.addEventListener('offline', loadReadiness);
+      window.addEventListener('online', () => {
+        loadReadiness();
+        loadHistory(false);
+        const descriptor = readPendingAnswer();
+        if (descriptor) monitorDetachedAnswer(descriptor);
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+          loadReadiness();
+          loadHistory(false);
+        }
+      });
+      setInterval(loadReadiness, 30000);
+      initialize();
     </script>
   </body>
 </html>

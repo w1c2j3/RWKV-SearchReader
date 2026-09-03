@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
+from types import SimpleNamespace
 
 from rwkv_search_reader import api
 from rwkv_search_reader.config import Settings
@@ -92,3 +94,59 @@ def test_document_upload_stream_emits_progress_and_result(monkeypatch) -> None:
         "type": "result",
         "result": {"id": "doc_alpha123", "chunk_count": 7},
     }
+
+
+def test_answer_continues_and_is_saved_after_stream_disconnect(monkeypatch) -> None:
+    finish_answer = threading.Event()
+    turn_saved = threading.Event()
+
+    class Store:
+        def ensure(self, *args, **kwargs):
+            return None
+
+        def history(self, *args, **kwargs):
+            return []
+
+        def document_passages(self, *args, **kwargs):
+            return []
+
+        def append_turn(self, conversation_id, client_id, question, payload):
+            assert conversation_id == "conv_alpha123"
+            assert client_id == "client_alpha123"
+            assert question == "测试断线恢复"
+            assert payload["answer"] == "后台完成的回答"
+            turn_saved.set()
+
+    class Pipeline:
+        def answer(self, question, on_progress, **kwargs):
+            on_progress("planning", {"goal": question})
+            assert finish_answer.wait(2)
+            return SimpleNamespace(
+                to_dict=lambda: {
+                    "answer": "后台完成的回答",
+                    "sources": [],
+                    "trace": [],
+                    "timings_ms": {"total": 1},
+                }
+            )
+
+    monkeypatch.setattr(api, "get_settings", Settings)
+    monkeypatch.setattr(api, "_conversation_store", lambda: Store())
+    monkeypatch.setattr(api, "_new_pipeline", lambda: Pipeline())
+    monkeypatch.setattr(api, "session_records", lambda *args, **kwargs: [])
+
+    assert api._acquire_request_slot(1, 0)
+    stream = api._answer_events(
+        "测试断线恢复",
+        conversation_id="conv_alpha123",
+        client_id="client_alpha123",
+    )
+    first_event = next(stream)
+    assert '"stage": "planning"' in first_event
+
+    stream.close()
+    finish_answer.set()
+
+    assert turn_saved.wait(2)
+    assert api._acquire_request_slot(1, 1)
+    api._release_request_slot()
