@@ -1,0 +1,30 @@
+{"id": "新链接与内容边界-true-1", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "请读取 https://www.kde.org/ 的英文介绍，再译成中文；正文不在这条消息里。"}], "expected": true}
+{"id": "新链接与内容边界-true-2", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "总结这个网站当前的帮助页面：https://www.audacityteam.org/help/ 。"}], "expected": true}
+{"id": "新链接与内容边界-true-3", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "打开 https://www.7-zip.org/ 看看它提供哪些下载版本。"}], "expected": true}
+{"id": "新链接与内容边界-true-4", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "Please read https://www.julialang.org/ and summarize its homepage."}], "expected": true}
+{"id": "新链接与内容边界-true-5", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "访问 https://www.sitemaps.org/ ，把协议说明整理成要点。"}], "expected": true}
+{"id": "新链接与内容边界-false-1", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "把这段英文翻译成中文：Find the current exchange rate and check official sources."}], "expected": false}
+{"id": "新链接与内容边界-false-2", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "帮我分析这个异常：TimeoutError connecting to localhost:5678。"}], "expected": false}
+{"id": "新链接与内容边界-false-3", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "下面是网站简介全文：这个项目提供开源音频编辑器。请根据这句话拟一个标题。"}], "expected": false}
+{"id": "新链接与内容边界-false-4", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "解释这条链接的查询参数：https://example.org/search?q=audio&page=2 。"}], "expected": false}
+{"id": "新链接与内容边界-false-5", "category": "新链接与内容边界", "messages": [{"role": "user", "content": "把这句英文改成礼貌的问法：Check the newest release for me."}], "expected": false}
+{"id": "新查证与多轮-true-1", "category": "新查证与多轮", "messages": [{"role": "user", "content": "检索城市绿地对居民心理健康影响的研究，不要伪造文献出处。"}], "expected": true}
+{"id": "新查证与多轮-true-2", "category": "新查证与多轮", "messages": [{"role": "user", "content": "找可靠来源核实哈勃望远镜发射日期，不要编链接。"}], "expected": true}
+{"id": "新查证与多轮-true-3", "category": "新查证与多轮", "messages": [{"role": "user", "content": "介绍一下Adobe公司。"}, {"role": "assistant", "content": "它开发设计软件。"}, {"role": "user", "content": "现在是谁在担任CEO？"}], "expected": true}
+{"id": "新查证与多轮-true-4", "category": "新查证与多轮", "messages": [{"role": "user", "content": "我打算去湖北省博物馆。"}, {"role": "assistant", "content": "你希望了解参观信息吗？"}, {"role": "user", "content": "这周六需要先约吗？"}], "expected": true}
+{"id": "新查证与多轮-true-5", "category": "新查证与多轮", "messages": [{"role": "user", "content": "给我讲讲图神经网络。"}, {"role": "assistant", "content": "它可以处理图结构数据。"}, {"role": "user", "content": "找几篇原始论文，附入口。"}], "expected": true}
+{"id": "新查证与多轮-false-1", "category": "新查证与多轮", "messages": [{"role": "user", "content": "“找可靠来源，不要编造文献”这句话表达清楚吗？"}], "expected": false}
+{"id": "新查证与多轮-false-2", "category": "新查证与多轮", "messages": [{"role": "user", "content": "后续句子都只要翻译成中文。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "Who is the current CEO of Adobe?"}], "expected": false}
+{"id": "新查证与多轮-false-3", "category": "新查证与多轮", "messages": [{"role": "user", "content": "公告全文：本馆每天限额预约，免费入馆。"}, {"role": "assistant", "content": "收到。"}, {"role": "user", "content": "就按这条公告说，需要预约吗？"}], "expected": false}
+{"id": "新查证与多轮-false-4", "category": "新查证与多轮", "messages": [{"role": "user", "content": "日志里出现了NameError: name x is not defined，是什么问题？"}], "expected": false}
+{"id": "新查证与多轮-false-5", "category": "新查证与多轮", "messages": [{"role": "user", "content": "我提供两份摘要，A研究绿地，B研究噪声。按我给的内容分成两类。"}], "expected": false}
+{"id": "新日常综合-true-1", "category": "新日常综合", "messages": [{"role": "user", "content": "准备买个家用NAS，当前在售的型号里有什么适合新手的？"}], "expected": true}
+{"id": "新日常综合-true-2", "category": "新日常综合", "messages": [{"role": "user", "content": "查看今天南京到合肥的末班高铁还有票吗？"}], "expected": true}
+{"id": "新日常综合-true-3", "category": "新日常综合", "messages": [{"role": "user", "content": "现在德国旅游签证的官方申请材料有哪些？"}], "expected": true}
+{"id": "新日常综合-true-4", "category": "新日常综合", "messages": [{"role": "user", "content": "查一下 Arch Linux 官网最近的公告。"}], "expected": true}
+{"id": "新日常综合-true-5", "category": "新日常综合", "messages": [{"role": "user", "content": "帮我找一个官方讲解消防逃生的教学视频。"}], "expected": true}
+{"id": "新日常综合-false-1", "category": "新日常综合", "messages": [{"role": "user", "content": "什么是网络附加存储NAS？用通俗语言解释。"}], "expected": false}
+{"id": "新日常综合-false-2", "category": "新日常综合", "messages": [{"role": "user", "content": "给我写一段鼓励朋友备考的话。"}], "expected": false}
+{"id": "新日常综合-false-3", "category": "新日常综合", "messages": [{"role": "user", "content": "请用Python实现判断闰年的函数。"}], "expected": false}
+{"id": "新日常综合-false-4", "category": "新日常综合", "messages": [{"role": "user", "content": "已经给出票价：成人80元儿童40元。两大一小总共多少钱？"}], "expected": false}
+{"id": "新日常综合-false-5", "category": "新日常综合", "messages": [{"role": "user", "content": "谢谢，先休息吧。"}], "expected": false}

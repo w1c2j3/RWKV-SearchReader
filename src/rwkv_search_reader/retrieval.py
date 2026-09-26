@@ -4,10 +4,13 @@ import ipaddress
 import re
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlparse
 
 import requests
+from requests.compat import chardet
 
 from .config import Settings
 from .models import DocumentChunk, SearchHit, SearchReaderError
@@ -174,8 +177,10 @@ def fetch_page(hit: SearchHit, settings: Settings) -> SearchHit:
                 raw.extend(block)
                 if len(raw) >= 1_500_000:
                     break
-            response.encoding = response.encoding or response.apparent_encoding or "utf-8"
-            text = bytes(raw).decode(response.encoding, errors="replace")
+            encoding = response.encoding
+            if not encoding or encoding.casefold() in {"iso-8859-1", "latin-1"}:
+                encoding = chardet.detect(bytes(raw)).get("encoding") or "utf-8"
+            text = bytes(raw).decode(encoding, errors="replace")
             if "html" in content_type or "<html" in text[:1000].casefold():
                 parser = _ReadableTextParser()
                 parser.feed(text)
@@ -184,6 +189,9 @@ def fetch_page(hit: SearchHit, settings: Settings) -> SearchHit:
                     hit.title = " ".join(parser.title_parts)[:300]
             else:
                 hit.content = text[:120_000]
+            hit.content_markdown = hit.content
+            hit.content_status = "fetched" if hit.content.strip() else "snippet_only"
+            hit.canonical_url = target
     except (requests.RequestException, ValueError, OSError) as exc:
         hit.error = f"{type(exc).__name__}: {exc}"[:400]
     return hit
@@ -343,6 +351,91 @@ def _search_queries(question: str) -> list[str]:
     return [item.strip() for item in explicit_questions[:3]]
 
 
+def _explicit_named_title(question: str) -> str:
+    """Return a single title the user wrote explicitly, if unambiguous."""
+
+    titles = list(dict.fromkeys(re.findall(r"《([^》]{2,120})》", question)))
+    return titles[0] if len(titles) == 1 else ""
+
+
+def _compact_title(value: str) -> str:
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", value.casefold())
+
+
+def _filter_named_title_hits(
+    groups: list[list[SearchHit]], question: str
+) -> tuple[list[list[SearchHit]], int]:
+    """Keep pages about the named object before an LLM sees their contents."""
+
+    title = _explicit_named_title(question)
+    if not title:
+        return groups, 0
+    key = _compact_title(title)
+    titled = [
+        [hit for hit in group if key in _compact_title(hit.title)]
+        for group in groups
+    ]
+    if any(titled):
+        selected = titled
+    else:
+        selected = [
+            [
+                hit
+                for hit in group
+                if key in _compact_title((hit.content or hit.snippet)[:1200])
+            ]
+            for group in groups
+        ]
+    removed = sum(map(len, groups)) - sum(map(len, selected))
+    return selected, removed
+
+
+def _filter_subject_hits(hits: list[SearchHit], subject: str) -> list[SearchHit]:
+    """Keep a planned subject's pages when its name appears in original material."""
+
+    key = _compact_title(subject.strip("《》 "))
+    if not key:
+        return hits
+    return [
+        hit
+        for hit in hits
+        if key in _compact_title(hit.title)
+        or key in _compact_title((hit.content or hit.snippet)[:1200])
+    ]
+
+
+def _filter_expired_news_hits(hits: list[SearchHit], question: str) -> list[SearchHit]:
+    """Exclude search results whose publication time predates an explicit window."""
+
+    if re.search(r"最近一周|近一周|过去一周|本周|这周", question):
+        days = 7
+    elif re.search(r"今天|今日", question):
+        days = 1
+    elif re.search(r"最近一月|近一月|本月", question):
+        days = 31
+    else:
+        return hits
+    today = datetime.now().astimezone().date()
+    earliest = today - timedelta(days=days)
+    selected: list[SearchHit] = []
+    for hit in hits:
+        raw = hit.published_date.strip()
+        if not raw:
+            selected.append(hit)
+            continue
+        try:
+            published = parsedate_to_datetime(raw).date()
+        except (TypeError, ValueError, IndexError):
+            try:
+                published = datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+            except ValueError:
+                selected.append(hit)
+                continue
+        if earliest <= published <= today:
+            selected.append(hit)
+    return selected
+
+
 def _balanced_hits(
     groups: list[list[SearchHit]],
     limit: int,
@@ -468,6 +561,7 @@ class Retriever:
         results_per_query: int | None = None,
         max_total_results: int | None = None,
         retrieval_point_by_query: dict[str, str] | None = None,
+        subject_by_query: dict[str, str] | None = None,
     ) -> tuple[list[str], list[SearchHit], list[DocumentChunk], list[str]]:
         queries = list(
             dict.fromkeys(
@@ -486,6 +580,39 @@ class Retriever:
         for query in queries:
             try:
                 hits = self.provider.search(query, per_query)
+                timely = _filter_expired_news_hits(hits, question)
+                if len(timely) != len(hits):
+                    search_warnings.append(
+                        f"{query}: discarded {len(hits) - len(timely)} pages outside the requested news window"
+                    )
+                hits = timely
+                subject = (subject_by_query or {}).get(query, "")
+                if subject:
+                    filtered = _filter_subject_hits(hits, subject)
+                    removed = len(hits) - len(filtered)
+                    if removed:
+                        search_warnings.append(
+                            f"{query}: discarded {removed} pages unrelated to {subject}"
+                        )
+                    hits = filtered
+                if re.search(r"官方公告|更新公告|版本列表|release notes", query, re.IGNORECASE):
+                    announcement_hits = [
+                        hit
+                        for hit in hits
+                        if re.search(
+                            r"公告|更新|版本|发布|预告|前瞻|新闻|资讯|"
+                            r"release|changelog|news",
+                            hit.title,
+                            re.IGNORECASE,
+                        )
+                    ]
+                    if announcement_hits:
+                        removed = len(hits) - len(announcement_hits)
+                        if removed:
+                            search_warnings.append(
+                                f"{query}: discarded {removed} pages without an announcement title"
+                            )
+                        hits = announcement_hits
                 retrieval_point = str(
                     (retrieval_point_by_query or {}).get(query) or query
                 ).strip()
@@ -501,6 +628,18 @@ class Retriever:
             if detail:
                 message = f"{message}: {detail}"
             raise SearchReaderError("search", message[:1200])
+        groups, unrelated = _filter_named_title_hits(groups, question)
+        if unrelated:
+            search_warnings.append(
+                f"discarded {unrelated} results unrelated to the explicitly named title"
+            )
+        if not any(groups):
+            raise SearchReaderError(
+                "search",
+                "search results did not match the planned subjects"
+                if subject_by_query
+                else "search results did not mention the explicitly named title",
+            )
         deduplicated = _balanced_hits(
             groups,
             total_limit,
@@ -526,6 +665,8 @@ class Retriever:
         for hit in selected:
             if extracted.get(hit.url):
                 hit.content = extracted[hit.url][:120_000]
+                hit.content_markdown = extracted[hit.url]
+                hit.content_status = "fetched"
         missing = [hit for hit in selected if not hit.content.strip()]
         if missing:
             with ThreadPoolExecutor(max_workers=min(5, len(missing))) as pool:

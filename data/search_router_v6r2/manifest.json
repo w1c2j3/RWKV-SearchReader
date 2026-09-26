@@ -1,0 +1,18 @@
+{
+  "train": 480,
+  "validation": 80,
+  "test": 20,
+  "retained_v5": 240,
+  "v6_new": 160,
+  "v6r2_new": 80,
+  "epochs": 2,
+  "lr": 0.0001,
+  "init_state": "runs/router-state-v6/best-state.pth",
+  "selection": "validation accuracy then loss; new test after selection",
+  "note": "previous v6 fresh test is now observed regression; v6r2 test is new",
+  "files": {
+    "train": "ee1fb5926f8767af89d1ca15b5721805cb81c6b05685c06e0279a550b34982a7",
+    "validation": "5098840a124b56a0a64919453e1d34ada4c4c4535921ac3639f03786b09c407b",
+    "test": "7560ed5b0738603e5c345e201840887706f6b4b4f47eb40b10337f4cc87a41f3"
+  }
+}

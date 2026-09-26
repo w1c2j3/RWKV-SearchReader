@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import io
 from dataclasses import replace
+from datetime import datetime, timedelta
+
+import requests
 
 from rwkv_search_reader.config import Settings
 from rwkv_search_reader.models import SearchHit
 from rwkv_search_reader.retrieval import (
     Retriever,
     _balanced_hits,
+    _filter_expired_news_hits,
     _search_queries,
     chunk_text,
+    fetch_page,
     provider_materials,
     rank_chunks,
 )
@@ -60,6 +66,23 @@ class MaterialProvider(SearchProvider):
         raise AssertionError("reader-ready provider results must not be extracted again")
 
 
+def test_fetch_page_uses_detected_encoding_when_header_defaults_to_latin1(monkeypatch) -> None:
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["Content-Type"] = "text/html"
+    response.encoding = "ISO-8859-1"
+    response.raw = io.BytesIO((
+        "<html><body><p>据交易所记录，样例公司上市首日开盘价为1100元，随后交易继续进行。</p></body></html>"
+    ).encode("utf-8"))
+    monkeypatch.setattr("rwkv_search_reader.retrieval._assert_public_destination", lambda _url: None)
+    monkeypatch.setattr("rwkv_search_reader.retrieval.requests.get", lambda *_args, **_kwargs: response)
+
+    hit = fetch_page(SearchHit(title="样例报道", url="https://example.com/report"), Settings())
+
+    assert "上市首日开盘价为1100元" in hit.content
+    assert hit.content_status == "fetched"
+
+
 def test_retriever_uses_complete_user_question_as_single_query() -> None:
     settings = replace(Settings(), fetch_pages=1)
     provider = StubProvider(settings)
@@ -73,6 +96,24 @@ def test_retriever_uses_complete_user_question_as_single_query() -> None:
     assert len(sources) == 1
     assert chunks
     assert warnings == []
+
+
+def test_explicit_weekly_news_window_excludes_dated_old_results() -> None:
+    today = datetime.now().astimezone().date()
+    recent = SearchHit(
+        title="近期报道", url="https://example.com/recent", content="正文",
+        published_date=(today - timedelta(days=2)).isoformat(),
+    )
+    old = SearchHit(
+        title="旧报道", url="https://example.com/old", content="正文",
+        published_date=(today - timedelta(days=20)).isoformat(),
+    )
+    unknown = SearchHit(title="未标日期", url="https://example.com/unknown", content="正文")
+
+    assert _filter_expired_news_hits(
+        [recent, old, unknown], "最近一周有哪些科技动态？"
+    ) == [recent, unknown]
+    assert _filter_expired_news_hits([recent, old], "科技动态有哪些？") == [recent, old]
 
 
 def test_retriever_splits_only_explicit_multi_question_utterance() -> None:
@@ -158,6 +199,89 @@ def test_reader_ready_results_keep_provider_order_without_extracting() -> None:
         "Provider-organized material 3",
     ]
     assert warnings == []
+
+
+def test_named_title_search_discards_high_scoring_unrelated_pages() -> None:
+    settings = replace(Settings(), search_max_results=3, fetch_pages=3)
+
+    class MixedProvider(MaterialProvider):
+        def search(self, query: str, max_results: int) -> list[SearchHit]:
+            del query, max_results
+            return [
+                SearchHit(
+                    "Unrelated finance article",
+                    "https://example.com/finance",
+                    content="Financial market changes unrelated to the product.",
+                    score=0.99,
+                ),
+                SearchHit(
+                    "《示例产品》版本公告",
+                    "https://example.com/release",
+                    content="《示例产品》发布了新版本。",
+                    score=0.62,
+                ),
+            ]
+
+    _, sources, chunks, warnings = Retriever(
+        settings, MixedProvider(settings)
+    ).run_queries(
+        ["示例产品 最新版本"], question="《示例产品》当前版本是什么？"
+    )
+
+    assert [source.title for source in sources] == ["《示例产品》版本公告"]
+    assert [chunk.title for chunk in chunks] == ["《示例产品》版本公告"]
+    assert any("discarded 1" in warning for warning in warnings)
+
+
+def test_planned_subject_query_discards_unrelated_provider_pages() -> None:
+    settings = replace(Settings(), search_max_results=5, fetch_pages=5)
+
+    class MixedProvider(MaterialProvider):
+        def search(self, query: str, max_results: int) -> list[SearchHit]:
+            del query, max_results
+            return [
+                SearchHit("甲产品版本公告", "https://example.com/a", content="甲产品已更新"),
+                SearchHit("无关产品版本公告", "https://example.com/b", content="完全不相关"),
+            ]
+
+    _, sources, _, warnings = Retriever(settings, MixedProvider(settings)).run_queries(
+        ["甲产品 最新版本"],
+        question="这些产品现在各自是什么版本？",
+        subject_by_query={"甲产品 最新版本": "甲产品"},
+    )
+
+    assert [source.title for source in sources] == ["甲产品版本公告"]
+    assert any("unrelated to 甲产品" in warning for warning in warnings)
+
+
+def test_announcement_query_prefers_announcement_pages_over_named_guides() -> None:
+    settings = replace(Settings(), search_max_results=3, fetch_pages=3)
+
+    class MixedProvider(MaterialProvider):
+        def search(self, query: str, max_results: int) -> list[SearchHit]:
+            del query, max_results
+            return [
+                SearchHit(
+                    "《示例产品》道具位置攻略",
+                    "https://example.com/guide",
+                    content="《示例产品》的道具位置。",
+                    score=0.95,
+                ),
+                SearchHit(
+                    "《示例产品》版本更新公告",
+                    "https://example.com/announcement",
+                    content="《示例产品》的版本更新公告。",
+                    score=0.7,
+                ),
+            ]
+
+    _, sources, _, warnings = Retriever(settings, MixedProvider(settings)).run_queries(
+        ["示例产品 最新 官方公告"],
+        question="《示例产品》当前版本有什么变化？",
+    )
+
+    assert [source.url for source in sources] == ["https://example.com/announcement"]
+    assert any("without an announcement title" in warning for warning in warnings)
 
 
 def test_planned_queries_keep_up_to_ten_materials_per_object() -> None:

@@ -59,15 +59,21 @@ def _boolean(name: str, default: bool) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _key_pool() -> tuple[str, ...]:
-    values: list[str] = []
+def _cf_access_headers(client_id: str, client_secret: str) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if client_id:
+        headers["CF-Access-Client-Id"] = client_id
+    if client_secret:
+        headers["CF-Access-Client-Secret"] = client_secret
+    return headers
 
-    def add(value: object) -> None:
-        candidate = str(value or "").strip().strip("'\"")
-        if candidate and candidate not in values:
-            values.append(candidate)
 
-    add(_text("TAVILY_API_KEY"))
+def _first_tavily_key() -> str:
+    """Return one active Tavily key; never activate a credential pool."""
+
+    direct = _text("TAVILY_API_KEY").strip("'\"")
+    if direct:
+        return direct
     raw = _text("TAVILY_API_KEYS")
     if raw:
         try:
@@ -77,8 +83,10 @@ def _key_pool() -> tuple[str, ...]:
         if not isinstance(parsed, (list, tuple)):
             parsed = [parsed]
         for item in parsed:
-            add(item)
-    return tuple(values)
+            candidate = str(item or "").strip().strip("'\"")
+            if candidate:
+                return candidate
+    return ""
 
 
 _load_local_env(PROJECT_ROOT / ".env.local")
@@ -107,16 +115,26 @@ class Settings:
     research_plan_max_queries: int = 4
     review_max_rounds: int = 2
     review_max_queries: int = 3
-    conversation_turns: int = 10
+    conversation_turns: int = 100
     request_timeout_seconds: int = 45
     api_max_concurrent_requests: int = 4
     api_queue_timeout_seconds: int = 20
     api_rate_limit_per_minute: int = 20
 
+    router_base_url: str = ""
+    router_api_key: str = "local"
+    router_model: str = ""
+    router_protocol: str = "completions"
+    router_timeout_seconds: int = 20
+    router_cf_access_client_id: str = ""
+    router_cf_access_client_secret: str = ""
+
     rwkv_base_url: str = "http://127.0.0.1:29613/v1"
     rwkv_api_key: str = "local"
     rwkv_model: str = ""
     rwkv_protocol: str = "completions"
+    rwkv_cf_access_client_id: str = ""
+    rwkv_cf_access_client_secret: str = ""
     rwkv_summary_workers: int = 10
     rwkv_summary_max_tokens: int = 1024
     rwkv_reduce_chunk_chars: int = 6000
@@ -128,6 +146,8 @@ class Settings:
     rwkv_final_api_key: str = ""
     rwkv_final_model: str = ""
     rwkv_final_protocol: str = ""
+    rwkv_final_cf_access_client_id: str = ""
+    rwkv_final_cf_access_client_secret: str = ""
     model_timeout_seconds: int = 180
     rwkv_max_calls_per_request: int = 600
 
@@ -166,6 +186,29 @@ class Settings:
     @property
     def final_protocol(self) -> str:
         return self.rwkv_final_protocol or self.rwkv_protocol
+
+    @property
+    def rwkv_access_headers(self) -> dict[str, str]:
+        return _cf_access_headers(
+            self.rwkv_cf_access_client_id,
+            self.rwkv_cf_access_client_secret,
+        )
+
+    @property
+    def final_access_headers(self) -> dict[str, str]:
+        if self.rwkv_final_cf_access_client_id or self.rwkv_final_cf_access_client_secret:
+            return _cf_access_headers(
+                self.rwkv_final_cf_access_client_id,
+                self.rwkv_final_cf_access_client_secret,
+            )
+        return self.rwkv_access_headers
+
+    @property
+    def router_access_headers(self) -> dict[str, str]:
+        return _cf_access_headers(
+            self.router_cf_access_client_id,
+            self.router_cf_access_client_secret,
+        )
 
     def readiness(self) -> dict[str, object]:
         provider_ready = {
@@ -208,10 +251,11 @@ def get_settings() -> Settings:
     if final_protocol not in {"", "completions", "chat"}:
         final_protocol = ""
     chunk_chars = _integer("SEARCH_READER_CHUNK_CHARS", 2600, 600, 12000)
+    tavily_api_key = _first_tavily_key()
     return Settings(
         search_provider=provider,
-        tavily_api_key=_text("TAVILY_API_KEY"),
-        tavily_api_keys=_key_pool(),
+        tavily_api_key=tavily_api_key,
+        tavily_api_keys=(tavily_api_key,) if tavily_api_key else (),
         wigolo_base_url=_text("SEARCH_READER_WIGOLO_BASE_URL", "http://127.0.0.1:3333"),
         wigolo_api_token=_text("SEARCH_READER_WIGOLO_API_TOKEN"),
         searxng_base_url=_text("SEARCH_READER_SEARXNG_BASE_URL"),
@@ -221,9 +265,9 @@ def get_settings() -> Settings:
         research_plan_max_queries=_integer(
             "SEARCH_READER_RESEARCH_PLAN_MAX_QUERIES", 4, 1, 6
         ),
-        review_max_rounds=_integer("SEARCH_READER_REVIEW_MAX_ROUNDS", 2, 0, 3),
+        review_max_rounds=_integer("SEARCH_READER_REVIEW_MAX_ROUNDS", 2, 0, 10),
         review_max_queries=_integer("SEARCH_READER_REVIEW_MAX_QUERIES", 3, 1, 4),
-        conversation_turns=_integer("SEARCH_READER_CONVERSATION_TURNS", 10, 1, 20),
+        conversation_turns=_integer("SEARCH_READER_CONVERSATION_TURNS", 100, 1, 100),
         request_timeout_seconds=_integer(
             "SEARCH_READER_REQUEST_TIMEOUT_SECONDS", 45, 5, 180
         ),
@@ -236,10 +280,19 @@ def get_settings() -> Settings:
         api_rate_limit_per_minute=_integer(
             "SEARCH_READER_API_RATE_LIMIT_PER_MINUTE", 20, 1, 600
         ),
+        router_base_url=_text("SEARCH_READER_ROUTER_BASE_URL"),
+        router_api_key=_text("SEARCH_READER_ROUTER_API_KEY", "local"),
+        router_model=_text("SEARCH_READER_ROUTER_MODEL"),
+        router_protocol=_text("SEARCH_READER_ROUTER_PROTOCOL", "completions"),
+        router_timeout_seconds=_integer("SEARCH_READER_ROUTER_TIMEOUT_SECONDS", 20, 1, 120),
+        router_cf_access_client_id=_text("SEARCH_READER_ROUTER_CF_ACCESS_CLIENT_ID"),
+        router_cf_access_client_secret=_text("SEARCH_READER_ROUTER_CF_ACCESS_CLIENT_SECRET"),
         rwkv_base_url=_text("SEARCH_READER_RWKV_BASE_URL", "http://127.0.0.1:29613/v1"),
         rwkv_api_key=_text("SEARCH_READER_RWKV_API_KEY", "local"),
         rwkv_model=_text("SEARCH_READER_RWKV_MODEL"),
         rwkv_protocol=protocol,
+        rwkv_cf_access_client_id=_text("SEARCH_READER_RWKV_CF_ACCESS_CLIENT_ID"),
+        rwkv_cf_access_client_secret=_text("SEARCH_READER_RWKV_CF_ACCESS_CLIENT_SECRET"),
         rwkv_summary_workers=_integer("SEARCH_READER_RWKV_SUMMARY_WORKERS", 10, 1, 32),
         rwkv_summary_max_tokens=_integer(
             "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 1024, 96, 2048
@@ -257,6 +310,8 @@ def get_settings() -> Settings:
         rwkv_final_api_key=_text("SEARCH_READER_RWKV_FINAL_API_KEY"),
         rwkv_final_model=_text("SEARCH_READER_RWKV_FINAL_MODEL"),
         rwkv_final_protocol=final_protocol,
+        rwkv_final_cf_access_client_id=_text("SEARCH_READER_RWKV_FINAL_CF_ACCESS_CLIENT_ID"),
+        rwkv_final_cf_access_client_secret=_text("SEARCH_READER_RWKV_FINAL_CF_ACCESS_CLIENT_SECRET"),
         model_timeout_seconds=_integer(
             "SEARCH_READER_MODEL_TIMEOUT_SECONDS", 180, 10, 900
         ),

@@ -1,0 +1,19 @@
+[Unit]
+Description=RWKV SearchReader worker
+After=network-online.target
+
+[Service]
+Type=simple
+User=chase
+Group=chase
+WorkingDirectory=/home/chase/apps/rwkv-search-reader
+EnvironmentFile=/home/chase/apps/rwkv-search-reader/.env.server
+ExecStart=/home/chase/apps/rwkv-search-reader/.venv/bin/rwkv-search-reader-worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+
+# Deliberately no Install section: start manually, never enable at boot.

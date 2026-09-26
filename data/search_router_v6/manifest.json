@@ -1,0 +1,18 @@
+{
+  "train": 400,
+  "retained_v5_train": 240,
+  "new_targeted_train": 160,
+  "multi_turn_train": 164,
+  "validation": 60,
+  "test": 40,
+  "init_state": "runs/router-state-v5-final/best-state.pth",
+  "planned_epochs": 3,
+  "lr": 0.0001,
+  "selection": "validation correct then loss only; fresh test accessed after selection",
+  "regression_only": "coverage300 and comparison8 not used for gradients",
+  "files": {
+    "train": "abc235033253c50417882fcd08855cbb2d07e4791a3ae4f62f24fc7389605b93",
+    "validation": "d30e92d583b5525875ed5b630b74f7a8d75bd51e84990450903ce7ba1c6c838c",
+    "test": "e5cbee6454130f0021caceb36433e0d2f1d1683a43526de86e8bab7de069db12"
+  }
+}

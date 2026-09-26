@@ -1,0 +1,25 @@
+{
+  "version": "search_router_v2",
+  "source": "Manually curated synthetic data based on observed baseline failure categories; not collected user traces",
+  "size": 300,
+  "labels": {
+    "true": 150,
+    "false": 150
+  },
+  "split": {
+    "train": 240,
+    "validation": 30,
+    "test": 30
+  },
+  "split_method": "Whole semantic group assigned once; paired questions and paraphrases cannot cross splits",
+  "training_status": "complete",
+  "files": {
+    "train.jsonl": "3d5b2b256b722c59ad115c26116c88a75f2226e95fc8bca9916cba018fdaf3c1",
+    "validation.jsonl": "c6bf18c0f95454e64c0e41981fcfabc25b5b9cf59fc0f3aaede1c04dd9480923",
+    "test.jsonl": "631a18f63f91ed76a46257516099feebc17d95ef649a17941f9a6fb062651cf4"
+  },
+  "split_notes": "Related forecast, railway, store opening, and stock quote paraphrase groups remain in training; multi-turn context is reserved for test.",
+  "changes": "Replace two training groups (20 rows) with greeting and foundational-knowledge contrasts observed in the diagnostic suite; validation and test unchanged.",
+  "test_status": "Fixed regression set previously evaluated in v1, not a newly unseen test for v2",
+  "training_run": "runs/router-state-v2"
+}

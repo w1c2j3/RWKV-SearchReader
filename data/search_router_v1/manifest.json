@@ -1,0 +1,23 @@
+{
+  "version": "search_router_v1",
+  "source": "Manually curated synthetic data based on observed baseline failure categories; not collected user traces",
+  "size": 300,
+  "labels": {
+    "true": 150,
+    "false": 150
+  },
+  "split": {
+    "train": 240,
+    "validation": 30,
+    "test": 30
+  },
+  "split_method": "Whole semantic group assigned once; paired questions and paraphrases cannot cross splits",
+  "training_status": "complete",
+  "files": {
+    "train.jsonl": "d20d885177ee8ca93d4b3197ea788a4e2b3ee32bc1961fb50d70d3607ba803e4",
+    "validation.jsonl": "c6bf18c0f95454e64c0e41981fcfabc25b5b9cf59fc0f3aaede1c04dd9480923",
+    "test.jsonl": "631a18f63f91ed76a46257516099feebc17d95ef649a17941f9a6fb062651cf4"
+  },
+  "split_notes": "Related forecast, railway, store opening, and stock quote paraphrase groups remain in training; multi-turn context is reserved for test.",
+  "training_run": "runs/router-state-v1"
+}

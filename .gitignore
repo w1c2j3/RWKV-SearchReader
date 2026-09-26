@@ -10,3 +10,10 @@ dist/
 logs/*.jsonl
 logs/*.sqlite3*
 runs/
+.env.server
+logs/*.log
+.env
+evals/results/
+data/*.sqlite3*
+data/*.log
+data/*.pid

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import pytest
+
 from rwkv_search_reader.config import Settings
+from rwkv_search_reader.models import SearchReaderError
 from rwkv_search_reader.search import (
     TavilyProvider,
-    _reset_tavily_health_for_tests,
     _tavily_topic,
 )
 
@@ -18,8 +20,26 @@ class FakeResponse:
         self.text = self.content.decode()
 
 
-def test_tavily_key_pool_fails_over_without_changing_query() -> None:
-    _reset_tavily_health_for_tests()
+def test_tavily_stops_after_quota_error_without_trying_another_key() -> None:
+    settings = replace(
+        Settings(),
+        tavily_api_key="active-key",
+        tavily_api_keys=("active-key", "next-key"),
+    )
+    provider = TavilyProvider(settings)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return FakeResponse(432, {"error": "quota"})
+
+    provider.session.post = post
+    with pytest.raises(SearchReaderError, match="HTTP 432"):
+        provider.search("user query", 5)
+
+    assert len(calls) == 1
+    assert calls[0]["headers"]["Authorization"] == "Bearer active-key"
+    assert calls[0]["json"]["query"] == "user query"
 
 
 def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
@@ -28,15 +48,13 @@ def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
     assert _tavily_topic("概括本周最重要的科技动态") == "news"
     assert _tavily_topic("Python 列表怎么排序") == "general"
     settings = replace(
-        Settings(), tavily_api_key="", tavily_api_keys=("first-key", "second-key")
+        Settings(), tavily_api_key="active-key", tavily_api_keys=("active-key",)
     )
     provider = TavilyProvider(settings)
     calls = []
 
     def post(url, **kwargs):
         calls.append({"url": url, **kwargs})
-        if kwargs["headers"]["Authorization"] == "Bearer first-key":
-            return FakeResponse(432, {"error": "quota"})
         return FakeResponse(
             200,
             {
@@ -56,11 +74,9 @@ def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
     question = "完整用户问题"
     hits = provider.search(question, 6)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0]["json"]["query"] == question
-    assert calls[1]["json"]["query"] == question
-    assert calls[0]["headers"]["Authorization"] == "Bearer first-key"
-    assert calls[1]["headers"]["Authorization"] == "Bearer second-key"
+    assert calls[0]["headers"]["Authorization"] == "Bearer active-key"
     assert hits[0].url == "https://example.com/result"
     assert hits[0].snippet == "Relevant snippet"
     assert hits[0].content == "# Result\n\nComplete **Markdown** material: 150.80."
@@ -68,25 +84,41 @@ def test_tavily_uses_news_topic_when_timestamp_is_material() -> None:
     assert provider.results_are_material is True
 
     calls.clear()
-    provider.search(question, 6)
-    assert len(calls) == 1
-    assert calls[0]["headers"]["Authorization"] == "Bearer second-key"
-
-    calls.clear()
     provider.search("今天有哪些 AI 新闻", 6)
     assert calls[0]["json"]["topic"] == "news"
     assert "time_range" not in calls[0]["json"]
-    _reset_tavily_health_for_tests()
 
 
 def test_tavily_falls_back_to_ranked_snippet_without_raw_markdown() -> None:
-    _reset_tavily_health_for_tests()
+    settings = replace(Settings(), tavily_api_key="key")
+    provider = TavilyProvider(settings)
+
+    def post(url, **kwargs):
+        del url, kwargs
+        return FakeResponse(
+            200,
+            {
+                "results": [
+                    {
+                        "title": "Result",
+                        "url": "https://example.com/result",
+                        "content": "Relevant snippet",
+                        "raw_content": None,
+                    }
+                ]
+            },
+        )
+
+    provider.session.post = post
+    hits = provider.search("question", 1)
+
+    assert hits[0].content == "Relevant snippet"
+    assert hits[0].snippet == "Relevant snippet"
 
 
 def test_tavily_bounds_raw_markdown_to_the_reader_material_limit() -> None:
-    _reset_tavily_health_for_tests()
     settings = replace(
-        Settings(), tavily_api_keys=("key",), max_evidence_chars=20
+        Settings(), tavily_api_key="key", max_evidence_chars=20
     )
     provider = TavilyProvider(settings)
 
@@ -111,37 +143,10 @@ def test_tavily_bounds_raw_markdown_to_the_reader_material_limit() -> None:
 
     assert len(hits[0].content) == 20
     assert hits[0].content.startswith("# Result\n\n")
-    _reset_tavily_health_for_tests()
-    settings = replace(Settings(), tavily_api_keys=("key",))
-    provider = TavilyProvider(settings)
-
-    def post(url, **kwargs):
-        del url, kwargs
-        return FakeResponse(
-            200,
-            {
-                "results": [
-                    {
-                        "title": "Result",
-                        "url": "https://example.com/result",
-                        "content": "Relevant snippet",
-                        "raw_content": None,
-                    }
-                ]
-            },
-        )
-
-    provider.session.post = post
-    hits = provider.search("question", 1)
-
-    assert hits[0].content == "Relevant snippet"
-    assert hits[0].snippet == "Relevant snippet"
-    _reset_tavily_health_for_tests()
 
 
 def test_tavily_limits_search_to_explicit_domain() -> None:
-    _reset_tavily_health_for_tests()
-    settings = replace(Settings(), tavily_api_keys=("key",))
+    settings = replace(Settings(), tavily_api_key="key")
     provider = TavilyProvider(settings)
     captured = {}
 
@@ -153,12 +158,10 @@ def test_tavily_limits_search_to_explicit_domain() -> None:
     provider.search("请依据 python.org 查询最新版本", 6)
 
     assert captured["json"]["include_domains"] == ["python.org"]
-    _reset_tavily_health_for_tests()
 
 
 def test_tavily_does_not_treat_filenames_as_domains() -> None:
-    _reset_tavily_health_for_tests()
-    settings = replace(Settings(), tavily_api_keys=("key",))
+    settings = replace(Settings(), tavily_api_key="key")
     provider = TavilyProvider(settings)
     captured = []
 
@@ -176,12 +179,10 @@ def test_tavily_does_not_treat_filenames_as_domains() -> None:
         provider.search(question, 6)
 
     assert all("include_domains" not in request for request in captured)
-    _reset_tavily_health_for_tests()
 
 
 def test_tavily_retries_without_a_rejected_inferred_domain() -> None:
-    _reset_tavily_health_for_tests()
-    settings = replace(Settings(), tavily_api_keys=("key",))
+    settings = replace(Settings(), tavily_api_key="key")
     provider = TavilyProvider(settings)
     captured = []
 
@@ -201,4 +202,3 @@ def test_tavily_retries_without_a_rejected_inferred_domain() -> None:
     assert captured[0]["include_domains"] == ["release.zz"]
     assert "include_domains" not in captured[1]
     assert captured[1]["query"] == captured[0]["query"]
-    _reset_tavily_health_for_tests()

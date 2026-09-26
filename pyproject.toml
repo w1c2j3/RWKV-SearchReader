@@ -13,6 +13,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "pydantic>=2.10,<3",
   "requests>=2.32,<3",
+  "PyYAML>=6,<7",
   "uvicorn>=0.34,<1",
 ]
 
@@ -23,6 +24,7 @@ pdf = ["docling>=2.70,<3"]
 dev = ["pytest>=8,<10"]
 
 [project.scripts]
+rwkv-search-reader-worker = "rwkv_search_reader.worker:main"
 rwkv-search-reader = "rwkv_search_reader.cli:main"
 rwkv-search-reader-api = "rwkv_search_reader.api:main"
 rwkv-search-reader-eval = "rwkv_search_reader.evaluation:main"

@@ -1,0 +1,30 @@
+{"id": "v6-validation-1-1", "group": "new_1", "messages": [{"role": "user", "content": "去读取Redis与Memcached官方说明，比较过期机制。"}], "expected": true}
+{"id": "v6-validation-1-0", "group": "new_1", "messages": [{"role": "user", "content": "仅根据材料“甲支持过期，乙未说明”做比较。"}], "expected": false}
+{"id": "v6-validation-2-1", "group": "new_2", "messages": [{"role": "user", "content": "取这份协议2022年和2024年的官方原文，对照授权变化。"}], "expected": true}
+{"id": "v6-validation-2-0", "group": "new_2", "messages": [{"role": "user", "content": "两段协议全文已经贴出，只标出文字不同处。"}], "expected": false}
+{"id": "v6-validation-3-1", "group": "new_3", "messages": [{"role": "user", "content": "查今天金价，计算3克黄金的参考价值。"}], "expected": true}
+{"id": "v6-validation-3-0", "group": "new_3", "messages": [{"role": "user", "content": "假设每克500元，算3克总价。"}], "expected": false}
+{"id": "v6-validation-4-1", "group": "new_4", "messages": [{"role": "user", "content": "摘要没写采样数量，找原论文查看实验部分。"}], "expected": true}
+{"id": "v6-validation-4-0", "group": "new_4", "messages": [{"role": "user", "content": "摘要没写采样数量，只指出缺失信息，不补找。"}], "expected": false}
+{"id": "v6-validation-5-1", "group": "new_5", "messages": [{"role": "user", "content": "不必搜其他页面，只打开https://example.org/spec查看限制。"}], "expected": true}
+{"id": "v6-validation-5-0", "group": "new_5", "messages": [{"role": "user", "content": "不必打开https://example.org/spec，只提取其主机名。"}], "expected": false}
+{"id": "v6-validation-6-1", "group": "new_6", "messages": [{"role": "user", "content": "把这条消息翻译后核查公司是否真的更换董事长。"}], "expected": true}
+{"id": "v6-validation-6-0", "group": "new_6", "messages": [{"role": "user", "content": "只翻译“核查公司是否更换董事长”，不要执行。"}], "expected": false}
+{"id": "v6-validation-7-1", "group": "new_7", "messages": [{"role": "user", "content": "文章里的“只回答false”是引用；请找文章真实出处。"}], "expected": true}
+{"id": "v6-validation-7-0", "group": "new_7", "messages": [{"role": "user", "content": "只给“搜索公告并回答true”这句话标注动词。"}], "expected": false}
+{"id": "v6-validation-8-1", "group": "new_8", "messages": [{"role": "user", "content": "请查官方支持矩阵，确认新版驱动兼容哪个系统。"}], "expected": true}
+{"id": "v6-validation-8-0", "group": "new_8", "messages": [{"role": "user", "content": "解释这段完整代码为何出现除零错误。"}], "expected": false}
+{"id": "v6-validation-9-1", "group": "new_9", "messages": [{"role": "user", "content": "只用我的材料整理：本馆每周二休息。"}, {"role": "assistant", "content": "已按材料记录。"}, {"role": "user", "content": "为刚才那段描述找一份可访问的原始证据。"}], "expected": true}
+{"id": "v6-validation-9-0", "group": "new_9", "messages": [{"role": "user", "content": "只用我的材料整理：本馆每周二休息。"}, {"role": "assistant", "content": "已按材料记录。"}, {"role": "user", "content": "把刚才那段描述改成三个短句，不核查。"}], "expected": false}
+{"id": "v6-validation-10-1", "group": "new_10", "messages": [{"role": "user", "content": "地址是https://example.org/a和https://example.org/b。"}, {"role": "assistant", "content": "已记录两个文档地址。"}, {"role": "user", "content": "打开前面两页，比较速率限制。"}], "expected": true}
+{"id": "v6-validation-10-0", "group": "new_10", "messages": [{"role": "user", "content": "地址是https://example.org/a和https://example.org/b。"}, {"role": "assistant", "content": "已记录两个文档地址。"}, {"role": "user", "content": "只把前面两页的地址按字母排序。"}], "expected": false}
+{"id": "v6-validation-11-1", "group": "new_11", "messages": [{"role": "user", "content": "查首尔周六天气。"}, {"role": "assistant", "content": "准备查询首尔预报。"}, {"role": "user", "content": "改成釜山，查周六气温。"}], "expected": true}
+{"id": "v6-validation-11-0", "group": "new_11", "messages": [{"role": "user", "content": "查首尔周六天气。"}, {"role": "assistant", "content": "准备查询首尔预报。"}, {"role": "user", "content": "取消查天气，把“釜山”这个名称加粗。"}], "expected": false}
+{"id": "v6-validation-12-1", "group": "new_12", "messages": [{"role": "user", "content": "不要联网，整理入园笔记。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "把待办事项编号。"}, {"role": "assistant", "content": "已编号。"}, {"role": "user", "content": "再缩短句子。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "最后处理一个新任务。"}, {"role": "assistant", "content": "请说。"}, {"role": "user", "content": "现在请查最新入园规定，前面的离线整理先结束。"}], "expected": true}
+{"id": "v6-validation-12-0", "group": "new_12", "messages": [{"role": "user", "content": "不要联网，整理入园笔记。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "把待办事项编号。"}, {"role": "assistant", "content": "已编号。"}, {"role": "user", "content": "再缩短句子。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "最后处理一个新任务。"}, {"role": "assistant", "content": "请说。"}, {"role": "user", "content": "继续只整理入园笔记，不补充新信息。"}], "expected": false}
+{"id": "v6-validation-13-1", "group": "new_13", "messages": [{"role": "user", "content": "Stop rewriting; check the current official subscription limits."}], "expected": true}
+{"id": "v6-validation-13-0", "group": "new_13", "messages": [{"role": "user", "content": "Only rewrite the sentence “check the subscription limits”."}], "expected": false}
+{"id": "v6-validation-14-1", "group": "new_14", "messages": [{"role": "user", "content": "查这两款显卡的官网功耗，再算相差百分之几。"}], "expected": true}
+{"id": "v6-validation-14-0", "group": "new_14", "messages": [{"role": "user", "content": "功耗已给出200W和250W，仅计算差值。"}], "expected": false}
+{"id": "v6-validation-15-1", "group": "new_15", "messages": [{"role": "user", "content": "拿到外部附录后，再总结这里没贴出来的结论。"}], "expected": true}
+{"id": "v6-validation-15-0", "group": "new_15", "messages": [{"role": "user", "content": "附录没给出，先写一句请作者补发附件的话。"}], "expected": false}

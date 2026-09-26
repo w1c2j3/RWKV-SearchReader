@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import threading
 from abc import ABC, abstractmethod
 from typing import Any
 from urllib.parse import urlparse
@@ -13,9 +11,6 @@ import requests
 from .config import Settings
 from .models import SearchHit, SearchReaderError
 
-_TAVILY_HEALTH_LOCK = threading.Lock()
-_TAVILY_PERMANENT_FAILURES: set[str] = set()
-_TAVILY_PREFERRED_KEY = ""
 _COMMON_GENERIC_TLDS = {
     "ai",
     "app",
@@ -44,39 +39,6 @@ _AMBIGUOUS_CODE_SUFFIXES = {
     "ts",
     "tsx",
 }
-
-
-def _key_identity(api_key: str) -> str:
-    return hashlib.sha256(api_key.encode("utf-8", errors="ignore")).hexdigest()[:16]
-
-
-def _ordered_tavily_keys(keys: tuple[str, ...]) -> list[str]:
-    with _TAVILY_HEALTH_LOCK:
-        available = [
-            key for key in keys if _key_identity(key) not in _TAVILY_PERMANENT_FAILURES
-        ]
-        return sorted(
-            available,
-            key=lambda key: 0 if _key_identity(key) == _TAVILY_PREFERRED_KEY else 1,
-        )
-
-
-def _mark_tavily_failure(api_key: str) -> None:
-    with _TAVILY_HEALTH_LOCK:
-        _TAVILY_PERMANENT_FAILURES.add(_key_identity(api_key))
-
-
-def _mark_tavily_success(api_key: str) -> None:
-    global _TAVILY_PREFERRED_KEY
-    with _TAVILY_HEALTH_LOCK:
-        _TAVILY_PREFERRED_KEY = _key_identity(api_key)
-
-
-def _reset_tavily_health_for_tests() -> None:
-    global _TAVILY_PREFERRED_KEY
-    with _TAVILY_HEALTH_LOCK:
-        _TAVILY_PERMANENT_FAILURES.clear()
-        _TAVILY_PREFERRED_KEY = ""
 
 
 def _clean(value: Any, limit: int = 0) -> str:
@@ -163,45 +125,24 @@ class TavilyProvider(SearchProvider):
     def _post(
         self, path: str, payload: dict[str, Any], *, timeout: tuple[int, int]
     ) -> requests.Response:
-        configured_keys = self.settings.tavily_api_keys or (
-            (self.settings.tavily_api_key,) if self.settings.tavily_api_key else ()
+        api_key = self.settings.tavily_api_key or next(
+            iter(self.settings.tavily_api_keys), ""
         )
-        if not configured_keys:
+        if not api_key:
             raise SearchReaderError(
-                "search", "TAVILY_API_KEY or TAVILY_API_KEYS is not configured"
+                "search", "TAVILY_API_KEY is not configured"
             )
-        keys = _ordered_tavily_keys(tuple(configured_keys))
-        if not keys:
+        try:
+            return self.session.post(
+                f"{self.endpoint}/{path.lstrip('/')}",
+                headers=self._headers(api_key),
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
             raise SearchReaderError(
-                "search", "all configured Tavily credentials are unavailable"
-            )
-        last_response: requests.Response | None = None
-        last_error: requests.RequestException | None = None
-        for api_key in keys:
-            try:
-                response = self.session.post(
-                    f"{self.endpoint}/{path.lstrip('/')}",
-                    headers=self._headers(api_key),
-                    json=payload,
-                    timeout=timeout,
-                )
-            except requests.RequestException as exc:
-                last_error = exc
-                continue
-            last_response = response
-            if response.status_code < 400:
-                _mark_tavily_success(api_key)
-                return response
-            if response.status_code in {401, 402, 403, 432}:
-                _mark_tavily_failure(api_key)
-            if response.status_code not in {401, 402, 403, 429, 432}:
-                return response
-        if last_response is not None:
-            return last_response
-        raise SearchReaderError(
-            "search",
-            f"Tavily request failed: {last_error or 'no credential succeeded'}",
-        )
+                "search", f"Tavily request failed: {type(exc).__name__}"
+            ) from exc
 
     def search(self, query: str, max_results: int) -> list[SearchHit]:
         request: dict[str, Any] = {
@@ -250,6 +191,8 @@ class TavilyProvider(SearchProvider):
                     url=url,
                     snippet=_clean(snippet or material, 1200),
                     content=material,
+                    content_markdown=raw_content,
+                    content_status="fetched" if raw_content else "snippet_only",
                     provider=self.name,
                     score=float(item.get("score") or 0.0),
                     published_date=_clean(

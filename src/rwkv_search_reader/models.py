@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -17,6 +18,13 @@ class SearchHit:
     error: str = ""
     retrieval_point: str = ""
     retrieval_query: str = ""
+    content_markdown: str = ""
+    content_status: str = "snippet_only"
+    canonical_url: str = ""
+    retrieved_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    language: str | None = None
 
 
 @dataclass(slots=True)
@@ -70,6 +78,7 @@ class ResearchPlan:
     fallback: bool = False
     retrieval_points: list[str] = field(default_factory=list)
     direct_urls: list[str] = field(default_factory=list)
+    discovery_fields: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

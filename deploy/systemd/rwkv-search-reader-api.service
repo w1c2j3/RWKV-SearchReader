@@ -1,0 +1,19 @@
+[Unit]
+Description=RWKV SearchReader api
+After=network-online.target
+
+[Service]
+Type=simple
+User=chase
+Group=chase
+WorkingDirectory=/home/chase/apps/rwkv-search-reader
+EnvironmentFile=/home/chase/apps/rwkv-search-reader/.env.server
+ExecStart=/home/chase/apps/rwkv-search-reader/.venv/bin/uvicorn rwkv_search_reader.job_api:app --host 127.0.0.1 --port 8791
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+
+# Deliberately no Install section: start manually, never enable at boot.

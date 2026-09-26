@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+import textwrap
 import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,8 @@ from datetime import date, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
+
+import yaml
 
 from .config import Settings
 from .documents import full_document_read_requested
@@ -127,7 +130,8 @@ _UNEXPANDED_COLLECTION_RE = re.compile(
     r"(?:旗下|的)[^，。！？!?]{0,16}(?:游戏|产品|模型|项目|作品|应用)"
     r"[^，。！？!?]{0,20}(?:都|分别|各自|所有)|"
     r"(?:各类|各个|所有|全部)[^，。！？!?]{0,16}"
-    r"(?:游戏|产品|模型|项目|作品|应用)"
+    r"(?:游戏|产品|模型|项目|作品|应用)|"
+    r"(?:游戏|产品|模型|项目|作品|应用)[^，。！？!?]{0,12}(?:分别|各自)"
 )
 
 
@@ -503,6 +507,88 @@ def _narrow_selected_fact(field: str, fact: str) -> str:
     return value
 
 
+def _valid_field_value_shape(field: str, fact: str) -> bool:
+    """Reject a copied value when its type cannot answer the planned field."""
+
+    value = " ".join(str(fact or "").split()).strip()
+    if not value or not re.search(r"[\w\u3400-\u9fff]", value):
+        return False
+    if re.search(r"日期|时间|\bdate\b|\btime\b", field, re.IGNORECASE):
+        if not _normalized_full_dates(value):
+            return False
+        if "上市日期" in field:
+            if len(_normalized_full_dates(value)) != 1:
+                return False
+            full_date = (
+                r"20\d{2}\s*(?:年|[-/.])\s*\d{1,2}"
+                r"\s*(?:月|[-/.])\s*\d{1,2}\s*日?"
+            )
+            listing = (
+                r"(?:上市(?!委|公告|发行|申请|审核|辅导|计划|提示|预告)"
+                r"|挂牌|登陆(?:科创板|交易所)?|开始交易)"
+            )
+            return bool(
+                re.search(rf"{listing}[^。；\n]{{0,25}}{full_date}", value)
+                or re.search(rf"{full_date}[^。；\n]{{0,25}}{listing}", value)
+            )
+        return True
+    if re.search(r"发行价|开盘价|收盘价|股价|价格|\bprice\b", field, re.IGNORECASE):
+        has_price = bool(
+            re.search(r"\d+(?:[.,]\d+)?\s*(?:元|美元|人民币|USD|CNY|RMB|英镑|欧元)", value, re.IGNORECASE)
+            or re.search(r"(?:发行价|开盘价|收盘价|股价|价格|price)\s*[:：为是]?\s*[￥¥$€£]?\s*\d", value, re.IGNORECASE)
+            or re.search(r"[￥¥$€£]\s*\d+(?:[.,]\d+)?", value)
+        )
+        return has_price and not bool(re.fullmatch(r"[^\n]*\d+(?:[.,]\d+)?%[^\n]*", value) and not re.search(r"发行价|开盘价|收盘价|股价|价格|price", value, re.IGNORECASE))
+    return True
+
+
+def _price_fact_bound_to_field(field: str, fact: str, source_material: str) -> bool:
+    """Require the quoted price beside its own label in one source sentence."""
+
+    label = (
+        r"发行价|发行价格"
+        if "发行价" in field
+        else r"开盘价|开盘"
+        if "开盘价" in field
+        else r"收盘价|收盘"
+        if "收盘价" in field
+        else ""
+    )
+    if not label:
+        return True
+    price_pattern = r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(?:元|美元|人民币|USD|CNY|RMB|英镑|欧元)"
+    fact_prices = {
+        Decimal(match.group(1).replace(",", ""))
+        for match in re.finditer(price_pattern, fact, re.IGNORECASE)
+    }
+    if not fact_prices:
+        return False
+    for match in re.finditer(label, source_material, re.IGNORECASE):
+        start = max(source_material.rfind("。", 0, match.start()) + 1,
+                    source_material.rfind("\n", 0, match.start()) + 1)
+        end = source_material.find("。", match.end())
+        sentence = source_material[start:end if end >= 0 else match.end() + 180]
+        if "首日" in field and not re.search(r"首日|当日|当天", sentence):
+            continue
+        following = source_material[match.end():match.end() + 120]
+        following = re.split(r"发行价|开盘|收盘|。|；|\n", following, maxsplit=1)[0]
+        source_prices: set[Decimal] = set()
+        for item in re.finditer(price_pattern, following, re.IGNORECASE):
+            prefix = following[:item.start()]
+            # A price change such as "较开盘价回落255元" is not the
+            # opening price, even though the number follows its label.
+            if re.search(r"较|比|相对|差|高于|低于|浮盈|赚|亏", prefix):
+                continue
+            if re.search(r"回落|上涨|下跌|涨幅|跌幅|涨|跌|升|降|增加|减少", prefix) and not re.search(
+                r"(?:至|到|为|报|达)[^至到为报达]*$", prefix
+            ):
+                continue
+            source_prices.add(Decimal(item.group(1).replace(",", "")))
+        if fact_prices & source_prices:
+            return True
+    return False
+
+
 def _is_explicit_benefit_fact(value: str) -> bool:
     return bool(
         re.search(
@@ -799,24 +885,52 @@ def _filter_unsupported_atomic_clauses(
 def _atomic_fallback_answer(selections: list[FieldEvidenceSelection]) -> str:
     """Provide a source-bound safety answer only when final output is unusable."""
 
+    display_fields = {
+        "date": "日期",
+        "version": "版本",
+        "event": "活动",
+        "version_number": "版本号",
+        "version_name": "版本名称",
+        "release_date": "发布日期",
+        "update_time": "更新时间",
+        "theme": "主题",
+        "station": "站点",
+        "stations": "站点",
+    }
     lines: list[str] = []
     for item in selections:
+        field_label = display_fields.get(item.field.casefold().strip(), item.field)
         if item.status == "supported" and item.fact:
             citations = "".join(
                 f"[{source_id}]" for source_id in _selection_source_ids(item)
             )
+            fact = re.sub(r"^\s*>\s*", "", item.fact).strip()
             lines.append(
-                f"- {item.subject} · {item.field}：{item.fact} {citations}".rstrip()
+                f"- {item.subject} · {field_label}：{fact} {citations}".rstrip()
             )
         elif item.status == "conflict":
             citations = "".join(
                 f"[{source_id}]" for source_id in _selection_source_ids(item)
             )
+            detail = (
+                item.fact
+                if item.fact
+                and item.fact != "材料对这个字段给出了互相冲突的记录。"
+                and len(item.fact) <= 120
+                else "现有材料存在冲突，无法确认。"
+            )
             lines.append(
-                f"- {item.subject} · {item.field}：现有材料存在冲突，无法确认。{citations}"
+                f"- {item.subject} · {field_label}：{detail}{citations}"
             )
         else:
-            lines.append(f"- {item.subject} · {item.field}：现有材料未能确认。")
+            detail = (
+                item.fact
+                if item.fact
+                and item.fact != "材料未给出这个字段。"
+                and len(item.fact) <= 120
+                else "现有材料未能确认。"
+            )
+            lines.append(f"- {item.subject} · {field_label}：{detail}")
     return "\n".join(lines).strip()
 
 
@@ -829,6 +943,9 @@ def _render_source_pairs(evidence: list[Evidence]) -> str:
                 item.source_id,
                 {
                     "published_date": item.published_date or "unknown",
+                    "url": item.url,
+                    "title": item.title,
+                    "source_relation": item.source_relation,
                     "summary": item.claim,
                 },
             ],
@@ -924,6 +1041,9 @@ class _FieldFactCandidate:
     title: str = ""
     published_date: str = ""
     lineage: tuple[int, ...] | None = None
+    url: str = ""
+    quote: str = ""
+    source_relation: str = "unclear"
 
 
 def _render_material_nodes(nodes: list[_MaterialNode]) -> str:
@@ -1035,15 +1155,334 @@ def _field_binding_applicable(
 
     if not records or not all(record.fields for record in records):
         return False
-    if _broad_question(question):
+    station_list_request = _station_list_records(records, question)
+    current_release_question = bool(
+        _recency_requested(question) and re.search(r"版本|更新", question)
+    )
+    if _broad_question(question) and not station_list_request and not current_release_question:
         return False
     return not bool(
         re.search(
             r"怎样|怎么|如何|示例|例子|步骤|教程|配置|代码|写法",
-            str(question or ""),
+            re.sub(r"《[^》]+》", "", str(question or "")),
             flags=re.IGNORECASE,
         )
     )
+
+
+def _is_station_field(field: str) -> bool:
+    return bool(re.search(r"站点|站名|车站|stations?", str(field or ""), re.IGNORECASE))
+
+
+def _route_number(text: str) -> int | None:
+    match = re.search(r"(?<!\d)(\d{1,2})\s*号线", str(text or ""))
+    if match:
+        return int(match.group(1))
+    chinese = re.search(r"([一二三四五六七八九十]{1,3})\s*号线", str(text or ""))
+    if not chinese:
+        return None
+    digits = {character: index for index, character in enumerate("一二三四五六七八九", start=1)}
+    value = chinese.group(1)
+    if value == "十":
+        return 10
+    if "十" in value:
+        tens, _, ones = value.partition("十")
+        return (digits.get(tens, 1) * 10) + digits.get(ones, 0)
+    return digits.get(value)
+
+
+def _numeric_route_label(text: str) -> str:
+    """Use the numeric line label commonly indexed by search providers."""
+
+    return re.sub(
+        r"[一二三四五六七八九十]{1,3}\s*号线",
+        lambda match: (
+            f"{_route_number(match.group(0))}号线"
+            if _route_number(match.group(0)) is not None
+            else match.group(0)
+        ),
+        text,
+    )
+
+
+def _station_list_records(
+    records: list[ResearchRecord] | None, question: str
+) -> bool:
+    return bool(records) and all(
+        record.fields
+        and all(_is_station_field(field) for field in record.fields)
+        and _route_number(f"{record.subject} {record.question} {question}") is not None
+        for record in records
+    )
+
+
+def _route_station_list(record: ResearchRecord, source_material: str) -> list[str] | None:
+    """Read a complete, explicitly labelled line list from its original source."""
+
+    line_number = _route_number(f"{record.subject} {record.question}")
+    if line_number is None:
+        return None
+    headings = list(
+        re.finditer(
+            r"(?<!\d)(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*号线"
+            r"(?:\s*&\s*\d{1,2}\s*号线)?",
+            str(source_material or ""),
+        )
+    )
+    for index, heading in enumerate(headings):
+        if _route_number(heading.group(0)) != line_number:
+            continue
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(source_material)
+        section = source_material[heading.end() : end]
+        label = re.search(r"(?:沿途站点|沿线站点|途经站点)\s*[：:]\s*", section)
+        if not label:
+            continue
+        listed = re.split(r"[。.!！?？\r\n]", section[label.end() :], maxsplit=1)[0]
+        listed = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", listed)
+        listed = re.sub(r"<[^>]*>", " ", listed)
+        stations = [
+            re.sub(r"站$", "", item.strip(" *#>\t\u3000"))
+            for item in re.split(r"[—–−→、,，;；|]+", listed)
+            if item.strip(" *#>\t\u3000")
+        ]
+        if len(stations) >= 5 and all(len(item) <= 16 for item in stations):
+            if len(stations) == len(set(stations)):
+                return stations
+    return None
+
+
+def _route_station_link_list(record: ResearchRecord, source: Evidence) -> list[str] | None:
+    """Read a complete line-specific station table made of station links."""
+
+    line_number = _route_number(f"{record.subject} {record.question}")
+    if line_number is None or _route_number(source.title) != line_number:
+        return None
+    quote = source.quote
+    linked = re.findall(
+        r"\[([^\]]{2,30})\]\([^)]*/stations?/[^)]*\)", quote, re.IGNORECASE
+    )
+    stations = [" ".join(name.split()) for name in linked]
+    table_complete = False
+    if not stations:
+        lines = quote.splitlines()
+        for index, line in enumerate(lines):
+            if not re.match(r"^\|.*(?:车站|站点|站名|Station).*\|\s*$", line, re.IGNORECASE):
+                continue
+            row_names: list[str] = []
+            for following_index, following in enumerate(lines[index + 1 :], start=index + 1):
+                if not following.startswith("|"):
+                    table_complete = bool(row_names) and any(
+                        rest.strip() for rest in lines[following_index:]
+                    )
+                    break
+                first_cell = re.match(r"^\|\s*\[([^\]]{2,30})\]\([^)]+\)\s*\|", following)
+                if first_cell:
+                    row_names.append(" ".join(first_cell.group(1).split()))
+            if table_complete:
+                stations = row_names
+                break
+    if (
+        len(stations) < 5
+        or len(stations) > 80
+        or len(stations) != len(set(stations))
+        or any(not re.search(r"[\u3400-\u9fff]", name) for name in stations)
+    ):
+        return None
+    declared_count = re.search(r"(?<!\d)(\d{1,2})\s*(?:座车站|个站点|站点)", quote)
+    if declared_count and int(declared_count.group(1)) != len(stations):
+        return None
+    endpoints = re.search(
+        r"(?m)^##\s*([^\n–—-]{2,30})\s*[–—-]\s*([^\n–—-]{2,30})\s*$",
+        quote,
+    )
+    if endpoints:
+        first, last = (" ".join(value.split()) for value in endpoints.groups())
+        if (stations[0], stations[-1]) not in {(first, last), (last, first)}:
+            return None
+    elif not declared_count and not table_complete:
+        return None
+    return stations
+
+
+def _source_domain(url: str) -> str:
+    host = (urlparse(url).hostname or "").casefold().removeprefix("www.").removeprefix("m.")
+    parts = host.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in {
+        "ac", "co", "com", "edu", "gov", "net", "org",
+    }:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _select_station_route_evidence(
+    question: str,
+    records: list[ResearchRecord],
+    evidence: list[Evidence],
+) -> tuple[list[FieldEvidenceSelection], list[str]]:
+    """Prefer official lists; allow two independent agreeing route tables."""
+
+    selections: list[FieldEvidenceSelection] = []
+    warnings: list[str] = []
+    for record in records:
+        for field in record.fields:
+            official_matches: dict[tuple[str, ...], list[Evidence]] = {}
+            other_matches: dict[tuple[str, ...], list[Evidence]] = {}
+            for item in evidence:
+                stations = _route_station_list(record, f"{item.title}\n{item.quote}")
+                if stations is None:
+                    stations = _route_station_link_list(record, item)
+                if stations:
+                    key = min(tuple(stations), tuple(reversed(stations)))
+                    target = official_matches if item.source_relation == "official" else other_matches
+                    target.setdefault(key, []).append(item)
+            chosen: tuple[tuple[str, ...], list[Evidence]] | None = None
+            if len(official_matches) == 1:
+                chosen = next(iter(official_matches.items()))
+            elif not official_matches and len(other_matches) == 1:
+                candidate = next(iter(other_matches.items()))
+                if len({_source_domain(item.url) for item in candidate[1]}) >= 2:
+                    chosen = candidate
+                    warnings.append(
+                        f"{record.subject}/{field}: complete route list corroborated by independent nonofficial sources"
+                    )
+            if chosen is not None:
+                stations, sources = chosen
+                sources.sort(
+                    key=lambda item: (
+                        item.source_relation == "official",
+                        "/post_" in item.url.casefold(),
+                        item.score,
+                    ),
+                    reverse=True,
+                )
+                distinct_sources: list[Evidence] = []
+                seen_domains: set[str] = set()
+                for source in sources:
+                    domain = _source_domain(source.url)
+                    if source.source_relation != "official" and domain in seen_domains:
+                        continue
+                    distinct_sources.append(source)
+                    seen_domains.add(domain)
+                source_ids = [item.source_id for item in distinct_sources[:3]]
+                chosen_stations = _route_station_list(
+                    record, f"{distinct_sources[0].title}\n{distinct_sources[0].quote}"
+                ) or _route_station_link_list(record, distinct_sources[0])
+                assert chosen_stations is not None
+                selections.append(
+                    FieldEvidenceSelection(
+                        subject=record.subject,
+                        field=field,
+                        source_id=source_ids[0],
+                        status="supported",
+                        fact="\n".join(chosen_stations),
+                        source_ids=source_ids,
+                    )
+                )
+            else:
+                reason = (
+                    "official route pages disagree on the complete station list"
+                    if len(official_matches) > 1
+                    else "route tables disagree on the complete station list"
+                    if len(other_matches) > 1
+                    else "no official list or two independent route tables confirm a complete station list"
+                )
+                warnings.append(f"{record.subject}/{field}: {reason}"[:500])
+                selections.append(
+                    FieldEvidenceSelection(
+                        subject=record.subject,
+                        field=field,
+                        source_id="",
+                        status="missing",
+                        fact="无法从可核对的完整线路列表中确认站点顺序。",
+                    )
+                )
+    return selections, warnings
+
+
+def _deterministic_station_answer(
+    question: str,
+    records: list[ResearchRecord] | None,
+    selections: list[FieldEvidenceSelection] | None,
+    evidence: list[Evidence],
+) -> tuple[str, list[str]] | None:
+    if not _station_list_records(records, question):
+        return None
+    station_selections = [
+        item for item in (selections or []) if _is_station_field(item.field)
+    ]
+    if not station_selections:
+        return None
+    if any(item.status != "supported" for item in station_selections):
+        return (
+            "我没能从可靠的完整线路资料中核实站点顺序，暂时不能可靠列出。",
+            [item.fact for item in station_selections if item.status != "supported"],
+        )
+
+    evidence_by_id = {item.source_id: item for item in evidence}
+    answers: list[str] = []
+    for selection in station_selections:
+        stations = [item for item in selection.fact.splitlines() if item.strip()]
+        selected_sources = [
+            evidence_by_id[source_id]
+            for source_id in (selection.source_ids or [selection.source_id])
+            if source_id in evidence_by_id
+        ]
+        official_sources = [item for item in selected_sources if item.source_relation == "official"]
+        source_ids = [
+            source_id
+            for source_id in (selection.source_ids or [selection.source_id])
+            if source_id in evidence_by_id
+            and (not official_sources or evidence_by_id[source_id].source_relation == "official")
+        ][:2]
+        if (
+            len(stations) < 5
+            or not source_ids
+            or (not official_sources and len({_source_domain(item.url) for item in selected_sources}) < 2)
+        ):
+            return (
+                "我没能从可靠的完整线路资料中核实站点顺序，暂时不能可靠列出。",
+                ["official station evidence could not be rendered"],
+            )
+        citation = "".join(f"[{source_id}]" for source_id in source_ids)
+        label = (
+            f"{selection.subject}"
+            if official_sources
+            else f"根据两份独立线路站表，{selection.subject}"
+        )
+        answers.append(
+            f"{label}共{len(stations)}站（{stations[0]}至{stations[-1]}）："
+            f"{'、'.join(stations)}。{citation}"
+        )
+    return "\n".join(answers), []
+
+
+def _deterministic_next_release_answer(
+    question: str,
+    selections: list[FieldEvidenceSelection] | None,
+) -> str | None:
+    """Do not let broad summaries replace a missing future release date."""
+
+    if not re.search(r"下一个|下一版|后续版本", question):
+        return None
+    date_selections = [
+        item
+        for item in (selections or [])
+        if re.search(
+            r"日期|时间|上线|发布|update[_ ]?time|release[_ ]?date|\bdate\b|\btime\b",
+            item.field,
+            re.IGNORECASE,
+        )
+    ]
+    if not date_selections:
+        return None
+    today = datetime.now().astimezone().date()
+    for item in date_selections:
+        if item.status != "supported":
+            continue
+        dates = _normalized_full_dates(item.fact)
+        if dates and max(date.fromisoformat(value) for value in dates) > today:
+            return None
+    return f"截至 {_today()}，现有材料没有确认晚于当前日期的下一个版本更新时间；因此也无法可靠确认该版本主题。"
 
 
 def _subject_aliases(subject: str) -> list[str]:
@@ -1144,6 +1583,23 @@ def _field_qualifier_supported(
     source_material: str,
 ) -> bool:
     """Keep status qualifiers on the same local row/sentence as the fact."""
+
+    next_release = bool(
+        re.search(r"下一个|下一版|后续版本", f"{record.question} {record.subject}")
+    )
+    date_field = bool(
+        re.search(
+            r"日期|时间|上线|发布|update[_ ]?time|release[_ ]?date|\bdate\b|\btime\b",
+            field,
+            re.IGNORECASE,
+        )
+    )
+    if next_release and date_field:
+        dates = _normalized_full_dates(fact)
+        if dates and max(
+            date.fromisoformat(value) for value in dates
+        ) <= datetime.now().astimezone().date():
+            return False
 
     if not re.search(r"LTS|长期支持", f"{record.question} {field}", re.IGNORECASE):
         return True
@@ -1285,7 +1741,76 @@ def _structured_field_candidates(
     evidence: Evidence,
     relevance: float,
 ) -> list[_FieldFactCandidate]:
-    """Preserve exact version-codename pairs already present in Markdown tables."""
+    """Preserve exact release facts from titles and version tables."""
+
+    field_key = field.casefold().strip()
+    release_title = re.search(
+        r"(?<!\d)(?P<version>\d+(?:\.\d+){1,3})\s*(?:全新|新)?\s*版本"
+        r"(?:\s*[「“\"](?P<name>[^」”\"]{1,100})[」”\"])?",
+        evidence.title,
+    )
+    current_release = bool(
+        _recency_requested(record.question)
+        and not re.search(r"下一个|下一版|后续版本", record.question)
+        and re.search(r"上线|更新公告|更新说明|当前版本|最新版本", evidence.title)
+        and not re.search(r"即将|将于|预下载|前瞻|预览", evidence.title)
+    )
+    if release_title and current_release:
+        fact = ""
+        if field_key == "version_number" or re.search(r"版本号|当前版本|主版本", field):
+            fact = f"{release_title.group('version')}版本"
+        elif field_key == "version_name" or re.search(r"版本主题|版本名称|版本名", field):
+            fact = str(release_title.group("name") or "").strip()
+        if fact:
+            return [
+                _FieldFactCandidate(
+                    subject=record.subject,
+                    field=field,
+                    source_id=evidence.source_id,
+                    fact=fact,
+                    relevance=relevance,
+                    title=evidence.title,
+                    published_date=evidence.published_date,
+                    lineage=tuple(
+                        int(part)
+                        for part in release_title.group("version").split(".")
+                    ),
+                    url=evidence.url,
+                    quote=f"{evidence.title}\n{evidence.quote}"[:1200],
+                    source_relation=evidence.source_relation,
+                )
+            ]
+        if field_key == "release_date" or re.search(r"更新日期|更新时间|更新开始时间|上线日期|发布日期", field):
+            dated = re.search(
+                r"(?:更新开始时间|更新时间|更新日期|版本上线时间)"
+                r"[^0-9]{0,20}"
+                r"(?P<date>20\d{2}\s*(?:[/.-]|年)\s*\d{1,2}"
+                r"\s*(?:[/.-]|月)\s*\d{1,2}\s*日?"
+                r"(?:\s*\d{1,2}:\d{2})?)",
+                evidence.quote[:4000],
+            )
+            if dated:
+                fact = dated.group("date").strip()
+                dates = _normalized_full_dates(fact)
+                if dates and max(date.fromisoformat(value) for value in dates) <= datetime.now().astimezone().date():
+                    return [
+                        _FieldFactCandidate(
+                            subject=record.subject,
+                            field=field,
+                            source_id=evidence.source_id,
+                            fact=fact,
+                            relevance=relevance,
+                            title=evidence.title,
+                            published_date=evidence.published_date,
+                            lineage=tuple(
+                                int(part)
+                                for part in release_title.group("version").split(".")
+                            ),
+                            url=evidence.url,
+                            quote=f"{evidence.title}\n{evidence.quote}"[:1200],
+                            source_relation=evidence.source_relation,
+                        )
+                    ]
 
     if not re.search(r"代号|codename", field, re.IGNORECASE):
         return []
@@ -1310,8 +1835,57 @@ def _structured_field_candidates(
                 title=evidence.title,
                 published_date=evidence.published_date,
                 lineage=tuple(int(part) for part in match.group("version").split(".")),
+                url=evidence.url, quote=source_material[:1200],
+                source_relation=evidence.source_relation,
             )
         )
+    return candidates
+
+
+def _structured_price_candidates(
+    record: ResearchRecord,
+    field: str,
+    evidence: Evidence,
+    relevance: float,
+) -> list[_FieldFactCandidate]:
+    """Copy prices whose number and field label share an original source clause."""
+
+    if not re.search(r"发行价|开盘价|收盘价", field):
+        return []
+    quote = evidence.quote[:12000]
+    source_material = f"{evidence.title}\n{quote}"
+    subject_key = _normalized_text(record.subject.strip("《》 "))
+    if subject_key and subject_key not in _normalized_text(source_material[:1800]):
+        return []
+    price_pattern = r"(?<!\d)\d+(?:[.,]\d+)?\s*(?:元|美元|人民币|USD|CNY|RMB|英镑|欧元)(?:\s*/\s*股)?"
+    candidates: list[_FieldFactCandidate] = []
+    seen: set[str] = set()
+    for match in re.finditer(price_pattern, quote, re.IGNORECASE):
+        paragraph_start = quote.rfind("\n", 0, match.start()) + 1
+        paragraph_end = quote.find("\n", match.end())
+        paragraph = quote[paragraph_start:paragraph_end if paragraph_end >= 0 else len(quote)]
+        if subject_key and subject_key not in _normalized_text(paragraph):
+            continue
+        fact = " ".join(match.group(0).split())
+        if fact in seen or not _price_fact_bound_to_field(field, fact, source_material):
+            continue
+        seen.add(fact)
+        candidates.append(
+            _FieldFactCandidate(
+                subject=record.subject,
+                field=field,
+                source_id=evidence.source_id,
+                fact=fact,
+                relevance=relevance,
+                title=evidence.title,
+                published_date=evidence.published_date,
+                url=evidence.url,
+                quote=source_material[:1200],
+                source_relation=evidence.source_relation,
+            )
+        )
+        if len(candidates) >= 3:
+            break
     return candidates
 
 
@@ -1368,7 +1942,9 @@ def _retrieval_points_collapsed(nodes: list[_MaterialNode]) -> bool:
 
 def _source_relevance(question: str, evidence: Evidence) -> float:
     question_terms = _claim_terms(question)
-    source_terms = _claim_terms(f"{evidence.title} {evidence.claim}")
+    # A model summary can contain unsupported terms. Rank with the page's
+    # actual title and source text so invented claims cannot boost a hit.
+    source_terms = _claim_terms(f"{evidence.title} {evidence.quote[:2000]}")
     coverage = len(question_terms & source_terms) / max(1, len(question_terms))
     return coverage * 0.65 + max(0.0, min(1.0, evidence.score)) * 0.35
 
@@ -1469,10 +2045,120 @@ def _document_point_anchors(
 def _recency_requested(question: str) -> bool:
     return bool(
         re.search(
-            r"今日|今天|当前|现在|最新|刚刚|本周|这周|近期|最近|本月|今年",
+            r"今日|今天|当前|现在|最新|刚刚|本周|这周|近期|最近|本月|今年|下一个|下一版|后续版本",
             question,
         )
     )
+
+
+def _preserve_news_window(question: str, queries: list[str]) -> list[str]:
+    """Keep an explicit news time window in every planned search branch."""
+
+    match = re.search(r"最近一周|近一周|过去一周|本周|这周|最近一月|近一月|本月|今天|今日", question)
+    if not match:
+        return queries
+    window = match.group(0)
+    return [
+        query if window in query else f"{query} {window}"[:800]
+        for query in queries
+    ]
+
+
+def _field_query_phrase(subject: str, field: str, question: str) -> str:
+    """Render a planned field as search terms without exposing schema names."""
+
+    chinese = bool(re.search(r"[\u3400-\u9fff]", question))
+    aliases = {
+        "date": "日期" if chinese else "date",
+        "version": "版本" if chinese else "version",
+        "event": "活动" if chinese else "event",
+        "update_time": "更新时间" if chinese else "update time",
+        "release_date": "发布日期" if chinese else "release date",
+        "version_number": "版本号" if chinese else "version number",
+        "version_name": "版本名称" if chinese else "version name",
+        "theme": ("版本主题" if "版本" in question else "主题") if chinese else "theme",
+        "station": "站点" if chinese else "station",
+        "stations": "站点" if chinese else "stations",
+    }
+    label = aliases.get(field.casefold().strip(), field.strip())
+    base = " ".join(str(subject or "").split()).strip()
+    if label and _normalized_text(label) not in _normalized_text(base):
+        base = f"{base} {label}".strip()
+    return base
+
+
+def _fallback_record_queries(
+    question: str,
+    records: list[ResearchRecord],
+    limit: int,
+) -> tuple[list[str], list[str]]:
+    """Retain the planned object and fields if model search design is invalid."""
+
+    queries: list[str] = []
+    points: list[str] = []
+    recent = _recency_requested(question)
+    next_release = bool(re.search(r"下一个|下一版|后续版本", question))
+    current_month = _today()[:7].replace("-", "年") + "月"
+    for record in records:
+        for field in record.fields or [record.question]:
+            stem = _field_query_phrase(record.subject, field, question)
+            qualifier = "下一个版本 预告" if next_release else ""
+            if qualifier and "下一个" in stem:
+                qualifier = "预告"
+            suffix = (
+                f"{qualifier} {current_month} 最新 官方公告"
+                if recent
+                else "官方资料"
+            )
+            query = " ".join(f"{stem} {suffix}".split())[:800]
+            if query and query not in queries:
+                queries.append(query)
+                points.append(stem[:160])
+            if len(queries) >= limit:
+                return queries, points
+    return queries, points
+
+
+def _missing_field_queries(
+    question: str,
+    selections: list[FieldEvidenceSelection] | None,
+    tried_queries: list[str],
+    limit: int,
+) -> list[str]:
+    """Search unresolved fields with a fresh, answer-neutral query each round."""
+
+    tried = [_normalized_text(query) for query in tried_queries]
+    recent = _recency_requested(question)
+    suffixes = (
+        ("官方 更新公告 最新", "官方 新闻公告 预告", "官方 发布计划")
+        if recent
+        else ("官方资料", "官方文档", "权威来源")
+    )
+    result: list[str] = []
+    unresolved = [
+        selection for selection in selections or []
+        if selection.status != "supported"
+    ]
+    unresolved.sort(
+        key=lambda selection: sum(
+            _normalized_text(
+                _field_query_phrase(selection.subject, selection.field, question)
+            ) in previous
+            for previous in tried
+        )
+    )
+    for selection in unresolved:
+        stem = _field_query_phrase(selection.subject, selection.field, question)
+        for suffix in suffixes:
+            candidate = f"{stem} {suffix}".strip()[:800]
+            key = _normalized_text(candidate)
+            if key and not any(key in previous for previous in tried):
+                result.append(candidate)
+                tried.append(key)
+                break
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _freshness_review_queries(
@@ -1500,7 +2186,9 @@ def _freshness_review_queries(
     queries: list[str] = []
     for selection in field_selections:
         if selection.status != "supported" or not re.search(
-            r"版本|补丁|patch|release", selection.field, re.IGNORECASE
+            r"版本|补丁|patch|release|日期|时间|上线|update|\bdate\b|\btime\b",
+            selection.field,
+            re.IGNORECASE,
         ):
             continue
         raw_support = [
@@ -1518,12 +2206,38 @@ def _freshness_review_queries(
             or len(_selection_source_ids(selection)) >= 2
         ):
             continue
-        candidates = [
-            f"{selection.subject} {selection.field} 官方 releases index 版本列表 最新",
-            f"{selection.subject} {selection.field} 官方 download release schedule 当前",
-        ]
+        stem = _field_query_phrase(selection.subject, selection.field, question)
+        publisher_host = next(
+            (
+                host
+                for source_id in _selection_source_ids(selection)
+                if (item := evidence_by_id.get(source_id)) is not None
+                if re.search(r"官网|官方网站|official\s+(?:site|website)", item.title, re.IGNORECASE)
+                if (host := urlparse(item.url).hostname)
+            ),
+            "",
+        )
+        if re.search(r"[\u3400-\u9fff]", selection.subject):
+            candidates = [
+                f"site:{publisher_host} {selection.subject} 最新版本 上线 官方公告"
+                if publisher_host else "",
+                f"{stem} 官方 版本列表 更新公告 最新",
+                f"{stem} 官方 更新计划 预告",
+            ]
+        else:
+            candidates = [
+                f"site:{publisher_host} {selection.subject} latest release"
+                if publisher_host else "",
+                f"{stem} 官方 releases index 版本列表 最新",
+                f"{stem} 官方 release schedule 当前",
+            ]
         query = next(
-            (item for item in candidates if _normalized_text(item) not in tried), ""
+            (
+                item
+                for item in candidates
+                if item and not any(_normalized_text(item) in previous for previous in tried)
+            ),
+            "",
         )
         if query and query not in queries:
             queries.append(query)
@@ -1554,7 +2268,8 @@ def _valid_discovered_subject(question: str, subject: str) -> bool:
     event_or_field = bool(
         re.search(
             r"(?:动漫|动画|游戏)(?:节|展|展会|大会)$|"
-            r"(?:发布会|见面会|赛事|比赛|活动|版本|主题|排行榜)$",
+            r"(?:发布会|见面会|赛事|比赛|活动|版本|主题|排行榜|"
+            r"产品|厂商|项目|品类|赛道|阵营|名单)$",
             value,
         )
     )
@@ -1631,13 +2346,60 @@ def _verified_source_relation(url: str, model_relation: str) -> str:
         host == value or host.endswith(f".{value}") for value in _KNOWN_SECONDARY_HOSTS
     ):
         return "secondary"
+    if host == "gov.cn" or host.endswith((".gov.cn", ".gov.hk", ".gov.uk", ".gov.sg")):
+        return "official"
     return model_relation if model_relation in {"official", "secondary"} else "unclear"
+
+
+def _yaml_example_errors(answer: str, question: str) -> list[str]:
+    """Check generated YAML syntax and Compose nesting without supplying facts."""
+
+    blocks = re.findall(
+        r"^[ \t]*```(?:yaml|yml)[ \t]*\n(.*?)\n[ \t]*```[ \t]*$",
+        str(answer or ""),
+        flags=re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+    compose_example = bool(
+        re.search(r"docker[\s-]*compose", question, re.IGNORECASE)
+        and re.search(r"示例|例子|example|sample", question, re.IGNORECASE)
+    )
+    errors: list[str] = []
+    full_compose_blocks = 0
+    for index, block in enumerate(blocks, start=1):
+        try:
+            parsed = yaml.safe_load(textwrap.dedent(block))
+        except yaml.YAMLError as exc:
+            errors.append(f"YAML 示例 {index} 语法无效：{type(exc).__name__}")
+            continue
+        if not compose_example or not isinstance(parsed, dict) or "services" not in parsed:
+            continue
+        full_compose_blocks += 1
+        services = parsed.get("services")
+        if not isinstance(services, dict) or not services:
+            errors.append(f"YAML 示例 {index} 的 services 必须包含服务映射")
+            continue
+        if not all(isinstance(service, dict) for service in services.values()):
+            errors.append(f"YAML 示例 {index} 的每个服务必须是映射")
+            continue
+        if "healthcheck" in question.casefold() and not any(
+            isinstance(service.get("healthcheck"), dict)
+            for service in services.values()
+        ):
+            errors.append(f"YAML 示例 {index} 缺少服务内的 healthcheck 映射")
+    if compose_example and not full_compose_blocks:
+        errors.append("问题要求完整 Compose 示例，但回答没有 services 代码块")
+    return errors
 
 
 def _clean_final_answer(value: str) -> str:
     text = str(value or "").strip()
-    text = re.sub(r"^\x60{3}(?:text|markdown)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*\x60{3}$", "", text)
+    wrapper = re.fullmatch(
+        r"\x60{3}(?:text|markdown)\s*\n([\s\S]*?)\n\x60{3}",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if wrapper:
+        text = wrapper.group(1).strip()
     text = re.sub(
         r"^\s*(?:最终答案|最终回答|回答|分支总结|汇总材料)\s*[:：]\s*",
         "",
@@ -1864,6 +2626,16 @@ def _previous_question_anchor(value: str) -> str:
     return anchor
 
 
+def _context_subject_anchor(value: str) -> str:
+    """Prefer an explicit named entity over the full wording of an old question."""
+
+    text = str(value or "").strip()
+    titled = re.search(r"《[^》]{1,120}》", text)
+    if titled:
+        return titled.group(0)
+    return _previous_question_anchor(text)
+
+
 def _bind_previous_question_anchor(question: str, previous_question: str) -> str:
     anchor = _previous_question_anchor(previous_question)
     if not anchor:
@@ -1911,6 +2683,25 @@ def _json_object_from_output(value: str, stage: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise SearchReaderError(stage, "RWKV returned a non-object plan")
     return payload
+
+
+def _search_design_payload(value: str) -> dict[str, object]:
+    """Accept either the requested object or a bare list of point/query pairs."""
+
+    try:
+        return _json_object_from_output(value, "search_design")
+    except SearchReaderError as original:
+        text = str(value or "")
+        start = text.find("[")
+        if start < 0:
+            raise original
+        try:
+            rows, _ = json.JSONDecoder().raw_decode(text[start:])
+        except json.JSONDecodeError:
+            raise original from None
+        if not isinstance(rows, list):
+            raise original
+        return {"points": rows}
 
 
 def _parse_research_plan_output(
@@ -1962,6 +2753,25 @@ def _parse_research_plan_output(
         if len(records) >= max_queries:
             break
 
+    # A fixed-scope question with one explicitly named title must keep that
+    # title on every planned record.  A model may otherwise replace the
+    # concrete subject with a generic category such as "update content".
+    explicit_titles = list(
+        dict.fromkeys(re.findall(r"《[^》]{1,120}》", fallback_question))
+    )
+    if decision == "search" and scope_mode == "fixed" and len(explicit_titles) == 1:
+        title = explicit_titles[0]
+        title_key = _normalized_text(title)
+        if len(records) == 1 or all(
+            title_key in _normalized_text(record.subject) for record in records
+        ):
+            for record in records:
+                record.subject = title
+        else:
+            for record in records:
+                if title_key not in _normalized_text(record.subject):
+                    record.subject = f"{title} {record.subject}"[:200]
+
     queries = list(
         dict.fromkeys(
             " ".join(str(item).split()).strip()[:800]
@@ -1969,6 +2779,20 @@ def _parse_research_plan_output(
             if " ".join(str(item).split()).strip()
         )
     )[:max_queries]
+    # A single Latin product name at the start of the user's question is a
+    # shorter subject than a planner's copied field description.
+    if decision == "search" and scope_mode == "fixed" and len(records) == 1 and not explicit_titles:
+        named = re.match(
+            r"^\s*([A-Za-z][A-Za-z0-9.+#-]{1,30}(?:\s+[A-Za-z][A-Za-z0-9.+#-]{1,30})?)\s*(?=[\u3400-\u9fff])",
+            fallback_question,
+        )
+        if named:
+            anchor = named.group(1).strip()
+            original = records[0].subject
+            suffix = original[len(anchor):] if original.casefold().startswith(anchor.casefold()) else ""
+            if suffix and re.search(r"最新|当前|稳定|版本|日期|时间|发布|价格|名称|主题|更新|什么时候|多少", suffix):
+                records[0].subject = anchor
+                queries = [query.replace(original, anchor) for query in queries]
     direct_urls = list(
         dict.fromkeys(
             " ".join(str(item).split()).strip()[:2000]
@@ -2208,13 +3032,84 @@ def _context_retry_tokens(error: str, requested: int) -> int | None:
     return retry
 
 
+def _bind_query_subjects(queries: list[str], points: list[str], records: list[ResearchRecord]) -> list[str]:
+    """A planned field-only query must keep its own research subject."""
+    subjects = list(dict.fromkeys(record.subject.strip() for record in records if record.subject.strip()))
+    bound = []
+    for index, query in enumerate(queries):
+        point = points[index] if index < len(points) else ""
+        combined = _normalized_text(_numeric_route_label(f"{query} {point}"))
+        matched = [
+            record.subject.strip()
+            for record in records
+            if record.subject.strip()
+            and _normalized_text(_numeric_route_label(record.subject)) in combined
+        ]
+        if not matched:
+            field_matches = [
+                record.subject.strip()
+                for record in records
+                if record.subject.strip()
+                and any(
+                    _normalized_text(field)
+                    and _normalized_text(field) in combined
+                    for field in record.fields
+                )
+            ]
+            if len(field_matches) == 1:
+                matched = field_matches
+        if not matched and len(subjects) == 1:
+            matched = subjects
+        missing: list[str] = []
+        query_key = _normalized_text(query)
+        for subject in matched:
+            subject_key = _normalized_text(subject)
+            route_subject_key = _normalized_text(_numeric_route_label(subject))
+            route_query_key = _normalized_text(_numeric_route_label(query))
+            if not subject_key or route_subject_key in route_query_key:
+                continue
+            prefix = subject
+            titled = re.match(r"^(《[^》]{1,120}》)", subject)
+            if titled:
+                prefix = titled.group(1)
+            elif query_key:
+                for overlap in range(min(len(subject_key), len(query_key)), 0, -1):
+                    if subject_key.endswith(query_key[:overlap]):
+                        prefix = subject[: len(subject_key) - overlap].strip()
+                        break
+            if prefix and _normalized_text(prefix) not in query_key:
+                missing.append(prefix)
+        candidate = " ".join([*missing, query]).strip()
+        for title in set(re.findall(r"《[^》]{1,120}》", candidate)):
+            candidate = re.sub(
+                rf"{re.escape(title)}(?:\s+{re.escape(title)})+",
+                title,
+                candidate,
+            )
+        bound.append(candidate[:800])
+    return bound
+
+
+def _query_contains_unasked_number(query: str, question: str) -> bool:
+    """Reject model-invented dates or version numbers from search branches."""
+
+    allowed = {value.replace(",", "") for value in _NUMBER_RE.findall(question)}
+    allowed.update(_NUMBER_RE.findall(_today()))
+    return any(
+        value.replace(",", "") not in allowed
+        for value in _NUMBER_RE.findall(query)
+    )
+
+
 class RWKVReader:
     """Parallel page reading, chunk-bounded funnel reduction, then final summary."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.output_locale = ""
         self._call_lock = threading.Lock()
         self._call_sequence = 0
+        self.call_observer = None
         self._call_records: list[dict[str, object]] = []
         self._field_candidate_cache: dict[
             tuple[str, str, str], _FieldFactCandidate | None
@@ -2277,9 +3172,24 @@ class RWKVReader:
             api_key=api_key,
             model=model,
             timeout_seconds=self.settings.model_timeout_seconds,
+            extra_headers=(
+                self.settings.final_access_headers
+                if stage in _FINAL_MODEL_STAGES
+                else self.settings.rwkv_access_headers
+            ),
         )
 
-    def _complete(self, user: str, *, max_tokens: int, stage: str) -> str:
+    def _observe_call(self, event: dict[str, object]) -> None:
+        if self.call_observer is not None:
+            try:
+                self.call_observer(event)
+            except Exception:
+                pass  # Observing a call must not affect its result or fallbacks.
+
+    def _complete(self, user: str, *, max_tokens: int, stage: str,
+                  observation: dict[str, object] | None = None) -> str:
+        if self.output_locale and stage in _FINAL_MODEL_STAGES:
+            user += f"\n\n回答语言要求：使用 {self.output_locale} 回答正文。"
         call_id = self._next_call_id()
         started_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
         started = time.perf_counter()
@@ -2289,7 +3199,12 @@ class RWKVReader:
             if stage in _FINAL_MODEL_STAGES
             else self.settings.rwkv_protocol
         )
+        context = {"call_id": call_id, "stage": stage, "model": model,
+                   "max_tokens": max_tokens, **(observation or {})}
+        self._observe_call({**context, "state": "queued",
+                            "input_preview": user if len(user) <= 1600 else user[:700] + "\n…\n" + user[-900:]})
         client = self._client(stage)
+        client.on_request = lambda event: self._observe_call({**context, **event})
         try:
             if protocol == "chat":
                 output = client.chat(
@@ -2327,8 +3242,12 @@ class RWKVReader:
                     "output": value,
                 }
             )
+            self._observe_call({**context, "state": "returned", "output": value,
+                                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)})
             return value
         except Exception as exc:
+            self._observe_call({**context, "state": "error",
+                                "error": f"模型请求失败：{type(exc).__name__}"})
             self._record_call(
                 {
                     "call_id": call_id,
@@ -2347,6 +3266,10 @@ class RWKVReader:
                 }
             )
             raise
+        finally:
+            session = getattr(client, "session", None)
+            if session is not None:
+                session.close()
 
     def plan_research(self, question: str) -> ResearchPlan:
         """Let RWKV define scope and search records without choosing tools."""
@@ -2354,7 +3277,7 @@ class RWKVReader:
         user = f"""当前日期：{_today()}
 问题：{question}
 
-列出待检索的对象和字段，不回答问题。decision 只能是 search 或 clarify，scope_mode 只能是 fixed 或 discover。records 按具体对象组织，同一对象只写一条。fields 必须是用户所问字段名称的字符串数组，不填写值。未列名的一类对象用 discover，records 留空。用户原文已有的网址放进 urls。
+当前日期只用于判断时间，不是待检索对象。列出待检索的对象和字段，不回答问题。decision 只能是 search 或 clarify，scope_mode 只能是 fixed 或 discover。records 按具体对象组织，同一对象只写一条。fields 必须是用户所问字段名称的字符串数组，不填写值。未列名的一类对象用 discover，records 留空。用户原文已有的网址放进 urls。
 只输出 JSON：
 {{"decision":"search","scope_mode":"fixed","goal":"","records":[{{"subject":"","question":"","fields":[""]}}],"urls":[],"clarification":""}}
 待检索项 JSON："""
@@ -2381,6 +3304,14 @@ class RWKVReader:
                 fallback=True,
             )
         if plan.decision == "search" and _unexpanded_collection_plan(question, plan):
+            plan.discovery_fields = list(
+                dict.fromkeys(
+                    field
+                    for record in plan.records
+                    for field in record.fields
+                    if field
+                )
+            )
             suggested_points = list(
                 dict.fromkeys(
                     record.subject for record in plan.records if record.subject
@@ -2392,8 +3323,19 @@ class RWKVReader:
                 if record.subject and record.question
             }
             if len(suggested_points) < 2:
-                suggested_points = []
-                suggested_requirements = {}
+                category_hint = suggested_points[0] if suggested_points else ""
+                try:
+                    scope_query = self.design_scope_discovery_query(
+                        question, category_hint
+                    )
+                except SearchReaderError:
+                    scope_query = f"{category_hint or question} 代表对象 名单"[:800]
+                    plan.fallback = True
+                plan.queries = [scope_query]
+                plan.retrieval_points = ["候选对象范围"]
+                plan.scope_mode = "discover"
+                plan.records = []
+                return plan
             planned_by_point = {
                 point: next(
                     (
@@ -2437,14 +3379,61 @@ class RWKVReader:
                     plan.direct_urls,
                 )
             except SearchReaderError:
-                if not plan.queries and not plan.direct_urls:
-                    plan.queries = [question]
+                if not plan.direct_urls:
+                    plan.queries, plan.retrieval_points = _fallback_record_queries(
+                        question,
+                        plan.records,
+                        self.settings.research_plan_max_queries,
+                    )
+                    if not plan.queries:
+                        plan.queries = [question]
             else:
                 if designed_queries or plan.direct_urls:
                     plan.queries = designed_queries
                     plan.retrieval_points = designed_points
                     plan.fallback = False
+                elif plan.records:
+                    plan.queries, plan.retrieval_points = _fallback_record_queries(
+                        question,
+                        plan.records,
+                        self.settings.research_plan_max_queries,
+                    )
+        plan.queries = _bind_query_subjects(plan.queries, plan.retrieval_points, plan.records)
+        plan.queries = _preserve_news_window(question, plan.queries)
         return plan
+
+    def design_scope_discovery_query(self, question: str, category_hint: str = "") -> str:
+        """Find members of an unnamed collection before researching their facts."""
+
+        user = f"""当前日期：{_today()}
+用户问题：{question}
+类别提示：{category_hint or '从用户问题识别'}
+
+当前只查这一类有哪些具体对象，不查每个对象的版本、主题或其他字段，也不要直接列举对象。设计一个能找到仍在运营的代表对象名单的检索词，保留类别名称。不要猜测未来日期或事实。
+只输出 JSON：{{"category":"类别名称","query":"检索词"}}
+检索设计 JSON："""
+        output = self._complete(user, max_tokens=256, stage="search_design")
+        payload = _search_design_payload(output)
+        query = " ".join(str(payload.get("query") or "").split()).strip()
+        if not query:
+            for row in payload.get("points") or []:
+                if isinstance(row, list) and len(row) >= 2:
+                    query = " ".join(str(row[1]).split()).strip()
+                    break
+        category = " ".join(str(payload.get("category") or "").split()).strip()
+        if not query or _query_contains_unasked_number(query, question):
+            raise SearchReaderError(
+                "search_design", "RWKV returned no grounded scope query"
+            )
+        if category and _normalized_text(category) not in _normalized_text(query):
+            query = f"{category} {query}"
+        if not re.search(r"名单|列表|代表|主流|热门|排行|运营|有哪些", query):
+            query = f"{query} 代表对象 列表"
+        if _recency_requested(question):
+            current_month = _today()[:7].replace("-", "年") + "月"
+            if current_month not in query:
+                query = f"{query} {current_month}"
+        return query[:800]
 
     def design_record_queries(
         self,
@@ -2491,8 +3480,9 @@ class RWKVReader:
         prompts = [
             f"""{material}{url_note}
 
+当前日期：{_today()}
 问题：{question}
-{request}不回答问题；如果已有网址足以完成要求，points 输出空数组。最多 {self.settings.research_plan_max_queries} 个分支。
+{request}涉及“当前”“最新”或“下一个”时，查询必须保留这些时间限定并指向当前有效版本列表或未来公告；不得猜测日期或版本号。不要把“release_date”“update_time”这类字段名直接当作检索词。若已有网址足以完成要求，points 输出空数组。最多 {self.settings.research_plan_max_queries} 个分支。
 只输出 JSON：{{"points":[["检索点","检索词"]]}}
 检索分支 JSON："""
             for request in requests
@@ -2500,7 +3490,7 @@ class RWKVReader:
 
         def design(user: str) -> list[tuple[str, str]]:
             output = self._complete(user, max_tokens=512, stage="search_design")
-            payload = _json_object_from_output(output, "search_design")
+            payload = _search_design_payload(output)
             rows: list[tuple[str, str]] = []
             for item in payload.get("points") or []:
                 if isinstance(item, dict):
@@ -2564,8 +3554,13 @@ class RWKVReader:
                 if any(covers(row, index) for row in designed):
                     continue
                 point = (record.fields[0] if record.fields else record.question)[:160]
+                subject = (
+                    ""
+                    if _normalized_text(record.subject) in _normalized_text(record.question)
+                    else record.subject
+                )
                 query = " ".join(
-                    f"{record.subject} {record.question} {' '.join(record.fields)}".split()
+                    f"{subject} {record.question} {' '.join(record.fields)}".split()
                 )[:800]
                 designed.append((point, query))
 
@@ -2589,6 +3584,69 @@ class RWKVReader:
                     break
                 designed.pop(removable)
             designed = designed[: self.settings.research_plan_max_queries]
+        if records:
+            grounded: list[tuple[str, str]] = []
+            for point, query in designed:
+                query = re.sub(
+                    r"\b(?:release_date|update_time)\b",
+                    "更新时间",
+                    query,
+                    flags=re.IGNORECASE,
+                )
+                if re.search(r"[\u3400-\u9fff]", question):
+                    query = re.sub(r"\bstations?\b", "站点", query, flags=re.IGNORECASE)
+                if _query_contains_unasked_number(query, question):
+                    record = max(
+                        records,
+                        key=lambda item: len(
+                            _claim_terms(point)
+                            & _claim_terms(" ".join(item.fields))
+                        ),
+                    )
+                    field = max(
+                        record.fields,
+                        key=lambda item: len(_claim_terms(point) & _claim_terms(item)),
+                        default=point,
+                    )
+                    subject = (
+                        ""
+                        if _normalized_text(record.subject) in _normalized_text(record.question)
+                        else record.subject
+                    )
+                    query = " ".join(
+                        f"{subject} {record.question} {field}".split()
+                    )[:800]
+                    if re.search(r"下一个|下一版|后续版本", question):
+                        current = _today()[:7].replace("-", "年") + "月"
+                        query = f"{query} {current} 最新 官方公告"[:800]
+                if _recency_requested(question):
+                    current = _today()[:7].replace("-", "年") + "月"
+                    anchor = f"{current} 最新 官方公告"
+                    if _normalized_text(anchor) not in _normalized_text(query):
+                        query = f"{query} {anchor}"[:800]
+                grounded.append((point, query))
+            designed = grounded
+        if _station_list_records(records, question):
+            route_queries = [
+                (
+                    record.fields[0],
+                    _field_query_phrase(
+                        _numeric_route_label(record.subject), "站点", question
+                    ),
+                )
+                for record in records
+            ]
+            station_queries = route_queries + [
+                (point, _numeric_route_label(query)) for point, query in designed
+            ]
+            seen_queries: set[str] = set()
+            designed = []
+            for point, query in station_queries:
+                if query not in seen_queries:
+                    designed.append((point, query))
+                    seen_queries.add(query)
+                if len(designed) >= self.settings.research_plan_max_queries:
+                    break
         return (
             [query for _point, query in designed],
             [point for point, _query in designed],
@@ -2635,7 +3693,7 @@ class RWKVReader:
 {{"points":[["名称","检索词"]]}}
 检索点 JSON："""
         output = self._complete(user, max_tokens=512, stage="search_design")
-        payload = _json_object_from_output(output, "search_design")
+        payload = _search_design_payload(output)
         designed: list[tuple[str, str]] = []
         for item in payload.get("points") or []:
             if isinstance(item, dict):
@@ -2728,7 +3786,10 @@ class RWKVReader:
         return queries, [point_by_query[query] for query in queries]
 
     def discover_research_scope(
-        self, question: str, sources: list[SearchHit]
+        self,
+        question: str,
+        sources: list[SearchHit],
+        required_fields: list[str] | None = None,
     ) -> ResearchPlan:
         """Map each page concurrently, then organize only verified subjects."""
 
@@ -2757,9 +3818,11 @@ class RWKVReader:
             subjects: list[str] = []
             for item in payload.get("subjects") or []:
                 subject = " ".join(str(item).split()).strip()[:160]
-                titled = re.match(r"^(《[^》]{1,80}》)", subject)
-                if titled:
-                    subject = titled.group(1)
+                titled = re.findall(r"《[^》]{1,80}》", subject)
+                if len(titled) == 1:
+                    subject = titled[0]
+                elif len(titled) > 1:
+                    continue
                 subject_key = _normalized_text(subject)
                 if (
                     not subject_key
@@ -2815,8 +3878,9 @@ class RWKVReader:
                             "direct_title": _normalized_text(subject)
                             in _normalized_text(source.title),
                             "category_title": bool(
-                                re.search(r"二次元|二游", source.title)
+                                re.search(r"二次元(?:游戏|手游)|二游", source.title)
                             ),
+                            "quoted_in_material": f"《{needle}》" in material,
                             "context": material[start : start + 720],
                         }
                     )
@@ -2841,6 +3905,7 @@ class RWKVReader:
                     "source_rank": int(row["source_rank"]),
                     "direct_title_count": 0,
                     "category_title_count": 0,
+                    "quoted_source_count": 0,
                 },
             )
             if len(subject) < len(str(entry["subject"])):
@@ -2856,22 +3921,23 @@ class RWKVReader:
                 entry["category_title_count"] = int(
                     entry["category_title_count"]
                 ) + int(bool(row["category_title"]))
+                entry["quoted_source_count"] = int(
+                    entry["quoted_source_count"]
+                ) + int(bool(row["quoted_in_material"]))
             entry["source_rank"] = min(
                 int(entry["source_rank"]), int(row["source_rank"])
             )
         trusted_category_rows = [
             row
             for row in grouped.values()
-            if len(row["source_ids"]) >= 2 or int(row["category_title_count"]) >= 1
-        ]
-        credible_rows = [
-            row
-            for row in grouped.values()
             if int(row["direct_title_count"]) >= 1
-            or int(row["category_title_count"]) >= 1
+            or (
+                int(row["category_title_count"]) >= 1
+                and int(row["quoted_source_count"]) >= 1
+            )
         ]
         candidate_rows = sorted(
-            trusted_category_rows or credible_rows or grouped.values(),
+            trusted_category_rows,
             key=lambda row: (
                 -len(row["source_ids"]),
                 -int(row["direct_title_count"]),
@@ -2880,50 +3946,44 @@ class RWKVReader:
                 len(str(row["subject"])),
             ),
         )[:16]
-
-        candidates_json = json.dumps(candidate_rows, ensure_ascii=False)
-        user = f"""{candidates_json}
-
-问题：{question}
-从候选 subject 中原样选择最多 {self.settings.research_plan_max_queries} 个具体对象，为每个对象生成记录和检索词。保留问题中的字段，不新增对象。
-只输出 JSON：
-{{"decision":"search","scope_mode":"fixed","goal":"","records":[{{"subject":"","question":"","fields":[]}}],"queries":[],"clarification":""}}
-检索计划 JSON："""
-        output = self._complete(user, max_tokens=1024, stage="scope_discovery")
-        plan = _parse_research_plan_output(
-            output,
-            question,
-            self.settings.research_plan_max_queries,
-        )
-        canonical_subjects = {
-            _normalized_text(row["subject"]): row["subject"] for row in candidate_rows
-        }
-        records: list[ResearchRecord] = []
-        queries: list[str] = []
-        seen_subjects: set[str] = set()
-        for index, record in enumerate(plan.records):
-            key = _normalized_text(record.subject)
-            if key not in canonical_subjects or key in seen_subjects:
-                continue
-            seen_subjects.add(key)
-            record.subject = canonical_subjects[key]
-            records.append(record)
-            query = (
-                plan.queries[index]
-                if index < len(plan.queries)
-                else f"{record.subject} {record.question}"
-            )
-            queries.append(query)
-        if not records:
+        if not candidate_rows:
             raise SearchReaderError(
-                "scope_discovery", "RWKV found no material-backed subjects"
+                "scope_discovery", "no independently identified subjects"
             )
-        plan.decision = "search"
-        plan.scope_mode = "fixed"
-        plan.records = records
-        plan.queries = queries
-        plan.clarification = ""
-        return plan
+
+        # Candidate names have already been checked against source text and
+        # ranked by independent category pages. A second model serialization
+        # step can copy whole page excerpts into a query or return invalid
+        # JSON, so build the mechanical per-subject plan from these rows.
+        fields = [
+            field
+            for field in dict.fromkeys(required_fields or [question])
+            if _normalized_text(field)
+            not in {"名称", "名字", "游戏名称", "对象名称", "name"}
+        ][:8] or [question]
+        records = [
+            ResearchRecord(
+                subject=str(row["subject"]),
+                question=f"关于{row['subject']}：{question}"[:800],
+                fields=list(fields),
+            )
+            for row in candidate_rows[: self.settings.research_plan_max_queries]
+        ]
+        queries = []
+        for record in records:
+            query = f"{record.subject} {' '.join(record.fields)}"
+            if _recency_requested(question):
+                current_month = _today()[:7].replace("-", "年") + "月"
+                query = f"{query} {current_month} 最新 官方公告"
+            queries.append(query[:800])
+        return ResearchPlan(
+            decision="search",
+            scope_mode="fixed",
+            goal=question,
+            records=records,
+            queries=queries,
+            retrieval_points=[record.subject for record in records],
+        )
 
     @staticmethod
     def prior_facts(history: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -2960,10 +4020,27 @@ class RWKVReader:
             )
         )
         previous_question = str(history[-1].get("question") or "").strip()
+        if not subjects:
+            state = history[-1].get("state")
+            records = state.get("records") if isinstance(state, dict) else None
+            if isinstance(records, list):
+                subjects = list(
+                    dict.fromkeys(
+                        anchor
+                        for record in records
+                        if isinstance(record, dict)
+                        and (
+                            anchor := _context_subject_anchor(
+                                str(record.get("subject") or "")
+                            )
+                        )
+                    )
+                )[:8]
+        previous_anchor = _context_subject_anchor(previous_question)
         context = (
             f"此前对象：{'、'.join(subjects[:8])}"
             if subjects
-            else f"此前问题：{previous_question[:800]}"
+            else f"此前对象或问题：{previous_anchor or previous_question[:800]}"
         )
         user = f"""{context}
 当前消息：{question}
@@ -3085,12 +4162,23 @@ B：无关
 判断材料是否足以覆盖问题和记录中的字段。“当前/最新”必须有明确写着当前/最新的材料或版本列表；某一个发布页只能证明该版本存在。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。
 审核结果："""
         output = self._complete(user, max_tokens=192, stage="audit")
-        audit = _parse_audit_output(output, self.settings.review_max_queries)
-        missing_queries = [
-            f"{item.subject} {item.field} 官方资料"
-            for item in (field_selections or [])
-            if item.status != "supported"
-        ][: self.settings.review_max_queries]
+        try:
+            audit = _parse_audit_output(output, self.settings.review_max_queries)
+        except SearchReaderError:
+            repair = f"""请把下列材料审核结果整理成规定格式，不增加事实或猜测答案。
+问题：{question[:800]}
+已检索：{tried[:1200]}
+材料审核结果：{output[:1200]}
+证据不足时只输出最多 {self.settings.review_max_queries} 行 SEARCH: 检索词；明确足够时只输出 ENOUGH。不要解释。
+整理结果："""
+            repaired = self._complete(repair, max_tokens=192, stage="audit")
+            audit = _parse_audit_output(repaired, self.settings.review_max_queries)
+        missing_queries = _missing_field_queries(
+            question,
+            field_selections,
+            tried_queries,
+            self.settings.review_max_queries,
+        )
         freshness_queries = _freshness_review_queries(
             question,
             evidence,
@@ -3099,7 +4187,7 @@ B：无关
             self.settings.review_max_queries,
         )
         required_queries = list(
-            dict.fromkeys(missing_queries + freshness_queries)
+            dict.fromkeys(freshness_queries[:1] + missing_queries)
         )[: self.settings.review_max_queries]
         if required_queries:
             return EvidenceAudit(sufficient=False, queries=required_queries)
@@ -3124,12 +4212,13 @@ B：无关
         source_snippets = _field_source_snippets(
             record, field, source_material
         )
-        material = "\n".join(
-            item
-            for item in (evidence.title, source_snippets or evidence.claim)
-            if item.strip()
-        ).strip()
-        if re.search(r"日期|时间|上线|发布|上市", field):
+        # Generated summaries are not primary evidence for another extraction.
+        # Keep the actual page identity attached to its original text.
+        if not evidence.quote.strip():
+            return None
+        material = f"页面地址：{evidence.url}\n{source_snippets or source_material}"
+
+        if re.search(r"日期|时间|上线|发布|上市|\bdate\b|\btime\b", field, re.IGNORECASE):
             request = (
                 f"待查项是“{record.subject}：{record.question}”。"
                 f"复制明确写着字段“{field}”的完整原句。"
@@ -3149,7 +4238,7 @@ B：无关
             request = (
                 f"待查项是“{record.subject}：{record.question}”。"
                 f"复制字段“{field}”的值，只保留包含答案的最短原句。"
-                "没有则输出 NONE。"
+                "没有则输出 NONE。不要把转载站、教程站或镜像自称官方当成身份验证；注意对象和版本。"
             )
         continuation = (
             "代号："
@@ -3179,6 +4268,10 @@ B：无关
             titled = _version_title_fact(evidence.title)
             if titled:
                 fact = titled
+        if not _valid_field_value_shape(field, fact):
+            return None
+        if not _price_fact_bound_to_field(field, fact, source_material):
+            return None
         if not _copied_fact_supported(fact, material):
             return None
         unsupported = _unsupported_summary_bindings(fact, material)
@@ -3199,6 +4292,8 @@ B：无关
             title=evidence.title,
             published_date=evidence.published_date,
             lineage=_local_fact_lineage(field, fact, source_material),
+            url=evidence.url, quote=source_material[:1200],
+            source_relation=evidence.source_relation,
         )
 
     @staticmethod
@@ -3287,6 +4382,9 @@ B：无关
                 candidate.source_id,
                 {
                     "source": candidate.title,
+                    "url": candidate.url,
+                    "source_relation": candidate.source_relation,
+                    "original_excerpt": candidate.quote,
                     "published_date": candidate.published_date or "unknown",
                     "fields": {},
                 },
@@ -3328,7 +4426,7 @@ B：无关
 此前已确认：{prior_material}
 当前日期：{_today()}
 问题：{question}
-先确定“{record.subject}”的一条一致记录，再填写字段。主版本、代号、补丁和日期必须属于同一版本谱系；如果一个来源不完整，只能与主版本一致的来源互补。对于“当前/最新补丁”，在已生效且主版本相同的候选中选择版本号最高者。每个字段只使用该字段下的值，不交换字段。{temporal_rule}
+先确定“{record.subject}”的一条一致记录，再填写字段。核对实际页面地址与原文中的对象、版本和发布者，标题写“官方”不足以证明官方身份；不能确认来源身份或对应关系就输出空 fact。主版本、代号、补丁和日期必须属于同一版本谱系；如果一个来源不完整，只能与主版本一致的来源互补。对于“当前/最新补丁”，在已生效且主版本相同的候选中选择版本号最高者。每个字段只使用该字段下的值，不交换字段。{temporal_rule}
 只输出 JSON：{{"facts":[{{"field":"","fact":"","source_ids":[]}}]}}
 记录 JSON："""
         output = self._complete(user, max_tokens=768, stage="evidence_resolve")
@@ -3340,6 +4438,7 @@ B：无关
             )
 
         resolved: dict[str, list[FieldEvidenceSelection]] = {}
+        abstained: set[str] = set()
         field_lookup = {_normalized_text(field): field for field in record.fields}
         for raw in raw_facts:
             if not isinstance(raw, dict):
@@ -3351,6 +4450,10 @@ B：无关
             allowed = {candidate.source_id: candidate for candidate in candidates}
             fact = " ".join(str(raw.get("fact") or "").split()).strip()[:500]
             if not fact:
+                abstained.add(field)
+                resolved.setdefault(field, []).append(FieldEvidenceSelection(
+                    subject=record.subject, field=field, source_id="",
+                    status="missing", fact="候选材料不足以确认字段及其归属。"))
                 continue
             source_ids = list(
                 dict.fromkeys(
@@ -3440,7 +4543,8 @@ B：无关
             question,
             record,
             selections,
-            candidates_by_field,
+            {field: rows for field, rows in candidates_by_field.items()
+             if field not in abstained},
         )
 
     @staticmethod
@@ -3640,6 +4744,9 @@ B：无关
                         [candidate.source_id],
                         {
                             "source": candidate.title,
+                            "url": candidate.url,
+                            "source_relation": candidate.source_relation,
+                            "original_excerpt": candidate.quote,
                             "fact": candidate.fact,
                         },
                     ],
@@ -3682,7 +4789,8 @@ B：无关
                     raw_source_ids = first.get("source_ids") or []
             fact = " ".join(str(raw_fact).split()).strip()[:500]
             if not fact:
-                return fallback
+                return FieldEvidenceSelection(subject=record.subject, field=field,
+                    source_id="", status="missing", fact="候选材料不足以确认字段及其归属。")
             allowed = {candidate.source_id: candidate for candidate in candidates}
             source_ids = list(
                 dict.fromkeys(
@@ -3760,30 +4868,92 @@ B：无关
 
         if not _field_binding_applicable(question, records):
             return [], []
+        if _station_list_records(records, question):
+            selections, warnings = _select_station_route_evidence(
+                question, records, evidence
+            )
+            if on_progress:
+                for index, selection in enumerate(selections, start=1):
+                    on_progress(
+                        "evidence_field_selected",
+                        {
+                            "completed": index,
+                            "total": len(selections),
+                            "subject": selection.subject,
+                            "field": selection.field,
+                            "source_id": selection.source_id,
+                            "source_ids": selection.source_ids,
+                            "status": selection.status,
+                            "fact_preview": selection.fact[:180],
+                        },
+                    )
+            return selections, warnings
         useful = [item for item in evidence if not _is_irrelevant_summary(item.claim)]
         useful = useful or evidence
         extracted: dict[tuple[int, str], list[_FieldFactCandidate]] = {}
+        direct_prices: dict[tuple[int, str], list[_FieldFactCandidate]] = {}
         field_tasks: list[tuple[int, ResearchRecord, str, Evidence, float]] = []
+        subject_aliases = [
+            [_normalized_text(alias) for alias in _subject_aliases(record.subject)]
+            for record in records
+        ]
+        multiple_subjects = len({
+            _normalized_text(record.subject) for record in records
+        }) > 1
+
+        def matched_records(value: str) -> set[int]:
+            key = _normalized_text(value)
+            return {
+                index
+                for index, aliases in enumerate(subject_aliases)
+                if any(alias in key for alias in aliases)
+            }
+
         for record_index, record in enumerate(records):
-            alias_keys = [
-                _normalized_text(alias) for alias in _subject_aliases(record.subject)
-            ]
-            related = [
-                item
+            related_ids = {
+                item.source_id
                 for item in useful
-                if any(
-                    alias in _normalized_text(f"{item.title} {item.quote}")
-                    for alias in alias_keys
-                )
-            ]
-            related = related or useful
+                if record_index in matched_records(f"{item.title} {item.quote}")
+            }
+            if multiple_subjects:
+                related = []
+                for item in useful:
+                    # A page title identifies its object first. For a generic
+                    # title, use the branch that retrieved it. Only use page
+                    # text when neither carries an object identity.
+                    title_matches = matched_records(item.title)
+                    branch_matches = matched_records(
+                        f"{item.retrieval_point} {item.retrieval_query}"
+                    )
+                    matches = title_matches or branch_matches or matched_records(
+                        item.quote
+                    )
+                    if record_index in matches:
+                        related.append(item)
+            else:
+                # One-object questions may use a publisher's generic title.
+                related = useful
             for field in record.fields:
+                if re.search(r"发行价|开盘价|收盘价", field):
+                    direct = [
+                        candidate
+                        for item in related
+                        for candidate in _structured_price_candidates(
+                            record,
+                            field,
+                            item,
+                            _source_relevance(f"{record.subject} {field}", item),
+                        )
+                    ]
+                    if direct:
+                        direct_prices[(record_index, field)] = direct
                 ranked = sorted(
                     related,
                     key=lambda item: (
                         _normalized_text(field)
                         in _normalized_text(item.retrieval_point),
                         _source_relevance(f"{record.subject} {field}", item),
+                        item.source_id in related_ids,
                     ),
                     reverse=True,
                 )[:10]
@@ -3912,10 +5082,50 @@ B：无关
                         },
                     )
 
+        selections: list[FieldEvidenceSelection] = []
+        for record_index, record in enumerate(records):
+            for selection in selections_by_record.get(record_index, []):
+                direct = direct_prices.get((record_index, selection.field), [])
+                if selection.status != "supported" and direct:
+                    selection = self._fallback_field_selection(
+                        record, selection.field, direct
+                    )
+                elif selection.status == "supported" and direct:
+                    signature = _field_fact_signature(selection.field, selection.fact)
+                    agreeing = sorted(
+                        (
+                            candidate for candidate in direct
+                            if _field_fact_signature(selection.field, candidate.fact)
+                            == signature
+                        ),
+                        key=lambda candidate: candidate.relevance,
+                        reverse=True,
+                    )
+                    source_ids = list(dict.fromkeys([
+                        *_selection_source_ids(selection),
+                        *(candidate.source_id for candidate in agreeing),
+                    ]))[:5]
+                    if source_ids != _selection_source_ids(selection):
+                        selection = FieldEvidenceSelection(
+                            subject=selection.subject,
+                            field=selection.field,
+                            source_id=selection.source_id,
+                            status=selection.status,
+                            fact=selection.fact,
+                            source_ids=source_ids,
+                        )
+                selections.append(selection)
         selections = [
-            selection
-            for record_index in range(len(records))
-            for selection in selections_by_record.get(record_index, [])
+            FieldEvidenceSelection(
+                subject=item.subject,
+                field=item.field,
+                source_id="",
+                status="missing",
+                fact="候选材料未给出可用的字段值。",
+            )
+            if item.status == "supported" and not _valid_field_value_shape(item.field, item.fact)
+            else item
+            for item in selections
         ]
         for completed, selection in enumerate(selections, start=1):
             if on_progress:
@@ -3961,7 +5171,15 @@ B：无关
                 if point
                 else "总结以上网页内容。"
             )
-            user = f"""{material}
+            if _recency_requested(question) and re.search(r"新闻|动态|热点|大事", question):
+                instruction += (
+                    "只总结网页主标题对应的事件；新闻合集仅保留明确属于用户时间范围的独立条目。"
+                    "忽略导航、侧栏、相关推荐和其他文章标题，不能把它们当作本页发生的事件。"
+                )
+            user = f"""网页标题：{chunk.title}
+网页地址：{chunk.url}
+网页材料：
+{material}
 
 {instruction}只复述同一条记录明确对应的值，不把不同表格行、版本或对象的信息拼在一起；网页有表格时保留相关的完整行。
 网页摘要："""
@@ -3969,6 +5187,8 @@ B：无关
             user,
             max_tokens=self.settings.rwkv_summary_max_tokens,
             stage="summarize",
+            observation={"task_title": f"阅读 {chunk.source_id} · {chunk.title}",
+                         "source_id": chunk.source_id, "source_url": chunk.url},
         )
         summary = _parse_source_summary(output)
         if not summary:
@@ -4752,9 +5972,82 @@ B：无关
         evidence_sufficient: bool | None = None,
         evidence_selections: list[FieldEvidenceSelection] | None = None,
         representative_scope: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> tuple[str, list[str]]:
         if not evidence:
             raise SearchReaderError("read", "there are no source summaries to combine")
+        station_answer = _deterministic_station_answer(
+            question, research_records, evidence_selections, evidence
+        )
+        if station_answer is not None:
+            if on_progress:
+                on_progress(
+                    "finalizing",
+                    {
+                        "source_count": len(evidence),
+                        "group_count": 0,
+                        "message": "正在按一致的官方原始站点表生成答案",
+                    },
+                )
+            return station_answer
+        next_release_answer = _deterministic_next_release_answer(
+            question, evidence_selections
+        )
+        if next_release_answer is not None:
+            if on_progress:
+                on_progress(
+                    "finalizing",
+                    {
+                        "source_count": len(evidence),
+                        "group_count": 0,
+                        "message": "检索材料未确认未来版本日期，停止使用旧版本信息作答",
+                    },
+                )
+            return next_release_answer, [
+                "next-release details withheld because no future update date was verified"
+            ]
+        if (
+            evidence_sufficient is not None
+            and evidence_selections
+            and any(item.status != "supported" for item in evidence_selections)
+        ):
+            if on_progress:
+                on_progress(
+                    "finalizing",
+                    {
+                        "source_count": len(evidence),
+                        "group_count": 0,
+                        "message": "部分字段未核实，按已绑定来源列出事实与缺口",
+                    },
+                )
+            return _atomic_fallback_answer(evidence_selections), [
+                "answer limited to verified atomic fields because field evidence is incomplete"
+            ]
+        if (
+            evidence_sufficient is not None
+            and evidence_selections
+            and _field_binding_applicable(question, research_records)
+            and all(
+                re.search(
+                    r"日期|时间|发行价|开盘价|收盘价|\bdate\b|\btime\b|\bprice\b",
+                    item.field,
+                    re.IGNORECASE,
+                )
+                for item in evidence_selections
+            )
+        ):
+            if on_progress:
+                on_progress(
+                    "finalizing",
+                    {
+                        "source_count": len(evidence),
+                        "group_count": 0,
+                        "message": "按逐字段来源生成答案",
+                    },
+                )
+            return _atomic_fallback_answer(evidence_selections), [
+                "answer rendered from verified atomic fields"
+            ]
         eligible = _eligible_evidence(question, evidence)
         document_only = all(item.url.startswith("document://") for item in eligible)
         ordered = (
@@ -4866,6 +6159,7 @@ B：无关
             if _field_binding_applicable(question, research_records or [])
             else []
         )
+        verified_material = ""
         if verified_rows:
             verified_budget = max(1000, self.settings.rwkv_final_material_chars // 2)
             bounded_verified: list[str] = []
@@ -4888,29 +6182,53 @@ B：无关
         all_fields_verified = bool(evidence_selections) and all(
             item.status == "supported" for item in evidence_selections
         )
-        if (
-            evidence_sufficient is True
-            and all_fields_verified
-            and verified_material
-            and not document_only
-        ):
-            answer_material = verified_material
+        # “supported” means a candidate value has textual support; it does not
+        # certify publisher identity, version attribution, or resolve conflicts.
+        # Never discard the independently reduced material in its favour.
         verified_instruction = (
-            "末尾的对象字段二元组已经逐来源核对，出现冲突时采用二元组中的值。"
-            if verified_rows
+            "末尾对象字段记录是候选提取，不代表官方身份或版本归属已核实。"
+            "与原文或其他来源冲突时重新核对；不能确认就说明不足，不强行采用候选。"
+            if verified_rows else ""
+        )
+        example_instruction = (
+            "代码或配置示例必须保持来源中的语法和层级缩进；"
+            "示例使用的命令须能在所选镜像或环境中执行。"
+            "解释时使用示例中的实际字段名，按单位准确换算时长。"
+            "不能从材料确认的默认值不要写成确定事实。"
+            if re.search(r"示例|例子|代码|配置|example|sample|code|config", question, re.IGNORECASE)
             else ""
         )
+        identity_header = "来源身份索引（unclear 表示未核实，网页自称官方不算核实）：\n"
+        identity_budget = max(0, self.settings.rwkv_final_material_chars // 2 - len(identity_header))
+        identity_rows = []
+        identity_chars = 0
+        for item in ordered:
+            row = json.dumps({"id": item.source_id, "url": item.url,
+                              "title": item.title[:160],
+                              "source_relation": item.source_relation}, ensure_ascii=False)
+            if identity_chars + len(row) + 1 > identity_budget:
+                reduction_warnings.append("source identity index limited by final material budget")
+                continue
+            identity_rows.append(row)
+            identity_chars += len(row) + 1
+        user_source_index = identity_header + "\n".join(identity_rows)
+        base_budget = max(0, self.settings.rwkv_final_material_chars - len(user_source_index) - 2)
+        answer_material = answer_material[:base_budget].rstrip()
         if document_only:
             user = f"""{answer_material}
 
+{user_source_index}
+
 问题：{answer_question}
-根据以上文档材料直接回答。覆盖问题的每个问项，合并重复内容，不混用不同文档的事实；不补充材料没有的信息。每个独立事实保留一个最直接的 [S1] 来源编号。
+根据以上文档材料直接回答。覆盖问题的每个问项，合并重复内容，不混用不同文档的事实；不补充材料没有的信息。{example_instruction}每个独立事实保留一个最直接的 [S1] 来源编号。
 最终回答："""
         else:
             user = f"""{answer_material}
 
+{user_source_index}
+
 问题：{answer_question}
-根据以上材料直接回答。{verified_instruction}覆盖每个问项，合并重复，只使用材料已有事实；每个事实保留一个最直接的 [S1] 来源编号。材料没有的信息就说明。{final_point_scope}{scope_note}
+根据以上材料直接回答。{verified_instruction}{example_instruction}覆盖每个问项，合并重复，只使用材料已有事实；核对来源实际地址、对象及版本，第三方页面不能称为该项目官方原文，无法确认则说明。每个事实保留一个最直接的 [S1] 来源编号。材料没有的信息就说明。{final_point_scope}{scope_note}
 最终回答："""
         if on_progress:
             on_progress(
@@ -4922,6 +6240,40 @@ B：无关
             if document_only and len(ordered) <= 30
             else self.settings.rwkv_max_tokens
         )
+        if on_delta is not None:
+            # Evidence reduction/auditing happens before any public text. Streaming
+            # output is append-only; failed validation fails the job, never rewrites it.
+            if self.output_locale:
+                user += f"\n\n回答语言要求：使用 {self.output_locale} 回答正文。"
+            user += "\n只输出答案正文，不输出思考过程、材料或提示词。区分计划日期和实际发生日期，来源冲突时优先采用直接官方记录，不能确认时说明不确定。"
+            call_id = self._next_call_id()
+            stream_started = time.perf_counter()
+            client = self._client("finalize")
+            parts = []
+            try:
+                for delta in client.stream_answer(user=user, max_tokens=requested_tokens,
+                        temperature=self.settings.rwkv_temperature, stage="finalize",
+                        protocol=self.settings.final_protocol):
+                    parts.append(delta)
+                    on_delta(delta)
+            finally:
+                client.session.close()
+            answer = "".join(parts)
+            self._record_call({"call_id": call_id, "stage": "finalize", "status": "ok",
+                "model": self.settings.final_model, "base_url": self.settings.final_base_url,
+                "protocol": self.settings.final_protocol, "stream": True,
+                "elapsed_ms": round((time.perf_counter() - stream_started) * 1000, 1),
+                "max_tokens": requested_tokens, "input": user, "output": answer})
+            if not answer.strip() or _contains_prompt_leakage(answer):
+                raise SearchReaderError("finalize", "streamed answer failed content validation")
+            validation_material = _final_validation_material(
+                f"{answer_material}\n当前日期：{_today()}", answer_question)
+            if _unsupported_summary_bindings(answer, validation_material):
+                raise SearchReaderError("finalize", "streamed answer introduced unsupported facts")
+            if any("unknown source" in warning for warning in citation_warnings(answer, ordered)):
+                raise SearchReaderError("finalize", "streamed answer referenced an unknown source")
+            return answer, reduction_warnings
+
         output_tokens = requested_tokens
         for attempt in range(4):
             try:
@@ -4946,6 +6298,8 @@ B：无关
         if _contains_prompt_leakage(answer):
             retry_user = f"""{answer_material}
 
+{user_source_index}
+
 问题：{answer_question}
 只给出答案，不复述材料和要求。合并重复，保留事实后的 [S1]。
 回答："""
@@ -4961,6 +6315,31 @@ B：无关
             answer = retried
             reduction_warnings.append(
                 "final answer was regenerated after copying prompt instructions"
+            )
+        for _attempt in range(2):
+            yaml_errors = _yaml_example_errors(answer, question)
+            if not yaml_errors:
+                break
+            repair_user = f"""{answer_material}
+
+{user_source_index}
+
+问题：{answer_question}
+待修正回答：{answer}
+格式问题：{'；'.join(yaml_errors)}
+只修正示例的 YAML 语法及层级结构，保留已有证据支持的事实与引用；不要补充材料没有的默认值或命令。输出完整回答。
+最终回答："""
+            answer = _clean_final_answer(
+                self._complete(
+                    repair_user,
+                    max_tokens=output_tokens,
+                    stage="finalize",
+                )
+            )
+            reduction_warnings.append("invalid YAML example was regenerated")
+        if (yaml_errors := _yaml_example_errors(answer, question)):
+            raise SearchReaderError(
+                "read", "RWKV returned invalid YAML example: " + "; ".join(yaml_errors)
             )
         validation_material = _final_validation_material(
             f"{answer_material}\n当前日期：{_today()}", answer_question
@@ -5059,6 +6438,8 @@ B：无关
         if remaining_unsupported:
             recovery_user = f"""{answer_material}
 
+{user_source_index}
+
 问题：{answer_question}
 独立重新回答问题，不参考此前生成内容。完整覆盖每个问项，只使用以上材料中的事实与数字，合并重复内容，并保留事实后的 [S1] 来源编号；不要解释修改过程。
 最终回答："""
@@ -5110,6 +6491,10 @@ B：无关
         if evidence_selections:
             answer = _bind_atomic_citations(answer, evidence_selections)
             answer = _coalesce_adjacent_identical_citations(answer)
+        if (yaml_errors := _yaml_example_errors(answer, question)):
+            raise SearchReaderError(
+                "read", "RWKV final corrections broke YAML example: " + "; ".join(yaml_errors)
+            )
         return answer, reduction_warnings
 
 

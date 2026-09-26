@@ -1,0 +1,42 @@
+{"id": "True-1", "messages": [{"role": "user", "content": "明天的天气如何？"}], "expected": true}
+{"id": "True-2", "messages": [{"role": "user", "content": "后天上海会下雨吗？"}], "expected": true}
+{"id": "True-3", "messages": [{"role": "user", "content": "周末去杭州，需要带伞吗？"}], "expected": true}
+{"id": "True-4", "messages": [{"role": "user", "content": "今天北京天气如何？"}], "expected": true}
+{"id": "True-5", "messages": [{"role": "user", "content": "这周深圳适合晒被子吗？"}], "expected": true}
+{"id": "True-6", "messages": [{"role": "user", "content": "现在美元兑人民币多少？"}], "expected": true}
+{"id": "True-7", "messages": [{"role": "user", "content": "帮我搜一下 RWKV 最新版本。"}], "expected": true}
+{"id": "True-8", "messages": [{"role": "user", "content": "Python 最新版本是什么？"}], "expected": true}
+{"id": "True-9", "messages": [{"role": "user", "content": "请核实 Python 3.13.0 的正式发布日期并给出来源。"}], "expected": true}
+{"id": "True-10", "messages": [{"role": "user", "content": "最近有什么人工智能新闻？"}], "expected": true}
+{"id": "True-11", "messages": [{"role": "user", "content": "明天北京到上海的高铁还有票吗？"}], "expected": true}
+{"id": "True-12", "messages": [{"role": "user", "content": "苹果今天的股价是多少？"}], "expected": true}
+{"id": "True-13", "messages": [{"role": "user", "content": "访问 https://www.python.org 并告诉我最新公告。"}], "expected": true}
+{"id": "True-14", "messages": [{"role": "user", "content": "请联网查证地球到月球的平均距离。"}], "expected": true}
+{"id": "True-15", "messages": [{"role": "user", "content": "这家店现在还营业吗？"}], "expected": true}
+{"id": "True-16", "messages": [{"role": "user", "content": "上海明天的空气质量怎么样？"}], "expected": true}
+{"id": "True-17", "messages": [{"role": "user", "content": "今天湖人比赛赢了吗？"}], "expected": true}
+{"id": "True-18", "messages": [{"role": "user", "content": "现在可以买到哪几款 RTX 5090？"}], "expected": true}
+{"id": "True-19", "messages": [{"role": "user", "content": "搜索三篇关于 RWKV 的论文并给出链接。"}], "expected": true}
+{"id": "True-20", "messages": [{"role": "user", "content": "下周一成都最高气温是多少？"}], "expected": true}
+{"id": "False-1", "messages": [{"role": "user", "content": "你好"}], "expected": false}
+{"id": "False-2", "messages": [{"role": "user", "content": "你能做什么？"}], "expected": false}
+{"id": "False-3", "messages": [{"role": "user", "content": "谢谢啦，下次再聊。"}], "expected": false}
+{"id": "False-4", "messages": [{"role": "user", "content": "什么是二分查找？"}], "expected": false}
+{"id": "False-5", "messages": [{"role": "user", "content": "解释一下递归。"}], "expected": false}
+{"id": "False-6", "messages": [{"role": "user", "content": "计算 23 乘以 47。"}], "expected": false}
+{"id": "False-7", "messages": [{"role": "user", "content": "写一首描写春天的诗。"}], "expected": false}
+{"id": "False-8", "messages": [{"role": "user", "content": "帮我写一个 Python 列表去重函数。"}], "expected": false}
+{"id": "False-9", "messages": [{"role": "user", "content": "把“明天的天气如何？”翻译成英语。"}], "expected": false}
+{"id": "False-10", "messages": [{"role": "user", "content": "润色这句话：明天天气很好，我们一起出去玩。"}], "expected": false}
+{"id": "False-11", "messages": [{"role": "user", "content": "总结这段文字：昨天晴，今天雨，明天我们休息。"}], "expected": false}
+{"id": "False-12", "messages": [{"role": "user", "content": "不要联网，解释一下什么是 HTTP。"}], "expected": false}
+{"id": "False-13", "messages": [{"role": "user", "content": "搜索引擎是什么原理？"}], "expected": false}
+{"id": "False-14", "messages": [{"role": "user", "content": "给出一个包含 https://example.com 的正则表达式示例。"}], "expected": false}
+{"id": "False-15", "messages": [{"role": "user", "content": "编一个明天下雨的故事。"}], "expected": false}
+{"id": "False-16", "messages": [{"role": "user", "content": "请把下面 JSON 格式化：{\"weather\":\"rain\"}。"}], "expected": false}
+{"id": "False-17", "messages": [{"role": "user", "content": "怎么理解牛顿第二定律？"}], "expected": false}
+{"id": "False-18", "messages": [{"role": "user", "content": "帮我写一封请假邮件。"}], "expected": false}
+{"id": "False-19", "messages": [{"role": "user", "content": "下雨是怎么形成的？"}], "expected": false}
+{"id": "False-20", "messages": [{"role": "user", "content": "我已经提供天气：明天小雨，12度。帮我写一句穿衣提醒。"}], "expected": false}
+{"id": "history-weather", "messages": [{"role": "user", "content": "北京今天的天气怎么样？"}, {"role": "assistant", "content": "今天晴。"}, {"role": "user", "content": "明天呢？"}], "expected": true}
+{"id": "history-translation", "messages": [{"role": "user", "content": "把我接下来发的话翻译成英文，不需要查询。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "明天的天气如何？"}], "expected": false}

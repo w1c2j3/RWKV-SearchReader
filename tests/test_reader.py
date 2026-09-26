@@ -19,6 +19,7 @@ from rwkv_search_reader.models import (
 from rwkv_search_reader.reader import (
     RWKVReader,
     _attach_missing_citations,
+    _atomic_fallback_answer,
     _bind_atomic_citations,
     _bind_retrieval_point_citations,
     _bind_subject_citations,
@@ -33,24 +34,32 @@ from rwkv_search_reader.reader import (
     _field_binding_applicable,
     _field_qualifier_supported,
     _field_source_snippets,
+    _freshness_review_queries,
     _final_evidence_order,
     _final_validation_material,
     _is_explicit_benefit_fact,
     _latest_effective_material_timestamp,
     _MaterialNode,
     _merge_duplicate_atomic_fields,
+    _missing_field_queries,
     _narrow_selected_fact,
     _parse_audit_output,
     _parse_research_plan_output,
     _parse_source_summary,
+    _price_fact_bound_to_field,
+    _preserve_news_window,
     _relevant_markdown_tables,
     _remove_copied_temporal_qualifiers,
     _requested_date_difference_material,
+    _structured_field_candidates,
+    _structured_price_candidates,
     _unsupported_summary_bindings,
     _unsupported_summary_numbers,
     _valid_discovered_subject,
+    _valid_field_value_shape,
     _verified_source_relation,
     _without_foreign_points,
+    _yaml_example_errors,
     citation_warnings,
 )
 
@@ -70,6 +79,31 @@ def _evidence(count: int = 1) -> list[Evidence]:
 
 def test_citation_audit_accepts_known_sources() -> None:
     assert citation_warnings("Answer [S1][S2]", _evidence(2)) == []
+
+
+def test_source_ranking_uses_original_page_text_instead_of_model_claim() -> None:
+    from rwkv_search_reader.reader import _source_relevance
+
+    unrelated = Evidence(
+        "S1",
+        "道具位置攻略",
+        "https://example.com/guide",
+        "版本更新公告有核心玩法调整。",
+        "这篇攻略只列出道具位置。",
+        score=0.95,
+    )
+    announcement = Evidence(
+        "S2",
+        "版本更新公告",
+        "https://example.com/news",
+        "版本更新公告有核心玩法调整。",
+        "版本更新公告列出了核心玩法调整。",
+        score=0.4,
+    )
+
+    assert _source_relevance("版本更新 核心玩法调整", announcement) > (
+        _source_relevance("版本更新 核心玩法调整", unrelated)
+    )
 
 
 def test_relevant_document_table_survives_a_lossy_model_summary() -> None:
@@ -139,6 +173,33 @@ def test_research_plan_parser_supports_material_scope_discovery() -> None:
     assert plan.queries == ["对象范围", "当前版本", "版本主题", "当前卡池"]
 
 
+def test_single_quoted_title_is_the_atomic_record_subject() -> None:
+    plan = _parse_research_plan_output(
+        '{"decision":"search","scope_mode":"fixed","records":['
+        '{"subject":"游戏更新内容","question":"当前版本变化",'
+        '"fields":["版本号","更新日期"]}],"queries":[]}',
+        "《样例产品》当前版本有哪些变化？",
+        4,
+    )
+
+    assert [record.subject for record in plan.records] == ["《样例产品》"]
+
+
+def test_multiple_fields_for_one_quoted_title_share_its_subject() -> None:
+    plan = _parse_research_plan_output(
+        '{"decision":"search","scope_mode":"fixed","records":['
+        '{"subject":"样例产品下次更新时间","fields":["update_time"]},'
+        '{"subject":"样例产品下次主题","fields":["theme"]}],"queries":[]}',
+        "关于《样例产品》，下一个版本什么时候更新，主题是什么？",
+        4,
+    )
+
+    assert [record.subject for record in plan.records] == [
+        "《样例产品》",
+        "《样例产品》",
+    ]
+
+
 def test_collapsed_collection_gets_a_separate_rwkv_search_design_call() -> None:
     reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
     calls = []
@@ -168,15 +229,54 @@ def test_collapsed_collection_gets_a_separate_rwkv_search_design_call() -> None:
     assert [kwargs["stage"] for _, kwargs in calls] == ["plan", "search_design"]
     assert plan.scope_mode == "discover"
     assert plan.records == []
-    assert len(plan.queries) == 4
+    assert len(plan.queries) == 1
     assert "运营游戏列表" in plan.queries[0]
-    assert "卡池" in plan.queries[2]
-    assert plan.retrieval_points == [
-        "米哈游游戏范围",
-        "当前版本主题",
-        "当前卡池",
-        "可获得抽数",
-    ]
+    assert plan.discovery_fields == ["版本", "主题", "卡池", "抽数"]
+    assert plan.retrieval_points == ["候选对象范围"]
+
+
+def test_search_design_accepts_a_bare_list_of_point_query_pairs() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: (
+        '>[["游戏范围","二次元游戏代表作品列表"],'
+        '["版本公告","二次元游戏最新版本公告"]]'
+    )
+
+    queries, points = reader.design_search_points(
+        "主要二次元游戏各自是什么版本？"
+    )
+
+    assert points == ["游戏范围", "版本公告"]
+    assert all("二次元游戏" in query for query in queries)
+
+
+def test_each_game_collection_is_discovered_even_if_planner_mistakes_date_for_subject():
+    reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
+    calls = []
+
+    def complete(user, **kwargs):
+        calls.append(kwargs["stage"])
+        if kwargs["stage"] == "plan":
+            return (
+                '{"decision":"search","scope_mode":"fixed","records":['
+                '{"subject":"当前日期：2026-09-25",'
+                '"question":"现在主要二次元游戏各自是什么版本？每个版本的主题是什么？",'
+                '"fields":["游戏名称","版本号","版本主题"]}],"urls":[]}'
+            )
+        return (
+            '{"points":[["二次元游戏版本","二次元游戏当前版本和版本主题"]]}'
+        )
+
+    reader._complete = complete
+    plan = reader.plan_research(
+        "现在主要二次元游戏各自是什么版本？每个版本的主题是什么？"
+    )
+
+    assert plan.scope_mode == "discover"
+    assert plan.records == []
+    assert calls == ["plan", "search_design"]
+    assert all("2026-09-25" not in query for query in plan.queries)
+    assert all("二次元游戏" in query for query in plan.queries)
 
 
 def test_model_expanded_collection_keeps_queries_but_uses_funnel_path() -> None:
@@ -212,6 +312,9 @@ def test_game_scope_rejects_events_and_field_values_as_subjects() -> None:
     assert not _valid_discovered_subject(question, "2026动漫游戏节")
     assert not _valid_discovered_subject(question, "夏日版本")
     assert not _valid_discovered_subject(question, "周年庆活动")
+    assert not _valid_discovered_subject(question, "新产品")
+    assert not _valid_discovered_subject(question, "头部产品")
+    assert not _valid_discovered_subject(question, "老牌垂直二游厂商")
 
 
 def test_research_plan_parser_requires_a_real_clarification_question() -> None:
@@ -304,10 +407,12 @@ def test_planner_designs_queries_in_a_separate_second_call() -> None:
     assert calls[1][1].index('"subject": "Node.js"') < calls[1][1].index(
         "问题：Node.js"
     )
+    current = time.localtime()
+    suffix = f"{current.tm_year}年{current.tm_mon:02d}月 最新 官方公告"
     assert plan.queries == [
-        "Node.js LTS 主版本",
-        "Node.js LTS 代号",
-        "Node.js LTS 最新补丁版本",
+        f"Node.js LTS 主版本 {suffix}",
+        f"Node.js LTS 代号 {suffix}",
+        f"Node.js LTS 最新补丁版本 {suffix}",
     ]
     assert plan.retrieval_points == ["LTS 主版本", "代号", "最新补丁版本"]
 
@@ -432,9 +537,9 @@ def test_scope_discovery_uses_first_pass_material_for_concrete_records() -> None
             return '{"subjects":["原神"]}'
         return (
             '{"decision":"search","scope_mode":"fixed","goal":"逐个回答",'
-            '"records":[{"subject":"原神","question":"当前版本和主题",'
-            '"fields":["版本","主题"]}],'
-            '"queries":["原神 当前版本 主题"],"clarification":""}'
+            '"records":[{"subject":"原神","question":"不相关的活动",'
+            '"fields":["活动"]}],'
+            '"queries":["原神 不相关的活动"],"clarification":""}'
         )
 
     reader._complete = complete
@@ -448,22 +553,291 @@ def test_scope_discovery_uses_first_pass_material_for_concrete_records() -> None
                 content="原神发布了新版本及其主题活动。",
             )
         ],
+        required_fields=["版本", "主题"],
     )
 
     candidate_prompt, candidate_kwargs = captured["calls"][0]
-    organizer_prompt, organizer_kwargs = captured["calls"][1]
     assert candidate_prompt.index("原神发布了新版本") < candidate_prompt.index(
         "UNIQUE DISCOVERY QUESTION"
     )
     assert candidate_kwargs["stage"] == "scope_candidate"
-    assert organizer_prompt.index("原神") < organizer_prompt.index(
-        "UNIQUE DISCOVERY QUESTION"
-    )
-    assert organizer_kwargs["stage"] == "scope_discovery"
+    assert len(captured["calls"]) == 1
     assert plan.scope_mode == "fixed"
     assert [record.subject for record in plan.records] == ["原神"]
     assert plan.records[0].fields == ["版本", "主题"]
-    assert plan.queries == ["原神 当前版本 主题"]
+    assert len(plan.queries) == 1
+    assert plan.queries[0].startswith("原神 版本 主题")
+    assert "最新 官方公告" in plan.queries[0]
+    assert "UNIQUE DISCOVERY QUESTION" in plan.records[0].question
+
+
+def test_scope_discovery_rejects_an_event_seen_only_in_unrelated_pages() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: '{"subjects":["转盘抽奖"]}'
+
+    with pytest.raises(SearchReaderError, match="independently identified"):
+        reader.discover_research_scope(
+            "主要二次元游戏各自是什么版本？",
+            [
+                SearchHit(
+                    "动漫乐园节庆活动",
+                    "https://example.com/festival",
+                    source_id="S1",
+                    content="乐园今天举行转盘抽奖活动。",
+                )
+            ],
+        )
+
+
+def test_scope_discovery_normalizes_a_publisher_prefixed_title() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: (
+        '{"subjects":["新产品","库洛《鸣潮》"]}'
+    )
+
+    plan = reader.discover_research_scope(
+        "主要二次元游戏各自的当前版本是什么？",
+        [SearchHit(
+            "二次元游戏市场与版本观察",
+            "https://example.com/market",
+            source_id="S1",
+            content="新产品陆续发布，库洛《鸣潮》继续更新。",
+        )],
+        required_fields=["游戏名称", "当前版本号", "版本主题"],
+    )
+
+    assert [record.subject for record in plan.records] == ["《鸣潮》"]
+
+
+def test_multi_subject_field_extraction_keeps_source_identity() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    records = [
+        ResearchRecord("原神", "当前版本主题", ["版本主题"]),
+        ResearchRecord("崩坏：星穹铁道", "当前版本主题", ["版本主题"]),
+    ]
+    shared_quote = "页面同时提到原神和崩坏：星穹铁道。"
+    evidence = [
+        Evidence("S1", "原神版本公告", "https://example.com/a", "资料", shared_quote),
+        Evidence("S2", "崩坏：星穹铁道版本公告", "https://example.com/b", "资料", shared_quote),
+        Evidence("S3", "最新版本公告", "https://example.com/c", "资料", shared_quote,
+                 retrieval_query="原神 当前版本主题"),
+        Evidence("S4", "最新版本公告", "https://example.com/d", "资料", shared_quote,
+                 retrieval_query="崩坏：星穹铁道 当前版本主题"),
+    ]
+    checked = []
+
+    def extract(record, field, item, relevance):
+        checked.append((record.subject, item.source_id))
+        return None
+
+    reader._extract_one_field = extract
+    reader._resolve_record_fields_together = lambda question, record, *_args: [
+        FieldEvidenceSelection(record.subject, "版本主题", "", "missing")
+    ]
+
+    reader.select_evidence("原神和崩坏：星穹铁道各自的版本主题是什么？", records, evidence)
+
+    assert set(checked) == {
+        ("原神", "S1"),
+        ("原神", "S3"),
+        ("崩坏：星穹铁道", "S2"),
+        ("崩坏：星穹铁道", "S4"),
+    }
+
+
+def test_online_release_title_supplies_version_and_name_without_model_guess() -> None:
+    record = ResearchRecord("《样例产品》", "《样例产品》当前版本和版本主题", ["当前版本号", "版本主题"])
+    evidence = Evidence(
+        "S1",
+        "《样例产品》官网：1.3全新版本「山海之约」现已上线",
+        "https://example.com/release",
+        "页面摘要",
+        "页面原文",
+    )
+
+    version = _structured_field_candidates(record, "当前版本号", evidence, 1.0)
+    theme = _structured_field_candidates(record, "版本主题", evidence, 1.0)
+
+    assert [(item.fact, item.source_id) for item in version] == [("1.3版本", "S1")]
+    assert [(item.fact, item.source_id) for item in theme] == [("山海之约", "S1")]
+    preview = Evidence(
+        "S2", "《样例产品》1.4版本「远航」即将上线", "https://example.com/preview",
+        "页面摘要", "页面原文",
+    )
+    assert _structured_field_candidates(record, "当前版本号", preview, 1.0) == []
+    dated = Evidence(
+        "S3", "《样例产品》1.3版本更新公告", "https://example.com/update",
+        "页面摘要", "【更新开始时间】2020/01/02 06:00。",
+    )
+    date_facts = _structured_field_candidates(record, "更新日期", dated, 1.0)
+    assert [(item.fact, item.source_id) for item in date_facts] == [
+        ("2020/01/02 06:00", "S3")
+    ]
+
+
+def test_online_release_title_accepts_planner_field_keys() -> None:
+    record = ResearchRecord(
+        "《样例产品》",
+        "《样例产品》当前版本的版本号、版本名称和上线日期",
+        ["version_number", "version_name", "release_date"],
+    )
+    evidence = Evidence(
+        "S1",
+        "《样例产品》官网：1.3版本「山海之约」更新公告",
+        "https://example.com/release",
+        "页面摘要",
+        "【更新开始时间】2020/01/02 06:00。",
+    )
+
+    assert [
+        _structured_field_candidates(record, field, evidence, 1.0)[0].fact
+        for field in record.fields
+    ] == ["1.3版本", "山海之约", "2020/01/02 06:00"]
+
+
+def test_single_latin_product_plan_drops_copied_field_description() -> None:
+    plan = _parse_research_plan_output(
+        '{"decision":"search","scope_mode":"fixed","records":'
+        '[{"subject":"Orion 最新稳定版本号和发布日期",'
+        '"question":"Orion 最新稳定版本号和发布日期是什么？",'
+        '"fields":["version","release_date"]}],'
+        '"queries":["Orion 最新稳定版本号和发布日期 official release"]}',
+        "Orion 最新稳定版本号和发布日期是什么？",
+        4,
+    )
+
+    assert plan.records[0].subject == "Orion"
+    assert plan.queries == ["Orion official release"]
+
+
+def test_news_window_remains_in_every_search_branch() -> None:
+    queries = _preserve_news_window(
+        "最近一周有哪些科技动态？",
+        ["机器人 官方公告", "AI 最近一周 发布", "芯片 新闻"],
+    )
+
+    assert queries == [
+        "机器人 官方公告 最近一周",
+        "AI 最近一周 发布",
+        "芯片 新闻 最近一周",
+    ]
+
+
+def test_recent_news_summary_ignores_sidebar_headlines() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    prompts: list[str] = []
+
+    def complete(user: str, **_kwargs: object) -> str:
+        prompts.append(user)
+        return "样例机构发布新公告。"
+
+    reader._complete = complete
+    reader._summarize_one(
+        "最近一周有哪些科技动态？",
+        DocumentChunk(
+            "S1", "样例机构发布新公告", "https://example.com/news",
+            "样例机构发布新公告。侧栏推荐：另一家公司上市。",
+        ),
+    )
+
+    assert "只总结网页主标题对应的事件" in prompts[0]
+    assert "忽略导航、侧栏、相关推荐" in prompts[0]
+
+
+def test_compose_example_requires_service_nesting() -> None:
+    question = "Docker Compose 怎样配置 healthcheck？给一个示例。"
+    malformed = """```yaml
+services:
+web:
+image: nginx
+healthcheck:
+test: ["CMD", "true"]
+```"""
+    valid = """```yaml
+services:
+  web:
+    image: nginx
+    healthcheck:
+      test: ["CMD", "true"]
+```"""
+
+    assert _yaml_example_errors(malformed, question)
+    assert _yaml_example_errors(valid, question) == []
+
+
+def test_compose_yaml_validator_reads_indented_explanatory_blocks() -> None:
+    question = "Docker Compose 怎样配置 healthcheck？给一个示例。"
+    answer = """示例：
+```yaml
+services:
+  web:
+    image: nginx
+    healthcheck:
+      test: ["CMD", "true"]
+```
+字段：
+  ```yaml
+  healthcheck:
+    timeout: 10s
+  ```"""
+
+    assert _yaml_example_errors(answer, question) == []
+    assert _yaml_example_errors(answer.replace("timeout: 10s", "timeout: ["), question)
+
+
+def test_final_reader_repairs_invalid_compose_nesting() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    bad = '```yaml\nservices:\nweb:\nimage: busybox\nhealthcheck:\ntest: ["CMD", "true"]\n```'
+    good = '```yaml\nservices:\n  web:\n    image: busybox\n    healthcheck:\n      test: ["CMD", "true"]\n```'
+    prompts: list[str] = []
+
+    def complete(user: str, **_kwargs: object) -> str:
+        prompts.append(user)
+        return good if "格式问题：" in user else bad
+
+    reader._complete = complete
+    answer, warnings = reader.finalize(
+        "Docker Compose 怎样配置 healthcheck？给一个示例。",
+        [Evidence("S1", "Compose 服务示例", "https://example.com/docs", good, good)],
+    )
+
+    assert _yaml_example_errors(answer, "Docker Compose 怎样配置 healthcheck？给一个示例。") == []
+    assert any("格式问题：" in prompt for prompt in prompts)
+    assert "invalid YAML example was regenerated" in warnings
+
+
+def test_missing_field_queries_rotate_to_less_searched_subjects() -> None:
+    selections = [
+        FieldEvidenceSelection("甲产品", "版本主题", "", "missing"),
+        FieldEvidenceSelection("乙产品", "版本主题", "", "missing"),
+    ]
+    queries = _missing_field_queries(
+        "甲产品和乙产品现在各自的版本主题是什么？",
+        selections,
+        ["甲产品 版本主题 官方 更新公告 最新"],
+        1,
+    )
+
+    assert len(queries) == 1
+    assert queries[0].startswith("乙产品 版本主题")
+
+
+def test_freshness_review_can_search_the_publisher_host() -> None:
+    evidence = [Evidence(
+        "S1", "《样例产品》官方网站：1.2版本已上线",
+        "https://official.example.com/news", "版本摘要", "1.2版本已上线",
+    )]
+    selected = [FieldEvidenceSelection(
+        "《样例产品》", "当前版本号", "S1", "supported", "1.2版本", ["S1"]
+    )]
+
+    queries = _freshness_review_queries(
+        "《样例产品》现在的版本是什么？", evidence, [], selected, 1
+    )
+
+    assert queries == [
+        "site:official.example.com 《样例产品》 最新版本 上线 官方公告"
+    ]
 
 
 def test_source_summary_cannot_copy_current_claim_from_question() -> None:
@@ -703,6 +1077,47 @@ def test_audit_cannot_mark_missing_atomic_fields_as_enough() -> None:
 
     assert audit.sufficient is False
     assert audit.queries == ["对象 发布日期 官方资料"]
+
+
+def test_audit_reformats_one_invalid_model_result_before_using_its_search() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    prompts: list[str] = []
+    outputs = iter(["还需要再找资料", "SEARCH: 对象 官方公告"])
+
+    def complete(prompt: str, **_kwargs: object) -> str:
+        prompts.append(prompt)
+        return next(outputs)
+
+    reader._complete = complete
+    audit = reader.audit("对象最近有什么变化？", _evidence(1), ["对象变化"])
+
+    assert audit.queries == ["对象 官方公告"]
+    assert len(prompts) == 2
+    assert "对象最近有什么变化" in prompts[1]
+    assert "还需要再找资料" in prompts[1]
+
+
+def test_missing_recent_field_uses_new_public_search_terms_each_round() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: "ENOUGH"
+    missing = [
+        FieldEvidenceSelection(
+            "某产品下一个版本", "update_time", "", "missing", "未找到", []
+        )
+    ]
+    question = "某产品下一个版本什么时候更新？"
+
+    first = reader.audit(question, _evidence(1), [question], field_selections=missing)
+    second = reader.audit(
+        question,
+        _evidence(1),
+        [question, f"{first.queries[0]} 2099年1月 最新"],
+        field_selections=missing,
+    )
+
+    assert first.queries == ["某产品下一个版本 更新时间 官方 更新公告 最新"]
+    assert second.queries == ["某产品下一个版本 更新时间 官方 新闻公告 预告"]
+    assert "update_time" not in " ".join(first.queries + second.queries)
 
 
 def test_supported_atomic_fields_stop_redundant_audit_search() -> None:
@@ -1082,14 +1497,15 @@ def test_summary_prompt_contains_only_material_and_one_short_request() -> None:
 
     prompt = captured["user"]
     assert prompt == (
+        "网页标题：Source\n网页地址：https://example.com\n网页材料：\n"
         "UNIQUE MATERIAL\n\n"
         "总结以上网页内容。只复述同一条记录明确对应的值，"
         "不把不同表格行、版本或对象的信息拼在一起；"
         "网页有表格时保留相关的完整行。\n网页摘要："
     )
     assert "UNIQUE QUESTION" not in prompt
-    assert "来源材料" not in prompt
-    assert "URL" not in prompt
+    assert "网页标题：Source" in prompt
+    assert "网页地址：https://example.com" in prompt
     assert captured["max_tokens"] == 1024
     assert evidence.claim == "Relevant fact."
 
@@ -1115,6 +1531,7 @@ def test_page_summary_uses_its_search_point_and_complete_user_question() -> None
     evidence = reader._summarize_one("完整用户问题", chunk)
 
     assert captured["user"] == (
+        "网页标题：综合网页\n网页地址：https://example.com\n网页材料：\n"
         "网页同时提到了多个游戏。\n\n"
         "总结以上网页中与检索点“原神”有关、可用于回答“完整用户问题”的内容。"
         "只复述同一条记录明确对应的值，不把不同表格行、版本或对象的信息拼在一起；"
@@ -1290,6 +1707,115 @@ def test_contextualizer_falls_back_to_previous_question_if_pronoun_remains() -> 
     )
 
     assert question == "RWKV 最新版本是什么时候发布的？"
+
+
+def test_contextualizer_uses_previous_record_subject_without_copying_broad_question():
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: "A"
+
+    question = reader.contextualize(
+        "那下一个版本呢？什么时候更新，主题是什么？",
+        [
+            {
+                "question": "《绝区零》当前版本发生了哪些主要变化？",
+                "answer": "此前答案内容不作为新事实。",
+                "state": {
+                    "records": [
+                        {"subject": "《绝区零》当前版本发生的主要变化"}
+                    ],
+                    "facts": [],
+                },
+            }
+        ],
+    )
+
+    assert question.startswith("关于《绝区零》，")
+    assert "下一个版本" in question
+    assert "哪些主要变化" not in question
+
+
+def test_search_design_drops_model_invented_date_and_version_numbers():
+    reader = RWKVReader(replace(Settings(), research_plan_max_queries=4))
+    prompts = []
+
+    def complete(user, **kwargs):
+        prompts.append(user)
+        return '{"points":[["直播时间","2024-10-15"],["版本","v1.0"]]}'
+
+    reader._complete = complete
+    question = "《明日方舟：终末地》最近一次前瞻直播是什么时候？这是哪个版本或活动的前瞻？"
+    record = ResearchRecord(
+        "《明日方舟：终末地》",
+        question,
+        ["直播时间", "版本"],
+    )
+
+    queries, points = reader.design_record_queries(question, [record], [])
+
+    assert len(queries) == len(points) == 2
+    assert all("2024-10-15" not in query and "v1.0" not in query for query in queries)
+    assert all("《明日方舟：终末地》" in query for query in queries)
+    assert all("当前日期：" in prompt for prompt in prompts)
+    assert all("不得猜测日期或版本号" in prompt for prompt in prompts)
+
+
+def test_next_version_date_selection_rejects_already_past_releases():
+    record = ResearchRecord(
+        "《绝区零》下一个版本更新时间",
+        "《绝区零》下一个版本什么时候更新？",
+        ["update_time"],
+    )
+
+    assert not _field_qualifier_supported(
+        record,
+        "update_time",
+        "2026年2月6日",
+        "2.6版本更新于2026年2月6日。",
+    )
+    assert _field_qualifier_supported(
+        record,
+        "update_time",
+        "2099年2月6日",
+        "2.6版本预计于2099年2月6日更新。",
+    )
+
+
+def test_finalizer_withholds_next_version_theme_when_no_future_date_is_supported():
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *args, **kwargs: pytest.fail(
+        "unanchored page summaries must not override the missing future date"
+    )
+    subject = "绝区零下一个版本"
+    evidence = [
+        Evidence(
+            "S1",
+            "旧版本公告",
+            "https://example.com/release",
+            "2.6版本于2026年2月6日更新，主题为旧梦的安可曲。",
+            "2.6版本于2026年2月6日更新，主题为旧梦的安可曲。",
+        )
+    ]
+    selections = [
+        FieldEvidenceSelection(
+            subject, "update_time", "", "missing", "材料未能确认未来更新时间。"
+        ),
+        FieldEvidenceSelection(
+            subject, "theme", "S1", "supported", "旧梦的安可曲"
+        ),
+    ]
+
+    answer, warnings = reader.finalize(
+        "关于《绝区零》，那下一个版本呢？什么时候更新，主题是什么？",
+        evidence,
+        research_records=[
+            ResearchRecord(subject, "下一个版本", ["update_time", "theme"])
+        ],
+        evidence_selections=selections,
+    )
+
+    assert "没有确认晚于当前日期" in answer
+    assert "旧梦的安可曲" not in answer
+    assert "next-release details withheld" in warnings[0]
 
 
 def test_contextualizer_turns_document_pronoun_into_a_standalone_question() -> None:
@@ -2375,7 +2901,7 @@ def test_field_review_is_appended_without_replacing_final_summary_material() -> 
     assert answer == "综合两份材料得到 Fact 1 和 Fact 2 [S1][S2]"
 
 
-def test_sufficient_verified_fields_replace_rejected_web_material_for_final_reader() -> None:
+def test_supported_fields_do_not_discard_independent_web_material() -> None:
     reader = RWKVReader(replace(Settings(), rwkv_model="test"))
     captured = {}
 
@@ -2412,7 +2938,8 @@ def test_sufficient_verified_fields_replace_rejected_web_material_for_final_read
         ],
     )
 
-    assert "Node.js 16 是旧 LTS" not in captured["user"]
+    assert "Node.js 16 是旧 LTS" in captured["user"]
+    assert "候选提取，不代表官方身份或版本归属已核实" in captured["user"]
     assert '"fact": "24.20.0"' in captured["user"]
     assert answer == (
         "Node.js 当前 LTS 主版本为24 [S2]，代号为Krypton [S3]，"
@@ -2532,8 +3059,254 @@ def test_atomic_field_binding_skips_procedural_and_open_ended_questions() -> Non
     records = [ResearchRecord("对象", "问题", ["字段"])]
 
     assert _field_binding_applicable("对象的版本号和发布日期是什么？", records)
+    assert _field_binding_applicable("《示例产品》当前版本有哪些主要变化？", records)
     assert not _field_binding_applicable("最近有哪些科技动态？", records)
     assert not _field_binding_applicable("怎样配置 healthcheck？给出示例。", records)
+
+
+def test_incomplete_current_release_uses_only_bound_field_facts() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: pytest.fail(
+        "incomplete current release must not be regenerated from summaries"
+    )
+    answer, warnings = reader.finalize(
+        "《示例产品》当前版本有哪些主要变化？",
+        [Evidence("S1", "《示例产品》1.3版本公告", "https://example.com/a",
+                  "未经核实的额外改动", "原文只有1.3版本号")],
+        evidence_sufficient=False,
+        evidence_selections=[
+            FieldEvidenceSelection("《示例产品》", "版本号", "S1", "supported", "1.3", ["S1"]),
+            FieldEvidenceSelection("《示例产品》", "主要变化", "", "missing"),
+        ],
+    )
+
+    assert "1.3" in answer
+    assert "主要变化：现有材料未能确认" in answer
+    assert "未经核实的额外改动" not in answer
+    assert warnings == [
+        "answer limited to verified atomic fields because field evidence is incomplete"
+    ]
+
+
+def test_incomplete_price_fields_do_not_reenter_freeform_finalization() -> None:
+    settings = replace(Settings(), rwkv_model="test")
+    reader = RWKVReader(settings)
+    reader._complete = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("incomplete fields must not be regenerated from summaries")
+    )
+
+    answer, warnings = reader.finalize(
+        "样例公司上市首日的开盘价和收盘价分别是多少？",
+        _evidence(1),
+        evidence_sufficient=False,
+        evidence_selections=[
+            FieldEvidenceSelection("样例公司", "开盘价", "S1", "supported", "10元", ["S1"]),
+            FieldEvidenceSelection("样例公司", "收盘价", "", "missing", "材料未给出这个字段。"),
+        ],
+    )
+
+    assert "开盘价：10元 [S1]" in answer
+    assert "收盘价：现有材料未能确认。" in answer
+    assert warnings == [
+        "answer limited to verified atomic fields because field evidence is incomplete"
+    ]
+
+
+def test_complete_bounded_fields_use_selected_values_without_regeneration() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("bounded fields must not be regenerated from source summaries")
+    )
+    question = "样例公司上市日期和开盘价分别是多少？"
+    answer, warnings = reader.finalize(
+        question,
+        _evidence(1),
+        research_records=[ResearchRecord("样例公司", question, ["上市日期", "开盘价"])],
+        evidence_sufficient=True,
+        evidence_selections=[
+            FieldEvidenceSelection("样例公司", "上市日期", "S1", "supported", "2026年8月19日上市", ["S1"]),
+            FieldEvidenceSelection("样例公司", "开盘价", "S1", "supported", "100元", ["S1"]),
+        ],
+    )
+
+    assert "上市日期：2026年8月19日上市 [S1]" in answer
+    assert "开盘价：100元 [S1]" in answer
+    assert warnings == ["answer rendered from verified atomic fields"]
+
+
+def test_atomic_field_answer_removes_model_quote_marker() -> None:
+    answer = _atomic_fallback_answer([
+        FieldEvidenceSelection("样例公司", "发行价", "S1", "supported", ">\n发行价为100元", ["S1"])
+    ])
+
+    assert answer == "- 样例公司 · 发行价：发行价为100元 [S1]"
+
+
+def test_audit_cannot_override_missing_field_status() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("missing field must not enter freeform finalization")
+    )
+
+    answer, _warnings = reader.finalize(
+        "样例产品的价格是什么？",
+        _evidence(1),
+        evidence_sufficient=True,
+        evidence_selections=[
+            FieldEvidenceSelection("样例产品", "价格", "", "missing", "材料未给出这个字段。"),
+        ],
+    )
+
+    assert "价格：现有材料未能确认。" in answer
+
+
+def test_atomic_fallback_explains_unresolved_release_status() -> None:
+    answer = _atomic_fallback_answer([
+        FieldEvidenceSelection(
+            "甲游戏", "当前版本号", "", "conflict",
+            "同一发布方站点还有更高版本资料，其上线状态尚未核实。", ["S1", "S2"],
+        ),
+        FieldEvidenceSelection(
+            "乙游戏", "当前版本号", "", "missing",
+            "材料未确认该对象已有哪个版本上线。",
+        ),
+    ])
+
+    assert "上线状态尚未核实。[S1][S2]" in answer
+    assert "材料未确认该对象已有哪个版本上线。" in answer
+
+
+def test_atomic_fallback_renders_planner_field_keys_for_readers() -> None:
+    answer = _atomic_fallback_answer([
+        FieldEvidenceSelection("样例产品", "version_number", "S1", "supported", "1.3版本", ["S1"]),
+        FieldEvidenceSelection("样例产品", "release_date", "", "missing", "材料未给出这个字段。"),
+    ])
+
+    assert "版本号：1.3版本 [S1]" in answer
+    assert "发布日期：现有材料未能确认。" in answer
+    assert "version_number" not in answer
+
+
+def test_empty_supported_field_is_reported_missing() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    record = ResearchRecord("样例产品", "样例产品的发布日期是什么？", ["date"])
+    reader._extract_one_field = lambda *_args: None
+    reader._resolve_record_fields_together = lambda *_args: [
+        FieldEvidenceSelection("样例产品", "date", "S1", "supported", "", ["S1"])
+    ]
+
+    selections, _warnings = reader.select_evidence(
+        "样例产品的发布日期是什么？", [record], _evidence(1)
+    )
+
+    assert selections[0].status == "missing"
+    assert selections[0].source_ids == []
+
+
+def test_field_value_shape_rejects_percent_as_price_and_partial_date() -> None:
+    assert not _valid_field_value_shape("上市首日开盘价", "上市首日换手率85.28%")
+    assert _valid_field_value_shape("上市首日开盘价", "开盘价1100元/股")
+    assert not _valid_field_value_shape("上市日期", "将于8月19日上市")
+    assert _valid_field_value_shape("上市日期", "2026年8月19日上市")
+    assert not _valid_field_value_shape(
+        "上市日期", "已受理 2026-03-20。上市委会议 2026-06-01 通过。"
+    )
+    assert not _valid_field_value_shape(
+        "上市日期", "样例公司上市发行结果公告，2026-08-14；上市公告书提示性公告，2026-08-18"
+    )
+    assert not _valid_field_value_shape(
+        "上市日期", "样例公司上市公告书提示性公告，2026-08-18"
+    )
+
+
+def test_price_fact_must_match_its_local_source_label() -> None:
+    source = (
+        "上市首日，发行价150.80元/股，股价开盘达到1100元。"
+        "截至当日收盘，股价回落至845元。"
+    )
+
+    assert _price_fact_bound_to_field("上市首日开盘价", "1100元", source)
+    assert _price_fact_bound_to_field("上市首日收盘价", "845元", source)
+    assert not _price_fact_bound_to_field("上市首日收盘价", "1100元", source)
+
+
+def test_price_change_is_not_the_labelled_price() -> None:
+    source = (
+        "样例公司上市首日开盘价为100元，收盘价为80元。"
+        "与开盘价相比，收盘价较开盘价回落20元。"
+    )
+
+    assert _price_fact_bound_to_field("上市首日开盘价", "100元", source)
+    assert _price_fact_bound_to_field("上市首日收盘价", "80元", source)
+    assert not _price_fact_bound_to_field("上市首日开盘价", "20元", source)
+    assert not _price_fact_bound_to_field("上市首日收盘价", "20元", source)
+
+
+def test_original_price_clauses_survive_model_abstention() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    record = ResearchRecord(
+        "样例公司", "样例公司上市首日开盘价和收盘价是多少？",
+        ["上市首日开盘价", "上市首日收盘价"],
+    )
+    source = Evidence(
+        "S1", "样例公司上市首日报价", "https://example.com/market",
+        "", "样例公司上市首日，股价开盘达到1100元。截至当日收盘，股价回落至845元。",
+    )
+    reader._extract_one_field = lambda *_args: None
+    reader._resolve_record_fields_together = lambda *_args: [
+        FieldEvidenceSelection("样例公司", field, "", "missing", "材料未给出这个字段。")
+        for field in record.fields
+    ]
+
+    selections, _warnings = reader.select_evidence(record.question, [record], [source])
+
+    assert [item.fact for item in selections] == ["1100元", "845元"]
+    assert all(item.status == "supported" and item.source_ids == ["S1"] for item in selections)
+    assert [item.fact for item in _structured_price_candidates(record, "上市首日收盘价", source, 1.0)] == ["845元"]
+
+
+def test_direct_price_candidate_stays_in_subject_paragraph_after_long_navigation() -> None:
+    record = ResearchRecord("样例公司", "样例公司上市首日开盘价是多少？", ["上市首日开盘价"])
+    source = Evidence(
+        "S1", "样例公司上市报道", "https://example.com/market", "",
+        "导航链接 " * 1800
+        + "\n样例公司上市首日开盘价为100元。"
+        + "\n其他公司上市首日开盘价为200元。",
+    )
+
+    candidates = _structured_price_candidates(record, "上市首日开盘价", source, 1.0)
+
+    assert [item.fact for item in candidates] == ["100元"]
+
+
+def test_original_price_source_joins_matching_selected_value() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    record = ResearchRecord("样例公司", "样例公司上市首日开盘价是多少？", ["上市首日开盘价"])
+    source = Evidence(
+        "S2", "样例公司上市报道", "https://example.com/report", "",
+        "样例公司上市首日开盘价为100元。",
+    )
+    reader._extract_one_field = lambda *_args: None
+    reader._resolve_record_fields_together = lambda *_args: [
+        FieldEvidenceSelection("样例公司", "上市首日开盘价", "S1", "supported", "100元", ["S1"])
+    ]
+
+    selections, _warnings = reader.select_evidence(record.question, [record], [source])
+
+    assert selections[0].status == "supported"
+    assert selections[0].source_ids == ["S1", "S2"]
+
+
+def test_price_extraction_rejects_unrelated_percentage_before_resolution() -> None:
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+    reader._complete = lambda *_args, **_kwargs: "上市首日换手率85.28%"
+    record = ResearchRecord("样例公司", "上市首日开盘价是多少？", ["上市首日开盘价"])
+    evidence = Evidence(
+        "S1", "样例公司上市首日报道", "https://example.com/market",
+        "上市首日换手率85.28%", "上市首日换手率85.28%",
+    )
+
+    assert reader._extract_one_field(record, "上市首日开盘价", evidence, 1.0) is None
 
 
 def test_final_reader_uses_current_turn_as_answer_contract() -> None:
@@ -2615,3 +3388,101 @@ def test_conversation_answer_reads_history_before_request_without_citations() ->
     assert "根据此前对话完成请求" in prompt
     assert "<此前对话消息>" not in prompt
     assert answer == "我们讨论了口粮茶，你偏好回甘明显的茶。"
+
+
+def test_planned_field_query_keeps_its_subject():
+    from rwkv_search_reader.reader import _bind_query_subjects
+    from rwkv_search_reader.models import ResearchRecord
+    records = [ResearchRecord("RWKV-7", "代号是什么", ["代号"])]
+    assert _bind_query_subjects(["代号"], ["RWKV-7"], records) == ["RWKV-7 代号"]
+    assert _bind_query_subjects(["RWKV-7 代号"], ["RWKV-7"], records) == ["RWKV-7 代号"]
+
+
+def test_planned_query_collapses_repeated_explicit_title() -> None:
+    from rwkv_search_reader.reader import _bind_query_subjects
+
+    records = [ResearchRecord("《样例游戏》", "《样例游戏》下次更新", ["更新时间"])]
+
+    assert _bind_query_subjects(
+        ["《样例游戏》 《样例游戏》 更新时间"], ["更新时间"], records
+    ) == ["《样例游戏》 更新时间"]
+
+
+def test_query_subject_binding_does_not_mix_distinct_records():
+    from rwkv_search_reader.reader import _bind_query_subjects
+    from rwkv_search_reader.models import ResearchRecord
+    records = [ResearchRecord("RWKV-7", "代号", ["代号"]), ResearchRecord("Python", "版本", ["版本"])]
+    assert _bind_query_subjects(["代号", "版本"], ["RWKV-7", "Python"], records) == ["RWKV-7 代号", "Python 版本"]
+
+
+def test_query_subject_binding_maps_field_names_back_to_their_own_record():
+    from rwkv_search_reader.reader import _bind_query_subjects
+
+    records = [
+        ResearchRecord("绝区零下一个版本更新时间", "下一个版本什么时候更新", ["update_time"]),
+        ResearchRecord("绝区零下一个版本主题", "下一个版本主题是什么", ["theme"]),
+    ]
+
+    assert _bind_query_subjects(
+        ["下一个版本更新时间", "下一个版本主题"],
+        ["update_time", "theme"],
+        records,
+    ) == [
+        "绝区零 下一个版本更新时间",
+        "绝区零 下一个版本主题",
+    ]
+
+
+def test_plan_research_repairs_field_only_search_before_execution():
+    reader = RWKVReader(Settings())
+    reader._complete = lambda *args, **kwargs: (
+        '{"decision":"search","scope_mode":"fixed","goal":"查代号",'
+        '"records":[{"subject":"RWKV-7","question":"代号是什么","fields":["代号"]}],'
+        '"queries":["代号"],"retrieval_points":["RWKV-7"]}'
+    )
+    plan = reader.plan_research("RWKV-7 代号是什么？")
+    assert plan.queries == ["RWKV-7 代号"]
+
+
+def test_plan_keeps_records_when_model_search_design_is_invalid():
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+
+    def complete(_prompt: str, *, stage: str, **_kwargs: object) -> str:
+        if stage == "plan":
+            return (
+                '{"decision":"search","scope_mode":"fixed",'
+                '"records":[{"subject":"某产品","question":"下一个版本什么时候更新，主题是什么",'
+                '"fields":["update_time","theme"]}],"urls":[]}'
+            )
+        raise SearchReaderError(stage, "invalid search design")
+
+    reader._complete = complete
+    plan = reader.plan_research("某产品下一个版本什么时候更新，主题是什么？")
+
+    assert len(plan.queries) == len(plan.retrieval_points) == 2
+    assert all("某产品" in query and "官方公告" in query for query in plan.queries)
+    assert any("更新时间" in query for query in plan.queries)
+    assert any("版本主题" in query for query in plan.queries)
+    assert all(re.search(r"\d{4}年\d{2}月", query) for query in plan.queries)
+    assert all("update_time" not in query for query in plan.queries)
+
+
+def test_fixed_plan_carries_an_explicit_title_into_generic_record_queries():
+    reader = RWKVReader(replace(Settings(), rwkv_model="test"))
+
+    def complete(_prompt: str, *, stage: str, **_kwargs: object) -> str:
+        if stage == "plan":
+            return (
+                '{"decision":"search","scope_mode":"fixed",'
+                '"records":[{"subject":"游戏更新内容",'
+                '"question":"《示例产品》当前版本有哪些变化？",'
+                '"fields":["版本号","更新内容"]}],"urls":[]}'
+            )
+        raise SearchReaderError(stage, "invalid search design")
+
+    reader._complete = complete
+    plan = reader.plan_research("《示例产品》当前版本有哪些变化？")
+
+    assert plan.records[0].subject.startswith("《示例产品》")
+    assert plan.queries
+    assert all("《示例产品》" in query for query in plan.queries)

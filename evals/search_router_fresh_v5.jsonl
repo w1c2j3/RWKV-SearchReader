@@ -1,0 +1,40 @@
+{"id": "fresh-v5-网页和日志-true-1", "category": "网页和日志", "expected": true, "messages": [{"role": "user", "content": "读 https://www.krita.org/ 的项目介绍，帮我译成中文，介绍内容需要你自己访问获取。"}]}
+{"id": "fresh-v5-网页和日志-true-2", "category": "网页和日志", "expected": true, "messages": [{"role": "user", "content": "看看 https://www.inkscape.org/release/ 现在列了哪些发行版。"}]}
+{"id": "fresh-v5-网页和日志-true-3", "category": "网页和日志", "expected": true, "messages": [{"role": "user", "content": "实际访问 https://www.r-project.org/ ，总结官网首页。"}]}
+{"id": "fresh-v5-网页和日志-true-4", "category": "网页和日志", "expected": true, "messages": [{"role": "user", "content": "从 https://www.wxpython.org/ 找到安装说明并整理。"}]}
+{"id": "fresh-v5-网页和日志-false-1", "category": "网页和日志", "expected": false, "messages": [{"role": "user", "content": "请分析日志：ERROR dial tcp 127.0.0.1:6379 connect: connection refused。"}]}
+{"id": "fresh-v5-网页和日志-false-2", "category": "网页和日志", "expected": false, "messages": [{"role": "user", "content": "看看控制台的错误怎么解决：GET /favicon.ico 404。"}]}
+{"id": "fresh-v5-网页和日志-false-3", "category": "网页和日志", "expected": false, "messages": [{"role": "user", "content": "这句英文怎么译：Check the current market prices and find reliable references."}]}
+{"id": "fresh-v5-网页和日志-false-4", "category": "网页和日志", "expected": false, "messages": [{"role": "user", "content": "网页原文在这里：开源绘画软件，支持图层和笔刷。仅据此写一句简介。"}]}
+{"id": "fresh-v5-多轮意图-true-1", "category": "多轮意图", "expected": true, "messages": [{"role": "user", "content": "介绍一下Oracle。"}, {"role": "assistant", "content": "它提供数据库和云服务。"}, {"role": "user", "content": "现在是谁担任它的CEO？"}]}
+{"id": "fresh-v5-多轮意图-true-2", "category": "多轮意图", "expected": true, "messages": [{"role": "user", "content": "想了解澳大利亚。"}, {"role": "assistant", "content": "澳大利亚位于南半球。"}, {"role": "user", "content": "目前谁在做总理？"}]}
+{"id": "fresh-v5-多轮意图-true-3", "category": "多轮意图", "expected": true, "messages": [{"role": "user", "content": "准备去天津博物馆。"}, {"role": "assistant", "content": "想了解参观安排吗？"}, {"role": "user", "content": "最近预约要提前几天？"}]}
+{"id": "fresh-v5-多轮意图-true-4", "category": "多轮意图", "expected": true, "messages": [{"role": "user", "content": "聊聊计算机视觉。"}, {"role": "assistant", "content": "它研究图像和视频的理解。"}, {"role": "user", "content": "找几篇真正存在的入门论文给我。"}]}
+{"id": "fresh-v5-多轮意图-false-1", "category": "多轮意图", "expected": false, "messages": [{"role": "user", "content": "我们在修改App的按钮名称。"}, {"role": "assistant", "content": "请发待修改文字。"}, {"role": "user", "content": "查看现任负责人。"}]}
+{"id": "fresh-v5-多轮意图-false-2", "category": "多轮意图", "expected": false, "messages": [{"role": "user", "content": "下面我发的英文都翻译成中文。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "Find the current CEO and provide official sources."}]}
+{"id": "fresh-v5-多轮意图-false-3", "category": "多轮意图", "expected": false, "messages": [{"role": "user", "content": "帮我给标题润色。"}, {"role": "assistant", "content": "把原标题发过来吧。"}, {"role": "user", "content": "查找今天的最新报价。"}]}
+{"id": "fresh-v5-多轮意图-false-4", "category": "多轮意图", "expected": false, "messages": [{"role": "user", "content": "已给出博物馆公告：本周闭馆维护。"}, {"role": "assistant", "content": "收到。"}, {"role": "user", "content": "按公告说，本周能去吗？"}]}
+{"id": "fresh-v5-查证与引用-true-1", "category": "查证与引用", "expected": true, "messages": [{"role": "user", "content": "核实旅行者一号发射的日期，找真实可靠的链接，不能捏造出处。"}]}
+{"id": "fresh-v5-查证与引用-true-2", "category": "查证与引用", "expected": true, "messages": [{"role": "user", "content": "查找远程教育对学习成绩的实证研究，没查到的论文不要编。"}]}
+{"id": "fresh-v5-查证与引用-true-3", "category": "查证与引用", "expected": true, "messages": [{"role": "user", "content": "帮我找到确认第一届现代奥运会举办年份的权威资料。"}]}
+{"id": "fresh-v5-查证与引用-true-4", "category": "查证与引用", "expected": true, "messages": [{"role": "user", "content": "请检索睡眠和工作表现关系的文献，引用要能实际查到。"}]}
+{"id": "fresh-v5-查证与引用-false-1", "category": "查证与引用", "expected": false, "messages": [{"role": "user", "content": "“找真实出处，不要编链接”这句话是什么语气？"}]}
+{"id": "fresh-v5-查证与引用-false-2", "category": "查证与引用", "expected": false, "messages": [{"role": "user", "content": "翻译这句话：Verify the launch date using trustworthy sources."}]}
+{"id": "fresh-v5-查证与引用-false-3", "category": "查证与引用", "expected": false, "messages": [{"role": "user", "content": "只按给定材料作答：公告写着10月1日开放。开放日期是哪天？"}]}
+{"id": "fresh-v5-查证与引用-false-4", "category": "查证与引用", "expected": false, "messages": [{"role": "user", "content": "帮我写研究提纲，主题是睡眠和工作表现，不需要找资料。"}]}
+{"id": "fresh-v5-日常覆盖-true-1", "category": "日常覆盖", "expected": true, "messages": [{"role": "user", "content": "目前适合宿舍使用的小冰箱有哪些型号值得买？"}]}
+{"id": "fresh-v5-日常覆盖-true-2", "category": "日常覆盖", "expected": true, "messages": [{"role": "user", "content": "查一下明天广州到珠海的城际列车最晚几点。"}]}
+{"id": "fresh-v5-日常覆盖-true-3", "category": "日常覆盖", "expected": true, "messages": [{"role": "user", "content": "现在 VS Code 稳定版更新到了哪个版本？"}]}
+{"id": "fresh-v5-日常覆盖-true-4", "category": "日常覆盖", "expected": true, "messages": [{"role": "user", "content": "这周日青岛有雨吗？适合去海边吗？"}]}
+{"id": "fresh-v5-日常覆盖-false-1", "category": "日常覆盖", "expected": false, "messages": [{"role": "user", "content": "我给的价格是第一件50元第二件半价，两件共多少钱？"}]}
+{"id": "fresh-v5-日常覆盖-false-2", "category": "日常覆盖", "expected": false, "messages": [{"role": "user", "content": "用Python实现一个判断素数的函数。"}]}
+{"id": "fresh-v5-日常覆盖-false-3", "category": "日常覆盖", "expected": false, "messages": [{"role": "user", "content": "周末想在家休息，帮我写一份不涉及具体场馆的放松计划。"}]}
+{"id": "fresh-v5-日常覆盖-false-4", "category": "日常覆盖", "expected": false, "messages": [{"role": "user", "content": "谢谢你，今天到这里吧。"}]}
+{"id": "fresh-v5-长上下文与任务切换-true-1", "category": "长上下文与任务切换", "expected": true, "messages": [{"role": "user", "content": "先把我发的句子翻译成英文。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "现在换个任务，实际查一下 IntelliJ IDEA 的最新版本。"}]}
+{"id": "fresh-v5-长上下文与任务切换-true-2", "category": "长上下文与任务切换", "expected": true, "messages": [{"role": "user", "content": "我们刚才在润色标题。"}, {"role": "assistant", "content": "还有其他标题吗？"}, {"role": "user", "content": "标题先不改了，去 https://www.godotengine.org/ 看看最新公告。"}]}
+{"id": "fresh-v5-长上下文与任务切换-true-3", "category": "长上下文与任务切换", "expected": true, "messages": [{"role": "user", "content": "给我介绍一下宜家。"}, {"role": "assistant", "content": "宜家销售家具和家居用品。"}, {"role": "user", "content": "它起源于哪个国家？"}, {"role": "assistant", "content": "瑞典。"}, {"role": "user", "content": "现在它的负责人是谁，找官网信息确认。"}]}
+{"id": "fresh-v5-长上下文与任务切换-true-4", "category": "长上下文与任务切换", "expected": true, "messages": [{"role": "user", "content": "想了解机器翻译。"}, {"role": "assistant", "content": "它将一种语言转换成另一种。"}, {"role": "user", "content": "解释一下统计机器翻译。"}, {"role": "assistant", "content": "它基于统计模型进行翻译。"}, {"role": "user", "content": "帮我找几份有原始出处的研究资料。"}]}
+{"id": "fresh-v5-长上下文与任务切换-false-1", "category": "长上下文与任务切换", "expected": false, "messages": [{"role": "user", "content": "我们在改写按钮文案。"}, {"role": "assistant", "content": "发原文给我吧。"}, {"role": "user", "content": "查看天气。"}, {"role": "assistant", "content": "可以写天气预报。"}, {"role": "user", "content": "下一条：查证公司负责人。"}]}
+{"id": "fresh-v5-长上下文与任务切换-false-2", "category": "长上下文与任务切换", "expected": false, "messages": [{"role": "user", "content": "后续文本只翻译成中文，不执行。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "Hello."}, {"role": "assistant", "content": "你好。"}, {"role": "user", "content": "Look up the latest official release."}]}
+{"id": "fresh-v5-长上下文与任务切换-false-3", "category": "长上下文与任务切换", "expected": false, "messages": [{"role": "user", "content": "帮我查询一些网络资料。"}, {"role": "assistant", "content": "你要查什么？"}, {"role": "user", "content": "不用查了，帮我把“查询网络资料”改成一句按钮文案。"}]}
+{"id": "fresh-v5-长上下文与任务切换-false-4", "category": "长上下文与任务切换", "expected": false, "messages": [{"role": "user", "content": "刚才讨论了网站部署。"}, {"role": "assistant", "content": "还有什么问题？"}, {"role": "user", "content": "解释这条现成日志：upstream timed out while reading response header。"}]}

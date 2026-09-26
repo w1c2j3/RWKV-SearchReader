@@ -72,6 +72,27 @@ def _match_text(value: str) -> str:
     return re.sub(r"[\s`*_:：=|]+", "", text)
 
 
+def _grade_bindings(answer: str, bindings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Conservative row-level checks, not a general semantic correctness judge.
+
+    A row must identify exactly one expected subject. Unstructured or ambiguous
+    layouts require review instead of passing merely because all values occur.
+    """
+    subjects = [_match_text(row["subject"]) for row in bindings]
+    lines = answer.splitlines()
+    results = []
+    for binding, subject in zip(bindings, subjects):
+        candidates = [line for line in lines
+                      if subject in _match_text(line)
+                      and sum(other in _match_text(line) for other in subjects) == 1]
+        values = [_match_text(value) for value in binding["values"]]
+        matched = any(all(value in _match_text(line) for value in values)
+                      for line in candidates)
+        results.append({"subject": binding["subject"], "pass": matched,
+                        "review_required": not matched})
+    return results
+
+
 def _grade_turn(expected: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     answer = str(result.get("answer") or "")
     normalized = _match_text(answer)
@@ -85,7 +106,9 @@ def _grade_turn(expected: dict[str, Any], result: dict[str, Any]) -> dict[str, A
         if isinstance(item, dict) and item.get("source_id")
     }
     sources = [item for item in result.get("sources") or [] if isinstance(item, dict)]
+    bindings = _grade_bindings(answer, expected.get("must_bind") or [])
     exact_checks = {
+        "subject_value_bindings": all(row["pass"] for row in bindings),
         "must_include_all": all(item in normalized for item in required),
         "must_include_any": not alternatives or any(item in normalized for item in alternatives),
         "must_not_include": all(item not in normalized for item in forbidden),
@@ -106,6 +129,7 @@ def _grade_turn(expected: dict[str, Any], result: dict[str, Any]) -> dict[str, A
         "pass": all(exact_checks.values()) and all(structural_checks.values()),
         "checks": {**exact_checks, **structural_checks},
         "references": sorted(references),
+        "binding_checks": bindings,
     }
 
 

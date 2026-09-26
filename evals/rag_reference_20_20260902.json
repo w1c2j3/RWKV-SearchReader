@@ -129,7 +129,7 @@
       "case_id": "rag_016_catalog",
       "category": "comparison",
       "documents": ["catalog"],
-      "turns": [{"question": "比较 Cedar Mini 与 Cedar Pro 的内存、功耗、价格和保修期。", "must_include_all": ["32GB", "18W", "2490元", "两年", "64GB", "35W", "4290元", "三年"]}]
+      "turns": [{"question": "比较 Cedar Mini 与 Cedar Pro 的内存、功耗、价格和保修期。", "must_include_all": ["32GB", "18W", "2490元", "两年", "64GB", "35W", "4290元", "三年"], "must_bind": [{"subject": "Cedar Mini", "values": ["32GB", "18W", "2490元", "两年"]}, {"subject": "Cedar Pro", "values": ["64GB", "35W", "4290元", "三年"]}]}]
     },
     {
       "case_id": "rag_017_incident",

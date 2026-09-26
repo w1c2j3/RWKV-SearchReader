@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
 
 from . import __version__
+from .agent_demo import agent_events
 from .config import PROJECT_ROOT, get_settings
 from .conversations import ConversationStore, new_conversation_id
 from .documents import (
@@ -29,6 +30,7 @@ from .documents import (
     limit_full_document_passages,
     rank_markdown_passages,
 )
+from .jobs import router as jobs_router
 from .models import SearchReaderError
 from .pipeline import SearchReaderPipeline
 from .tracing import recent_traces, session_records
@@ -44,6 +46,10 @@ class AnswerRequest(BaseModel):
     session_id: str = Field(default="", max_length=128)
     conversation_id: str = Field(default="", max_length=128)
     client_id: str = Field(default="", max_length=128)
+
+
+class AgentDemoRequest(BaseModel):
+    task: str = Field(min_length=1, max_length=8000)
 
 
 class ChatMessage(BaseModel):
@@ -86,6 +92,8 @@ app = FastAPI(
     description="Deterministic small-talk bypass plus retrieve-then-read answers.",
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+app.include_router(jobs_router)
 
 _STORE_GUARD = threading.Lock()
 _STORES: dict[str, ConversationStore] = {}
@@ -335,6 +343,41 @@ def _answer_events(
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "static" / "index.html")
+
+
+@app.get("/agents", include_in_schema=False)
+def agents_demo() -> FileResponse:
+    return FileResponse(PROJECT_ROOT / "static" / "agents.html")
+
+
+@app.post("/v1/agents/stream")
+async def agents_stream(body: AgentDemoRequest, request: Request) -> StreamingResponse:
+    _enforce_rate_limit(request)
+    settings = get_settings()
+    if not body.task.strip():
+        raise HTTPException(status_code=422, detail="请输入任务")
+    acquired = await run_in_threadpool(
+        _acquire_request_slot, settings.api_max_concurrent_requests,
+        settings.api_queue_timeout_seconds,
+    )
+    if not acquired:
+        raise HTTPException(status_code=503, detail="当前请求较多，请稍后再试")
+    stopped = threading.Event()
+    iterator = agent_events(body.task.strip(), settings, stopped, _release_request_slot)
+
+    async def stream():
+        sentinel = object()
+        try:
+            while not await request.is_disconnected():
+                event = await run_in_threadpool(next, iterator, sentinel)
+                if event is sentinel:
+                    break
+                yield event
+        finally:
+            stopped.set()
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/healthz")

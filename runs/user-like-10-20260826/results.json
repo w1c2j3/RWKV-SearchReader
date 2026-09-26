@@ -41,5 +41,36 @@
     {"case_id":"U06-evidence-replay","material_sources":20,"reduce_levels":1,"reduce_calls":5,"final_nodes":5,"final_calls":1,"final_input_chars":1896,"final_max_tokens":4090,"quality":"pass","finding":"真实 20 份逐网页摘要按 chunk 并发归并为 5 份，再由一个 final RWKV 正确回答。"},
     {"case_id":"U10-evidence-replay","material_sources":20,"reduce_levels":2,"reduce_calls":8,"final_nodes":3,"final_calls":1,"final_input_chars":5223,"final_max_tokens":4090,"quality":"fail","finding":"漏斗解决上下文预算，但历史/下一版本的时间关系仍选择错误。"},
     {"case_id":"U06-full-api","request_id":"2b0f323c32214bcfb44ff9948b332588","material_sources":20,"reduce_levels":1,"reduce_calls":5,"final_nodes":5,"final_calls":1,"final_input_chars":5928,"final_max_tokens":4090,"quality":"pass","finding":"正式 API 完整执行 Tavily、20 个逐页摘要、20→5 漏斗和 final；未触发 context 重试，回答正确。"}
-  ]
+  ],
+  "funnel_full_rerun": {
+    "run_id": "eval10-funnel-20260826-run2",
+    "http_ok": 10,
+    "http_error": 0,
+    "quality_pass": 1,
+    "quality_partial": 1,
+    "quality_fail": 8,
+    "degraded_cases": 9,
+    "model_calls": 290,
+    "summary_calls": 171,
+    "reduce_calls": 57,
+    "degraded_page_summaries": 40,
+    "degraded_reduce_nodes": 3,
+    "audit_context_errors": 2,
+    "material_sources": 171,
+    "latency_seconds_mean": 120.016,
+    "latency_seconds_median": 103.820,
+    "latency_seconds_max": 241.080,
+    "cases": [
+      {"case_id":"U01","request_id":"4c88702a87434a339c5ee300e66e7311","status":"ok","elapsed_seconds":0.000,"material_sources":0,"reduce_levels":0,"reduce_calls":0,"final_input_chars":0,"answer_chars":18,"quality":"pass","finding":"寒暄直接回答，没有检索或 RWKV 调用。"},
+      {"case_id":"U02","request_id":"ec6f222205b94eaca08dc37699103ad6","status":"ok","elapsed_seconds":83.333,"material_sources":10,"reduce_levels":1,"reduce_calls":3,"final_input_chars":2397,"answer_chars":118,"quality":"fail","finding":"把未来活动日期当作当前版本上线日期，并漏掉官方材料中的 3.1。"},
+      {"case_id":"U03","request_id":"a720da63bf2248168f643a848f32fb91","status":"ok","elapsed_seconds":90.974,"material_sources":10,"reduce_levels":1,"reduce_calls":3,"final_input_chars":3231,"answer_chars":517,"quality":"fail","finding":"公开集合范围失控，混入展会及非目标条目。"},
+      {"case_id":"U04","request_id":"f687bfd2d0f3442998e5a429474831a9","status":"ok","elapsed_seconds":64.451,"material_sources":10,"reduce_levels":1,"reduce_calls":3,"final_input_chars":907,"answer_chars":84,"quality":"fail","finding":"把发行价 150.8 元错误复制为上市首日开盘价。"},
+      {"case_id":"U05","request_id":"d4f9cefa7de94e79849765b33f92079c","status":"ok","elapsed_seconds":241.080,"material_sources":29,"reduce_levels":2,"reduce_calls":10,"final_input_chars":2311,"answer_chars":1829,"quality":"fail","finding":"把机构旧闻、趋势和无关科技事件拼成清单，并重复粘贴时间戳。"},
+      {"case_id":"U06","request_id":"33a0cba2dbb6493d9e0c8e035d85fc66","status":"ok","elapsed_seconds":183.118,"material_sources":27,"reduce_levels":2,"reduce_calls":9,"final_input_chars":1351,"answer_chars":62,"quality":"fail","finding":"回答成 5 月 22 日的 1.3 前瞻；与同日较早一次正确复测冲突，结果不稳定。"},
+      {"case_id":"U07","request_id":"7230d483eaaf41f3ab11294357d9eea6","status":"ok","elapsed_seconds":116.665,"material_sources":23,"reduce_levels":2,"reduce_calls":8,"final_input_chars":378,"answer_chars":73,"quality":"fail","finding":"回答 Python 3.13.15；官方最新稳定分支实际为 Python 3.14.7。"},
+      {"case_id":"U08","request_id":"4657098dbd1e4ecdaf0490705e068775","status":"ok","elapsed_seconds":70.841,"material_sources":10,"reduce_levels":1,"reduce_calls":3,"final_input_chars":5432,"answer_chars":647,"quality":"partial","finding":"healthcheck 示例及主要字段可用，但加入了已废弃的顶层 version。"},
+      {"case_id":"U09","request_id":"011096393f7e4bf0ad499bc0aac67d1b","status":"ok","elapsed_seconds":201.380,"material_sources":26,"reduce_levels":2,"reduce_calls":9,"final_input_chars":2802,"answer_chars":2048,"quality":"fail","finding":"多个版本被混成一张长表，出现空标题、转义残留和截断。"},
+      {"case_id":"U10","request_id":"a7b5d376e70543b5b472c611c912d3c2","status":"ok","elapsed_seconds":148.315,"material_sources":26,"reduce_levels":2,"reduce_calls":9,"final_input_chars":907,"answer_chars":73,"quality":"fail","finding":"指代继承正确，但答案在时间上早于上一轮的当前版本，自相矛盾。"}
+    ]
+  }
 }

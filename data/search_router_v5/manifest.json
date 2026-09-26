@@ -1,0 +1,30 @@
+{
+  "total": 300,
+  "positive": 150,
+  "negative": 150,
+  "splits": {
+    "train": {
+      "count": 240,
+      "positive": 120,
+      "sha256": "8418e0e3f251f2b98fefac2f21c2930d7e553c5d36227aede224cf5ff4f14271"
+    },
+    "validation": {
+      "count": 30,
+      "positive": 15,
+      "sha256": "9a95cc64b2de201e383bea088d0f27f5d94a23f107295553ac039c7b0f0e27ca"
+    },
+    "test": {
+      "count": 30,
+      "positive": 15,
+      "sha256": "015977dc40e9bd9a860ba916b5925f076e58647eea82618ba0ef3b2dfdbf5551"
+    }
+  },
+  "replaced_training_rows": 40,
+  "multi_turn_training_rows": 44,
+  "cumulative_unique_training_examples": 304,
+  "init_state": "runs/router-state-v4-final/best-state.pth",
+  "planned_epochs": 2,
+  "learning_rate": 3e-05,
+  "selection": "validation and existing known development regression; reserve fresh v5 set until final candidate selected",
+  "data_note": "Synthetic daily-use data informed by known failures. Prior validation/test sets are regression, not blind tests."
+}

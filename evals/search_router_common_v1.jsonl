@@ -1,0 +1,100 @@
+{"id": "直链与网页-true-1", "category": "直链与网页", "messages": [{"role": "user", "content": "打开 https://www.python.org/downloads/ 看看现在推荐下载哪个版本。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "直链与网页-true-2", "category": "直链与网页", "messages": [{"role": "user", "content": "帮我读一下 https://github.com/BlinkDL/RWKV-LM 的 README，概括安装步骤。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "直链与网页-true-3", "category": "直链与网页", "messages": [{"role": "user", "content": "https://www.rust-lang.org/learn 帮我看看这个页面讲什么。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "直链与网页-true-4", "category": "直链与网页", "messages": [{"role": "user", "content": "访问 https://example.com ，告诉我页面标题。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "直链与网页-true-5", "category": "直链与网页", "messages": [{"role": "user", "content": "看看 https://www.python.org/ 现在能不能正常打开。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "直链与网页-false-1", "category": "直链与网页", "messages": [{"role": "user", "content": "把 https://example.com/docs 改成 Markdown 超链接，文字叫使用文档。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "直链与网页-false-2", "category": "直链与网页", "messages": [{"role": "user", "content": "解释 https://example.com:8080/a?q=1 中各部分的含义。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "直链与网页-false-3", "category": "直链与网页", "messages": [{"role": "user", "content": "写一个 Python requests 请求网页的示例，用 https://example.com 占位。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "直链与网页-false-4", "category": "直链与网页", "messages": [{"role": "user", "content": "不用打开网页，只提取这段文字中的链接：资料在 https://example.com/a 。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "直链与网页-false-5", "category": "直链与网页", "messages": [{"role": "user", "content": "直连和通过代理访问网站有什么区别？"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "页面内容与附件-true-1", "category": "页面内容与附件", "messages": [{"role": "user", "content": "查看 https://docs.python.org/3/library/asyncio.html ，总结推荐的使用方法。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "页面内容与附件-true-2", "category": "页面内容与附件", "messages": [{"role": "user", "content": "读一下 https://arxiv.org/abs/2305.13048 这篇论文的摘要。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "页面内容与附件-true-3", "category": "页面内容与附件", "messages": [{"role": "user", "content": "看看 https://github.com/BlinkDL/RWKV-LM/issues 最近有人反馈什么问题。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "页面内容与附件-true-4", "category": "页面内容与附件", "messages": [{"role": "user", "content": "这个链接里有哪些下载文件：https://www.python.org/ftp/python/ ？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "页面内容与附件-true-5", "category": "页面内容与附件", "messages": [{"role": "user", "content": "对比 https://www.python.org/downloads/ 和 https://www.python.org/doc/ 这两个页面的用途，先打开看看。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "页面内容与附件-false-1", "category": "页面内容与附件", "messages": [{"role": "user", "content": "帮我查看这段日志的问题：ERROR connection refused 127.0.0.1:8000。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "页面内容与附件-false-2", "category": "页面内容与附件", "messages": [{"role": "user", "content": "看看这段代码哪里错了：def add(a,b): return a-b。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "页面内容与附件-false-3", "category": "页面内容与附件", "messages": [{"role": "user", "content": "仅根据以下网页摘录总结：本项目支持 Windows 和 Linux，安装前需要 Python 3.10。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "页面内容与附件-false-4", "category": "页面内容与附件", "messages": [{"role": "user", "content": "这是论文摘要全文：我们提出一种线性时间序列模型，在三项任务上提升准确率。请提炼贡献。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "页面内容与附件-false-5", "category": "页面内容与附件", "messages": [{"role": "user", "content": "查看我贴出的配置有没有语法问题：{\"port\": 8791, \"debug\": false}"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "软件版本与项目-true-1", "category": "软件版本与项目", "messages": [{"role": "user", "content": "现在 Node.js 的 LTS 版本是多少？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "软件版本与项目-true-2", "category": "软件版本与项目", "messages": [{"role": "user", "content": "帮我看看 RWKV-LM 仓库最近一次提交改了什么。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "软件版本与项目-true-3", "category": "软件版本与项目", "messages": [{"role": "user", "content": "查一下 FastAPI 最新版支持哪些 Python 版本。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "软件版本与项目-true-4", "category": "软件版本与项目", "messages": [{"role": "user", "content": "找一下 Ubuntu 最新 LTS 的官方下载地址。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "软件版本与项目-true-5", "category": "软件版本与项目", "messages": [{"role": "user", "content": "看看 PyTorch 现在官方怎么安装 CUDA 版本。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "软件版本与项目-false-1", "category": "软件版本与项目", "messages": [{"role": "user", "content": "解释一下 LTS 是什么意思。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "软件版本与项目-false-2", "category": "软件版本与项目", "messages": [{"role": "user", "content": "给我一个 FastAPI 的 hello world 示例，不涉及新版本功能。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "软件版本与项目-false-3", "category": "软件版本与项目", "messages": [{"role": "user", "content": "怎么用 git 查看当前仓库最近五次提交？告诉我命令就行。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "软件版本与项目-false-4", "category": "软件版本与项目", "messages": [{"role": "user", "content": "解释 pip 和 conda 的区别。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "软件版本与项目-false-5", "category": "软件版本与项目", "messages": [{"role": "user", "content": "我给你的版本记录是 v1修复登录、v2增加导出。帮我整理成表格。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "价格购买与比较-true-1", "category": "价格购买与比较", "messages": [{"role": "user", "content": "查一下 RTX 5090 现在京东大概卖多少钱。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "价格购买与比较-true-2", "category": "价格购买与比较", "messages": [{"role": "user", "content": "现在美元换人民币汇率是多少？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "价格购买与比较-true-3", "category": "价格购买与比较", "messages": [{"role": "user", "content": "帮我看看阿里云最便宜的云服务器套餐有哪些。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "价格购买与比较-true-4", "category": "价格购买与比较", "messages": [{"role": "user", "content": "比较一下目前在售的 MacBook Air 配置和价格，给出官网链接。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "价格购买与比较-true-5", "category": "价格购买与比较", "messages": [{"role": "user", "content": "现在买 2000 元左右的手机，有哪些值得考虑？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "价格购买与比较-false-1", "category": "价格购买与比较", "messages": [{"role": "user", "content": "甲产品100元8件，乙产品120元12件，哪个单价低？"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "价格购买与比较-false-2", "category": "价格购买与比较", "messages": [{"role": "user", "content": "解释汇率上涨是什么意思。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "价格购买与比较-false-3", "category": "价格购买与比较", "messages": [{"role": "user", "content": "帮我写一段二手显卡出售文案，价格2000元，使用一年。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "价格购买与比较-false-4", "category": "价格购买与比较", "messages": [{"role": "user", "content": "只根据这些参数比较：A内存16GB价格4000，B内存32GB价格4500。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "价格购买与比较-false-5", "category": "价格购买与比较", "messages": [{"role": "user", "content": "不要查价格，解释买显卡时显存容量和带宽各有什么影响。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "出行门店与活动-true-1", "category": "出行门店与活动", "messages": [{"role": "user", "content": "查一下周六上海博物馆东馆几点开门。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "出行门店与活动-true-2", "category": "出行门店与活动", "messages": [{"role": "user", "content": "帮我看看明天深圳到广州南最早一班高铁几点。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "出行门店与活动-true-3", "category": "出行门店与活动", "messages": [{"role": "user", "content": "这周末杭州有哪些展览可以去？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "出行门店与活动-true-4", "category": "出行门店与活动", "messages": [{"role": "user", "content": "北京故宫现在需要提前几天预约？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "出行门店与活动-true-5", "category": "出行门店与活动", "messages": [{"role": "user", "content": "查一下深圳宝安机场今天有没有大面积延误。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "出行门店与活动-false-1", "category": "出行门店与活动", "messages": [{"role": "user", "content": "坐高铁一般要提前多久到站？给一般性建议就行。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "出行门店与活动-false-2", "category": "出行门店与活动", "messages": [{"role": "user", "content": "帮我把这些行程排成表格：9点博物馆，12点午饭，14点公园。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "出行门店与活动-false-3", "category": "出行门店与活动", "messages": [{"role": "user", "content": "写一段展览邀请文案，时间本周六下午两点，地点城市美术馆。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "出行门店与活动-false-4", "category": "出行门店与活动", "messages": [{"role": "user", "content": "解释登机口和航站楼的区别。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "出行门店与活动-false-5", "category": "出行门店与活动", "messages": [{"role": "user", "content": "我提供营业时间是周二至周日9点到17点，周一休息。周一能去吗？"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "资料检索与来源-true-1", "category": "资料检索与来源", "messages": [{"role": "user", "content": "找三篇介绍 RWKV 架构的论文，附原文链接。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "资料检索与来源-true-2", "category": "资料检索与来源", "messages": [{"role": "user", "content": "帮我搜几个 Python 异步编程的入门教程。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "资料检索与来源-true-3", "category": "资料检索与来源", "messages": [{"role": "user", "content": "找一下国家统计局公布的去年 GDP 数据，附来源。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "资料检索与来源-true-4", "category": "资料检索与来源", "messages": [{"role": "user", "content": "给我找出 Python 3.13 正式发布日期的官方依据。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "资料检索与来源-true-5", "category": "资料检索与来源", "messages": [{"role": "user", "content": "帮我检索远程工作对生产率影响的研究，不要编参考文献。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "资料检索与来源-false-1", "category": "资料检索与来源", "messages": [{"role": "user", "content": "解释什么是论文的 DOI。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "资料检索与来源-false-2", "category": "资料检索与来源", "messages": [{"role": "user", "content": "把这条参考文献改成统一格式：张三，机器学习导论，2020。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "资料检索与来源-false-3", "category": "资料检索与来源", "messages": [{"role": "user", "content": "帮我设计一组检索远程工作论文的关键词，先不用实际搜。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "资料检索与来源-false-4", "category": "资料检索与来源", "messages": [{"role": "user", "content": "搜索引擎倒排索引是什么？"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "资料检索与来源-false-5", "category": "资料检索与来源", "messages": [{"role": "user", "content": "根据以下资料写摘要：研究A发现提升10%，研究B发现无显著变化。不要补外部资料。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "新闻事实与现状-true-1", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "今天人工智能领域有什么大新闻？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "新闻事实与现状-true-2", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "现在英伟达的 CEO 是谁？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "新闻事实与现状-true-3", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "网上说 Python 要取消 GIL，查证一下具体情况。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "新闻事实与现状-true-4", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "查一下今年诺贝尔物理学奖公布了吗。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "新闻事实与现状-true-5", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "目前国际空间站上有多少名宇航员？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "新闻事实与现状-false-1", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "牛顿第二定律是什么？"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "新闻事实与现状-false-2", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "帮我把“今天发生了什么大新闻”翻译成英文。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "新闻事实与现状-false-3", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "写一个虚构的科技新闻标题。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "新闻事实与现状-false-4", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "仅按这条公告回答谁任CEO：董事会任命李明为CEO，即日起生效。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "新闻事实与现状-false-5", "category": "新闻事实与现状", "messages": [{"role": "user", "content": "不要联网，解释 GIL 的基本概念。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "网络操作与查看边界-true-1", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "直接访问 https://www.python.org ，看看首页有什么公告，不用搜索引擎。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "网络操作与查看边界-true-2", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "帮我找 RWKV 官方项目的直达链接。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "网络操作与查看边界-true-3", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "去 GitHub 看看 BlinkDL/RWKV-LM 的许可证是什么。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "网络操作与查看边界-true-4", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "查看 https://httpbin.org/get 返回了哪些字段。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "网络操作与查看边界-true-5", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "查一下 Cloudflare 官方现在有哪些免费套餐限制。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "网络操作与查看边界-false-1", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "什么叫下载直链？"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "网络操作与查看边界-false-2", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "告诉我如何用 curl 查看 HTTP 响应头，不用实际请求。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "网络操作与查看边界-false-3", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "只帮我检查这个URL字符串有没有协议：https://example.com/file.zip。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "网络操作与查看边界-false-4", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "帮我写一个检测网站连通性的脚本，不要执行。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "网络操作与查看边界-false-5", "category": "网络操作与查看边界", "messages": [{"role": "user", "content": "在聊天中解释怎么查看本机IP地址，给命令即可。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "表达改写与隐含时效-true-1", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "想装 Python，官网现在给的那个稳定版是几号？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "表达改写与隐含时效-true-2", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "最近 RWKV 有啥新动静？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "表达改写与隐含时效-true-3", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "去瞅一眼 GitHub 上这个项目还有没有人在维护：BlinkDL/RWKV-LM。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "表达改写与隐含时效-true-4", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "现在想去故宫逛逛，票还能约上不？"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "表达改写与隐含时效-true-5", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "帮我核对一下维基百科里关于 RWKV 的介绍。"}], "expected": true, "reason": "完成任务需要获取外部信息或明确要求访问/检索"}
+{"id": "表达改写与隐含时效-false-1", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "“帮我搜索最新版本”这句话有没有语病？"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "表达改写与隐含时效-false-2", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "给“查看官网更新”这几个字写三个按钮文案。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "表达改写与隐含时效-false-3", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "翻译成中文：Check the current stock price of NVIDIA."}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "表达改写与隐含时效-false-4", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "给一个需要联网和一个不需要联网的问题例子，不用真的查询。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "表达改写与隐含时效-false-5", "category": "表达改写与隐含时效", "messages": [{"role": "user", "content": "不要联网，只基于你已有知识解释 RWKV 的基本思路。"}], "expected": false, "reason": "仅需已有材料、稳定知识或编写指令，不执行外部访问"}
+{"id": "多轮上下文-1", "category": "多轮上下文", "messages": [{"role": "user", "content": "介绍一下英伟达。"}, {"role": "assistant", "content": "英伟达是一家芯片公司。"}, {"role": "user", "content": "它的现任CEO是谁？"}], "expected": true, "reason": "结合前文获取新的外部信息"}
+{"id": "多轮上下文-2", "category": "多轮上下文", "messages": [{"role": "user", "content": "我想了解 Python。"}, {"role": "assistant", "content": "你想了解哪方面？"}, {"role": "user", "content": "看看官网最新发布了什么版本。"}], "expected": true, "reason": "结合前文获取新的外部信息"}
+{"id": "多轮上下文-3", "category": "多轮上下文", "messages": [{"role": "user", "content": "这个项目地址是 https://github.com/BlinkDL/RWKV-LM 。"}, {"role": "assistant", "content": "收到项目地址。"}, {"role": "user", "content": "打开看看最近一次更新。"}], "expected": true, "reason": "结合前文获取新的外部信息"}
+{"id": "多轮上下文-4", "category": "多轮上下文", "messages": [{"role": "user", "content": "我周末想去上海博物馆东馆。"}, {"role": "assistant", "content": "你希望了解什么信息？"}, {"role": "user", "content": "现在要预约吗？"}], "expected": true, "reason": "结合前文获取新的外部信息"}
+{"id": "多轮上下文-5", "category": "多轮上下文", "messages": [{"role": "user", "content": "给我讲讲 RWKV。"}, {"role": "assistant", "content": "RWKV 是一种序列模型架构。"}, {"role": "user", "content": "有官方资料吗，帮我找几个链接。"}], "expected": true, "reason": "结合前文获取新的外部信息"}
+{"id": "多轮上下文-6", "category": "多轮上下文", "messages": [{"role": "user", "content": "接下来我发的内容都请翻译成英文，不用查资料。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "打开官网看看最新版本。"}], "expected": false, "reason": "前文限定为翻译、已有材料分析或只写代码/文案"}
+{"id": "多轮上下文-7", "category": "多轮上下文", "messages": [{"role": "user", "content": "页面内容已复制：基础版免费，专业版每月20元，支持导出。"}, {"role": "assistant", "content": "收到。"}, {"role": "user", "content": "查看一下哪个版本支持导出，只根据上文回答。"}], "expected": false, "reason": "前文限定为翻译、已有材料分析或只写代码/文案"}
+{"id": "多轮上下文-8", "category": "多轮上下文", "messages": [{"role": "user", "content": "帮我写网站检测脚本。"}, {"role": "assistant", "content": "你想用什么语言？"}, {"role": "user", "content": "Python就好，检查 https://example.com ，只给代码别执行。"}], "expected": false, "reason": "前文限定为翻译、已有材料分析或只写代码/文案"}
+{"id": "多轮上下文-9", "category": "多轮上下文", "messages": [{"role": "user", "content": "我给你价格：A套餐20元100GB，B套餐30元200GB。"}, {"role": "assistant", "content": "收到。"}, {"role": "user", "content": "看看哪个单位流量更便宜。"}], "expected": false, "reason": "前文限定为翻译、已有材料分析或只写代码/文案"}
+{"id": "多轮上下文-10", "category": "多轮上下文", "messages": [{"role": "user", "content": "我们在改写按钮文案。"}, {"role": "assistant", "content": "请提供原文。"}, {"role": "user", "content": "查看最新新闻。"}], "expected": false, "reason": "前文限定为翻译、已有材料分析或只写代码/文案"}

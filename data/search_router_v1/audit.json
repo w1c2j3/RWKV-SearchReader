@@ -1,0 +1,55 @@
+{
+  "train": {
+    "count": 240,
+    "true": 120,
+    "false": 120,
+    "groups": [
+      "air_environment",
+      "api_documentation",
+      "commerce_tracking",
+      "exchange",
+      "explicit_search",
+      "financial_announcements",
+      "flight",
+      "local_business",
+      "local_facilities",
+      "news",
+      "population_statistics",
+      "product_price",
+      "public_roles",
+      "public_rules",
+      "rail",
+      "software_outages",
+      "software_release",
+      "sports",
+      "stock_market",
+      "train_schedule_followup",
+      "travel_conditions",
+      "weather_forecast",
+      "weather_language_boundary",
+      "web_content"
+    ]
+  },
+  "validation": {
+    "count": 30,
+    "true": 15,
+    "false": 15,
+    "groups": [
+      "culture_events",
+      "historical_verification",
+      "math_programming"
+    ]
+  },
+  "test": {
+    "count": 30,
+    "true": 15,
+    "false": 15,
+    "groups": [
+      "academic_search",
+      "context_tasks",
+      "health_updates"
+    ]
+  },
+  "duplicate_messages": 0,
+  "groups_crossing_splits": 0
+}

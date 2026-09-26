@@ -1,0 +1,40 @@
+{"id": "v6-test-1-1", "group": "new_1", "messages": [{"role": "user", "content": "访问两所大学的招生简章原文，比较申请材料。"}], "expected": true}
+{"id": "v6-test-1-0", "group": "new_1", "messages": [{"role": "user", "content": "两校材料清单都已粘贴，按所给内容列交集。"}], "expected": false}
+{"id": "v6-test-2-1", "group": "new_2", "messages": [{"role": "user", "content": "找旧版和新版官方隐私政策，核对数据保留期限变化。"}], "expected": true}
+{"id": "v6-test-2-0", "group": "new_2", "messages": [{"role": "user", "content": "旧版保留7天、新版保留14天，仅按给定数字说明变化。"}], "expected": false}
+{"id": "v6-test-3-1", "group": "new_3", "messages": [{"role": "user", "content": "查目前汽油挂牌价，估算加满45升多少钱。"}], "expected": true}
+{"id": "v6-test-3-0", "group": "new_3", "messages": [{"role": "user", "content": "每升价格按题设8元，计算45升费用。"}], "expected": false}
+{"id": "v6-test-4-1", "group": "new_4", "messages": [{"role": "user", "content": "先查两家博物馆的成立日期，再算间隔年数。"}], "expected": true}
+{"id": "v6-test-4-0", "group": "new_4", "messages": [{"role": "user", "content": "已知成立年份为1980和1995，算相差几年。"}], "expected": false}
+{"id": "v6-test-5-1", "group": "new_5", "messages": [{"role": "user", "content": "这里只有书名，找到出版社介绍后总结主要内容。"}], "expected": true}
+{"id": "v6-test-5-0", "group": "new_5", "messages": [{"role": "user", "content": "这里只有书名，请指出还需要提供哪些材料。"}], "expected": false}
+{"id": "v6-test-6-1", "group": "new_6", "messages": [{"role": "user", "content": "查在线补充材料，确认文中没有贴出的样本分布。"}], "expected": true}
+{"id": "v6-test-6-0", "group": "new_6", "messages": [{"role": "user", "content": "根据已贴出的全部样本表，统计男女各多少人。"}], "expected": false}
+{"id": "v6-test-7-1", "group": "new_7", "messages": [{"role": "user", "content": "不做全网调查，只读取指定的公开说明页。"}], "expected": true}
+{"id": "v6-test-7-0", "group": "new_7", "messages": [{"role": "user", "content": "不要读取外链，只把说明页链接转成Markdown格式。"}], "expected": false}
+{"id": "v6-test-8-1", "group": "new_8", "messages": [{"role": "user", "content": "别继续改写传言了，确认该航线是否真的停飞。"}], "expected": true}
+{"id": "v6-test-8-0", "group": "new_8", "messages": [{"role": "user", "content": "把“确认航线是否停飞”改写成疑问句，不查航班。"}], "expected": false}
+{"id": "v6-test-9-1", "group": "new_9", "messages": [{"role": "user", "content": "引文“不要联网”只是被引用文本，本轮请核对原公告。"}], "expected": true}
+{"id": "v6-test-9-0", "group": "new_9", "messages": [{"role": "user", "content": "原文说“现在访问官网”；只解释这句话的语气。"}], "expected": false}
+{"id": "v6-test-10-1", "group": "new_10", "messages": [{"role": "user", "content": "请执行这一英语要求：Find the latest official changelog."}], "expected": true}
+{"id": "v6-test-10-0", "group": "new_10", "messages": [{"role": "user", "content": "请只翻译 Find the latest official changelog，不执行。"}], "expected": false}
+{"id": "v6-test-11-1", "group": "new_11", "messages": [{"role": "user", "content": "对照维护者最新文档确认这个参数是否已弃用。"}], "expected": true}
+{"id": "v6-test-11-0", "group": "new_11", "messages": [{"role": "user", "content": "这段完整函数代码中的局部变量为什么不可见？"}], "expected": false}
+{"id": "v6-test-12-1", "group": "new_12", "messages": [{"role": "user", "content": "查真实原文出处后，再把这句话译成中文。"}], "expected": true}
+{"id": "v6-test-12-0", "group": "new_12", "messages": [{"role": "user", "content": "原文和出处已经给好，只把作者姓名转为引用格式。"}], "expected": false}
+{"id": "v6-test-13-1", "group": "new_13", "messages": [{"role": "user", "content": "暂时不联网，只整理我写的统计摘要。"}, {"role": "assistant", "content": "已经整理为两句。"}, {"role": "user", "content": "给刚才那个统计结论补上真实来源链接。"}], "expected": true}
+{"id": "v6-test-13-0", "group": "new_13", "messages": [{"role": "user", "content": "暂时不联网，只整理我写的统计摘要。"}, {"role": "assistant", "content": "已经整理为两句。"}, {"role": "user", "content": "不用查证，把刚才那个统计结论写得更通顺。"}], "expected": false}
+{"id": "v6-test-14-1", "group": "new_14", "messages": [{"role": "user", "content": "准备看https://example.net/cache-x和https://example.net/cache-y。"}, {"role": "assistant", "content": "已记下两份说明的地址。"}, {"role": "user", "content": "进去读一下两边的缓存失效规则。"}], "expected": true}
+{"id": "v6-test-14-0", "group": "new_14", "messages": [{"role": "user", "content": "准备看https://example.net/cache-x和https://example.net/cache-y。"}, {"role": "assistant", "content": "已记下两份说明的地址。"}, {"role": "user", "content": "不用打开，把那两个网址去掉协议前缀。"}], "expected": false}
+{"id": "v6-test-15-1", "group": "new_15", "messages": [{"role": "user", "content": "帮我查伯尔尼明晚天气。"}, {"role": "assistant", "content": "将查询伯尔尼预报。"}, {"role": "user", "content": "我说错了，是苏黎世，查明晚是否下雪。"}], "expected": true}
+{"id": "v6-test-15-0", "group": "new_15", "messages": [{"role": "user", "content": "帮我查伯尔尼明晚天气。"}, {"role": "assistant", "content": "将查询伯尔尼预报。"}, {"role": "user", "content": "先不查了，把我刚才更正的城市名称写出来。"}], "expected": false}
+{"id": "v6-test-16-1", "group": "new_16", "messages": [{"role": "user", "content": "先离线整理展览笔记。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "补一个标题。"}, {"role": "assistant", "content": "已补。"}, {"role": "user", "content": "把第一段缩短。"}, {"role": "assistant", "content": "已缩短。"}, {"role": "user", "content": "去掉第二段重复句。"}, {"role": "assistant", "content": "已去掉。"}, {"role": "user", "content": "下面还有最后一个任务。"}, {"role": "assistant", "content": "请继续。"}, {"role": "user", "content": "现在另外查官网，看看这个展览还有没有延期公告。"}], "expected": true}
+{"id": "v6-test-16-0", "group": "new_16", "messages": [{"role": "user", "content": "先离线整理展览笔记。"}, {"role": "assistant", "content": "好的。"}, {"role": "user", "content": "补一个标题。"}, {"role": "assistant", "content": "已补。"}, {"role": "user", "content": "把第一段缩短。"}, {"role": "assistant", "content": "已缩短。"}, {"role": "user", "content": "去掉第二段重复句。"}, {"role": "assistant", "content": "已去掉。"}, {"role": "user", "content": "下面还有最后一个任务。"}, {"role": "assistant", "content": "请继续。"}, {"role": "user", "content": "依旧只用已有笔记，给展览安排起个标题。"}], "expected": false}
+{"id": "v6-test-17-1", "group": "new_17", "messages": [{"role": "user", "content": "查艺术馆开门时间。"}, {"role": "assistant", "content": "需要查官网。"}, {"role": "user", "content": "还要票价。"}, {"role": "assistant", "content": "也要查票务信息。"}, {"role": "user", "content": "再看预约规则。"}, {"role": "assistant", "content": "准备查询。"}, {"role": "user", "content": "最后换一个需求。"}, {"role": "assistant", "content": "请说。"}, {"role": "user", "content": "继续查询官网当前预约规则。"}], "expected": true}
+{"id": "v6-test-17-0", "group": "new_17", "messages": [{"role": "user", "content": "查艺术馆开门时间。"}, {"role": "assistant", "content": "需要查官网。"}, {"role": "user", "content": "还要票价。"}, {"role": "assistant", "content": "也要查票务信息。"}, {"role": "user", "content": "再看预约规则。"}, {"role": "assistant", "content": "准备查询。"}, {"role": "user", "content": "最后换一个需求。"}, {"role": "assistant", "content": "请说。"}, {"role": "user", "content": "暂停所有查询，仅计算18加29。"}], "expected": false}
+{"id": "v6-test-18-1", "group": "new_18", "messages": [{"role": "user", "content": "Verify the current maintainer against the official project page."}], "expected": true}
+{"id": "v6-test-18-0", "group": "new_18", "messages": [{"role": "user", "content": "Translate “verify the current maintainer” without doing the lookup."}], "expected": false}
+{"id": "v6-test-19-1", "group": "new_19", "messages": [{"role": "user", "content": "今の運休情報を公式サイトで確認してください。"}], "expected": true}
+{"id": "v6-test-19-0", "group": "new_19", "messages": [{"role": "user", "content": "「運休情報を調べて」という文を中国語に訳すだけにしてください。"}], "expected": false}
+{"id": "v6-test-20-1", "group": "new_20", "messages": [{"role": "user", "content": "表格只给了型号，请补查厂家当前售后年限再比较。"}], "expected": true}
+{"id": "v6-test-20-0", "group": "new_20", "messages": [{"role": "user", "content": "表格已写甲保修2年乙3年，仅按表格说谁更长。"}], "expected": false}

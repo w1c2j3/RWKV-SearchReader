@@ -84,17 +84,31 @@ Assistant: <think></think>
 判断材料是否足以覆盖问题和记录中的字段。足够只输出 ENOUGH；不足输出最多 {max_queries} 行新检索词，每行格式为 SEARCH: 检索词。
 ```
 
-## evidence_select
+## evidence_extract
+
+有明确字段且不是开放式综述/教程问题时，每次调用仍只读取一个网页摘要。模型不选择来源编号，来源由调用方绑定。
 
 ```text
-{source_summary_pairs}
+{page_title}
+{single_page_summary}
 
-对象：{subject}
-字段：{field}
+复制{subject}的{field}，只保留包含答案的最短原句。没有则输出 NONE。
+```
+
+日期字段会把最后一句替换为“复制明确写着该日期的完整原句；相关活动、申购日期不算”。
+
+## evidence_resolve
+
+同一对象的字段候选先组成原子二元组，再由一个 RWKV 整理为同一记录。不同对象不会放进同一个调用。
+
+```text
+{[[source_ids], {subject, field, fact}] pairs}
+
 当前日期：{date}
-选择一个直接支持该字段的来源；当前信息选择日期最新的来源。没有材料用 missing，冲突用 conflict。
+问题：{question}
+整理成一个一致的记录。每个字段只使用该字段下的值，不交换字段。
 只输出 JSON：
-{"source_id":"","status":"","fact":""}
+{"facts":[{"field":"","fact":"","source_ids":[]}]}
 ```
 
 ## reduce
@@ -116,7 +130,24 @@ Assistant: <think></think>
 
 ## finalize
 
-最终 RWKV 只读取漏斗最后一层的摘要二元组和已经完成指代补全的问题。典型 20 份网页摘要会并发归并为约 5 份材料，再进行一次最终回答。字段审核、审核状态、records、网页原文与重复对话不会进入该调用。
+标量字段问题的最终 RWKV 只读取已经绑定来源的字段记录；开放式综述、教程和代码示例仍读取漏斗最后一层的摘要二元组。网页原文与重复对话不会进入该调用。
+
+字段记录格式：
+
+```json
+[["S2", "S6"], {"subject":"宇树科技","field":"发行价","status":"supported","fact":"150.8元/股"}]
+```
+
+字段记录的 final 请求：
+
+```text
+{field_record_pairs}
+
+问题：{question}
+根据以上字段记录直接回答问题，每个字段只使用自己的值，只回答所问内容，合并重复内容，不推断材料没有的信息；材料不足就说明。事实后只用 [S1] 格式标注来源。
+```
+
+开放式问题的 final 请求：
 
 ```text
 {final_lineage_summary_pairs}

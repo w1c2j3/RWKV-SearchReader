@@ -1,0 +1,113 @@
+{
+  "total": 300,
+  "positive": 150,
+  "negative": 150,
+  "splits": {
+    "train": {
+      "count": 240,
+      "positive": 120,
+      "sha256": "082352a4daef0d8efca04ea6c65477fcb8bc24e475675cd63a85593f001bedb1"
+    },
+    "validation": {
+      "count": 30,
+      "positive": 15,
+      "sha256": "9a95cc64b2de201e383bea088d0f27f5d94a23f107295553ac039c7b0f0e27ca"
+    },
+    "test": {
+      "count": 30,
+      "positive": 15,
+      "sha256": "015977dc40e9bd9a860ba916b5925f076e58647eea82618ba0ef3b2dfdbf5551"
+    }
+  },
+  "train_group_counts": {
+    "air_environment": 5,
+    "api_documentation": 5,
+    "chat_boundary": 5,
+    "exchange": 5,
+    "explicit_search": 5,
+    "financial_announcements": 5,
+    "flight": 5,
+    "knowledge_boundary": 5,
+    "local_business": 5,
+    "local_facilities": 5,
+    "news": 5,
+    "population_statistics": 5,
+    "product_price": 5,
+    "public_roles": 5,
+    "rail": 5,
+    "software_outages": 5,
+    "software_release": 5,
+    "sports": 5,
+    "stock_market": 5,
+    "train_schedule_followup": 5,
+    "travel_conditions": 5,
+    "weather_forecast": 5,
+    "weather_language_boundary": 5,
+    "web_content": 5,
+    "linked_material": 10,
+    "papers_and_docs": 10,
+    "evidence_requests": 10,
+    "research_and_learning": 10,
+    "buying_and_services": 10,
+    "context_entities": 10,
+    "context_external_actions": 10,
+    "quoted_task_boundary": 10,
+    "colloquial_external": 10,
+    "navigation_and_status": 10,
+    "current_rules_and_tools": 10,
+    "daily_mixed": 10
+  },
+  "multiturn_counts": {
+    "train": 20,
+    "validation": 4,
+    "test": 6
+  },
+  "exact_duplicates": 0,
+  "common_regression_exact_overlap": 0,
+  "data_source": "v3 with 24 training rows replaced; total unchanged at 300",
+  "known_failure_informed": true,
+  "split_note": "Named scenario groups do not cross splits; task types intentionally recur across different subjects. No statistical independence claim.",
+  "selection_policy": "Training screens with validation accuracy/NLL; release also compares known everyday/basic regression and selects refinement epoch 1.",
+  "initialization_policy": "Base G1J weights frozen; refine selected v3 state after zero-state attempt underperformed.",
+  "replaced_training_rows": [
+    "research_and_learning-true-1",
+    "research_and_learning-true-2",
+    "research_and_learning-true-3",
+    "research_and_learning-true-4",
+    "evidence_requests-true-4",
+    "papers_and_docs-true-1",
+    "papers_and_docs-true-2",
+    "linked_material-true-4",
+    "colloquial_external-true-2",
+    "navigation_and_status-true-4",
+    "quoted_task_boundary-true-4",
+    "daily_mixed-true-5",
+    "papers_and_docs-false-2",
+    "papers_and_docs-false-4",
+    "quoted_task_boundary-false-2",
+    "quoted_task_boundary-false-4",
+    "quoted_task_boundary-false-5",
+    "colloquial_external-false-2",
+    "colloquial_external-false-4",
+    "navigation_and_status-false-5",
+    "daily_mixed-false-3",
+    "linked_material-false-3",
+    "evidence_requests-false-2",
+    "research_and_learning-false-4"
+  ],
+  "test_note": "The fixed test was inspected after v3; v4 scores are regression, not fresh holdout.",
+  "training_plan": {
+    "epochs": 2,
+    "lr": 0.0001,
+    "init_state": "runs/router-state-v3/best-state.pth",
+    "selection": "validation screening, then known everyday/basic regression for release",
+    "selected_epoch": 1
+  },
+  "stopped_attempt": {
+    "epochs_planned": 4,
+    "lr": 0.0007,
+    "init_state": null,
+    "reason": "first two validation rounds 15/30 and 17/30"
+  },
+  "cumulative_unique_training_examples": 264
+}

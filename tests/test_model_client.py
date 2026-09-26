@@ -119,6 +119,26 @@ def test_chat_omits_empty_system_message() -> None:
     ]
 
 
+def test_client_preserves_optional_access_headers() -> None:
+    client = OpenAICompatibleClient(
+        base_url="https://model.test/v1",
+        api_key="local",
+        model="rwkv",
+        timeout_seconds=10,
+        extra_headers={
+            "CF-Access-Client-Id": "test-id",
+            "CF-Access-Client-Secret": "test-secret",
+        },
+    )
+
+    assert client.headers == {
+        "Authorization": "Bearer local",
+        "Content-Type": "application/json",
+        "CF-Access-Client-Id": "test-id",
+        "CF-Access-Client-Secret": "test-secret",
+    }
+
+
 def test_model_connection_is_retried_after_a_transient_tunnel_failure(monkeypatch) -> None:
     client = OpenAICompatibleClient(
         base_url="http://model.test/v1",
