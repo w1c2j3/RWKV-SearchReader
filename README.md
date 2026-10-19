@@ -26,13 +26,13 @@ chmod 600 .env.local
 ```dotenv
 SEARCH_READER_SEARCH_PROVIDER=tavily
 TAVILY_API_KEY=your-tavily-key
-SEARCH_READER_RWKV_BASE_URL=http://127.0.0.1:29613/v1
+SEARCH_READER_RWKV_BASE_URL=https://api-13b.rwkvos.com/v1
 SEARCH_READER_RWKV_API_KEY=your-model-key
-SEARCH_READER_RWKV_MODEL=your-rwkv-model
-SEARCH_READER_RWKV_PROTOCOL=completions
+SEARCH_READER_RWKV_MODEL=rwkv7-g1k-13.3b-20260930-ctx25600.w8a16
+SEARCH_READER_RWKV_PROTOCOL=chat
 ```
 
-仅支持 Chat Completions 的模型服务需将协议设为 `chat`。示例配置还包含独立的 `SEARCH_READER_RWKV_FINAL_*` 配置：请改成实际的最终回答模型，或删除这四项以复用主模型。
+阅读、摘要和最终回答均使用 G1k 13.3B。示例配置中的 `SEARCH_READER_RWKV_FINAL_*` 也指向同一端点；若删除这些项，最终回答会复用主模型。请按模型服务要求填写凭据。
 
 其余配置见 [.env.example](.env.example)，包括替代搜索后端、并发数、材料预算和上传限制。
 
