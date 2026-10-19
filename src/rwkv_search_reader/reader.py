@@ -5173,7 +5173,7 @@ B：无关
             )
             if _recency_requested(question) and re.search(r"新闻|动态|热点|大事", question):
                 instruction += (
-                    "只总结网页主标题对应的事件；新闻合集仅保留明确属于用户时间范围的独立条目。"
+                    "只总结网页主标题对应的事件；新闻合集仅保留明确属于用户主题和时间范围的独立条目。"
                     "忽略导航、侧栏、相关推荐和其他文章标题，不能把它们当作本页发生的事件。"
                 )
             user = f"""网页标题：{chunk.title}
@@ -6119,14 +6119,10 @@ B：无关
             else ""
         )
         final_point_scope = (
-            "只回答这些检索点："
-            + "、".join(
-                dict.fromkeys(
-                    item.retrieval_point for item in ordered if item.retrieval_point
-                )
-            )
-            + "；不要增加其他对象。"
-            if any(item.retrieval_point for item in ordered)
+            "检索点只是内部资料标签，不是用户要求逐项回答的问题。"
+            "只保留直接回答本轮用户问题的事实；舍弃关键词相似但主题无关的分支，"
+            "不要复述检索点标题或重复同一事实。"
+            if not document_only and any(item.retrieval_point for item in ordered)
             else ""
         )
         derived_material = _requested_date_difference_material(

@@ -133,6 +133,8 @@
       .assistant-answer code { padding: 2px 5px; border-radius: 5px; background: #e9eeeb; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
       .assistant-answer pre { margin: 10px 0 14px; padding: 13px 15px; overflow-x: auto; border-radius: 12px; background: #18211f; color: #e7efec; line-height: 1.55; white-space: pre; }
       .assistant-answer pre code { padding: 0; background: transparent; color: inherit; }
+      .assistant-answer blockquote { margin: 8px 0 12px; padding: 4px 12px; border-left: 3px solid var(--soft-line); color: var(--muted); }
+      .answer-citation { margin: 0 2px; color: var(--mint); font-size: .82em; text-decoration: underline; text-underline-offset: 2px; }
       .answer-label { margin-bottom: 7px; color: var(--mint); font-size: 10px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
       .source-details { margin-top: 16px; }
       .source-details summary { width: fit-content; color: var(--muted); font-size: 11px; cursor: pointer; user-select: none; }
@@ -686,22 +688,32 @@
         body.appendChild(details);
       };
 
-      const appendInlineMarkdown = (parent, text) => {
-        const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*)/g;
+      const appendInlineMarkdown = (parent, text, sourcesById) => {
+        const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[S\d+\])/gi;
         let offset = 0;
         for (const match of text.matchAll(pattern)) {
           if (match.index > offset) parent.appendChild(document.createTextNode(text.slice(offset, match.index)));
           const token = match[0];
-          const node = document.createElement(token.startsWith('`') ? 'code' : 'strong');
-          node.textContent = token.startsWith('`') ? token.slice(1, -1) : token.slice(2, -2);
+          const source = token.startsWith('[') ? sourcesById.get(token.slice(1, -1).toUpperCase()) : null;
+          const sourceUrl = source && /^https?:\/\//i.test(source.url || '') ? source.url : '';
+          const node = document.createElement(sourceUrl ? 'a' : token.startsWith('[') ? 'span' : token.startsWith('`') ? 'code' : 'strong');
+          node.textContent = token.startsWith('[') ? token.toUpperCase() : token.startsWith('`') ? token.slice(1, -1) : token.slice(2, -2);
+          if (sourceUrl) node.className = 'answer-citation';
+          if (sourceUrl) {
+            node.href = sourceUrl;
+            node.target = '_blank';
+            node.rel = 'noreferrer noopener';
+            node.title = source.title || sourceUrl;
+          }
           parent.appendChild(node);
           offset = match.index + token.length;
         }
         if (offset < text.length) parent.appendChild(document.createTextNode(text.slice(offset)));
       };
 
-      const renderAnswer = (container, value) => {
+      const renderAnswer = (container, value, sources = []) => {
         const text = String(value || '没有生成回答。').replace(/\r\n?/g, '\n');
+        const sourcesById = new Map(sources.map((source) => [String(source.source_id || '').toUpperCase(), source]));
         const segments = text.split(/```/);
         segments.forEach((segment, segmentIndex) => {
           if (segmentIndex % 2) {
@@ -717,16 +729,18 @@
           let activeList = null;
           let activeType = '';
           const closeList = () => { activeList = null; activeType = ''; };
-          segment.split('\n').forEach((rawLine) => {
-            const line = rawLine.trimEnd();
+          segment.replace(/([：:。；;])\s*-\s+(?=\*\*[^*\n]+\*\*)/g, '$1\n- ').split('\n').forEach((rawLine) => {
+            const escapedQuote = /^\s*\\>/.test(rawLine);
+            const line = rawLine.trimEnd().replace(/^(\s*)\\>/, '$1>');
             if (!line.trim()) { closeList(); return; }
             const heading = line.match(/^(#{1,3})\s+(.+)$/);
             const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
             const numbered = line.match(/^\s*\d+[.)、]\s+(.+)$/);
+            const quote = escapedQuote ? null : line.match(/^\s*>\s?(.*)$/);
             if (heading) {
               closeList();
               const node = document.createElement(`h${heading[1].length}`);
-              appendInlineMarkdown(node, heading[2]);
+              appendInlineMarkdown(node, heading[2], sourcesById);
               container.appendChild(node);
               return;
             }
@@ -738,14 +752,14 @@
                 container.appendChild(activeList);
               }
               const item = document.createElement('li');
-              appendInlineMarkdown(item, (bullet || numbered)[1]);
+              appendInlineMarkdown(item, (bullet || numbered)[1], sourcesById);
               activeList.appendChild(item);
               return;
             }
             closeList();
-            const paragraph = document.createElement('p');
-            appendInlineMarkdown(paragraph, line);
-            container.appendChild(paragraph);
+            const node = document.createElement(quote ? 'blockquote' : 'p');
+            appendInlineMarkdown(node, quote ? quote[1] : line, sourcesById);
+            container.appendChild(node);
           });
         });
       };
@@ -756,7 +770,7 @@
         label.textContent = '回答';
         const answer = document.createElement('div');
         answer.className = 'assistant-answer';
-        renderAnswer(answer, data.answer);
+        renderAnswer(answer, data.answer, data.sources || []);
         body.append(label, answer);
         appendSources(body, data.sources || []);
         const meta = document.createElement('div');
