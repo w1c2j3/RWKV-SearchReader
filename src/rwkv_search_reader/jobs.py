@@ -230,7 +230,7 @@ def owner_for(authorization):
 router = APIRouter()
 
 
-_DECISION_SLOTS = threading.BoundedSemaphore(2)
+_DECISION_SLOTS = threading.BoundedSemaphore(8)
 
 
 class SearchDecisionResponse(BaseModel):

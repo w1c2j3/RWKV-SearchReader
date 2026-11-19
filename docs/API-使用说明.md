@@ -2,7 +2,7 @@
 
 下文用 `http://api.example.com:18080` 作示例地址；接入时替换为实际服务地址。
 
-2026-09-15 已更新服务器上的联网判断 state；以下请求、响应和流式调用方式不变。
+2026-11-19 已全面升级为 **RWKV-7 G1L 纯续写（Pure Continuation）+ DSH 原生协议 NoRA 适配器（`dsh-searchreader-g1l-r32`）** 多卡并发推理与 **DeepSeek Search & Fetch API** 检索后端；对外 HTTP/SSE 请求、响应字段与调用方式完全保持兼容。
 
 本文中，“对方”指 RWKV Chat 调用方，“我们”指 SearchReader 服务。对方向我们发送 HTTP 请求，我们返回 JSON 或 SSE 事件流。所有业务请求携带同一个 `Authorization: Bearer YOUR_API_KEY`。
 

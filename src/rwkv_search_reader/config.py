@@ -68,6 +68,26 @@ def _cf_access_headers(client_id: str, client_secret: str) -> dict[str, str]:
     return headers
 
 
+def _split_urls(value: str) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            item.strip().rstrip("/")
+            for item in str(value or "").replace("\n", ",").split(",")
+            if item.strip()
+        )
+    )
+
+
+def _first_deepseek_key() -> str:
+    """Return one active DeepSeek API key for /v1/tools/search and /v1/tools/fetch."""
+
+    for name in ("DEEPSEEK_API_KEY", "SEARCH_READER_DEEPSEEK_API_KEY"):
+        direct = _text(name).strip("'\"")
+        if direct:
+            return direct
+    return ""
+
+
 def _first_tavily_key() -> str:
     """Return one active Tavily key; never activate a credential pool."""
 
@@ -103,7 +123,10 @@ if not (_text("TAVILY_API_KEY") or _text("TAVILY_API_KEYS")):
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    search_provider: str = "tavily"
+    search_provider: str = "deepseek"
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_need_content: bool = True
     tavily_api_key: str = ""
     tavily_api_keys: tuple[str, ...] = ()
     wigolo_base_url: str = "http://127.0.0.1:3333"
@@ -113,7 +136,7 @@ class Settings:
     fetch_pages: int = 10
     research_plan_enabled: bool = False
     research_plan_max_queries: int = 4
-    review_max_rounds: int = 2
+    review_max_rounds: int = 1
     review_max_queries: int = 3
     conversation_turns: int = 100
     request_timeout_seconds: int = 45
@@ -128,14 +151,27 @@ class Settings:
     router_timeout_seconds: int = 20
     router_cf_access_client_id: str = ""
     router_cf_access_client_secret: str = ""
+    router_adapter_id: str = ""
+    router_state_id: str = ""
 
-    rwkv_base_url: str = "http://127.0.0.1:29613/v1"
+    execution_mode: str = "pipeline"
+    pi_agent_max_turns: int = 12
+    pi_epoch_budget_tokens: int = 9600
+
+    rwkv_base_url: str = "http://127.0.0.1:18430/v1"
     rwkv_api_key: str = "local"
     rwkv_model: str = ""
     rwkv_protocol: str = "completions"
+    rwkv_context_window: int = 34304
+    rwkv_sweet_spot_tokens: int = 9600
+    rwkv_thinking_mode: str = "auto"
+    rwkv_adapter_id: str = ""
+    rwkv_adapter_version: str = ""
+    rwkv_adapter_scale: float = 1.0
+    rwkv_state_id: str = ""
     rwkv_cf_access_client_id: str = ""
     rwkv_cf_access_client_secret: str = ""
-    rwkv_summary_workers: int = 10
+    rwkv_summary_workers: int = 12
     rwkv_summary_max_tokens: int = 1024
     rwkv_reduce_chunk_chars: int = 6000
     rwkv_reduce_fan_in: int = 4
@@ -168,8 +204,20 @@ class Settings:
     trace_max_total_bytes: int = 1_000_000_000
 
     @property
+    def rwkv_base_urls(self) -> tuple[str, ...]:
+        return _split_urls(self.rwkv_base_url)
+
+    @property
+    def final_base_urls(self) -> tuple[str, ...]:
+        return _split_urls(self.final_base_url)
+
+    @property
+    def router_base_urls(self) -> tuple[str, ...]:
+        return _split_urls(self.router_base_url)
+
+    @property
     def rwkv_configured(self) -> bool:
-        return bool(self.rwkv_base_url and self.rwkv_model)
+        return bool(self.rwkv_base_urls and self.rwkv_model)
 
     @property
     def final_model(self) -> str:
@@ -212,6 +260,7 @@ class Settings:
 
     def readiness(self) -> dict[str, object]:
         provider_ready = {
+            "deepseek": bool(self.deepseek_api_key),
             "tavily": bool(self.tavily_api_keys or self.tavily_api_key),
             "wigolo": bool(self.wigolo_base_url),
             "searxng": bool(self.searxng_base_url),
@@ -221,7 +270,19 @@ class Settings:
             "retrieval_mode": "web-or-attached-documents",
             "search_provider": self.search_provider,
             "search_configured": provider_ready,
-            "reader_mode": "rwkv-reviewed-parallel-funnel-final-summary",
+            "reader_mode": (
+                "dsh-rwkv-wire-think-v2.0"
+                if self.execution_mode == "dsh_agent"
+                else "rwkv-pi-xml-continuation-v3"
+                if self.execution_mode == "pi_agent"
+                else "rwkv-pure-continuation-parallel-reader"
+            ),
+            "execution_mode": self.execution_mode,
+            "thinking_mode": self.rwkv_thinking_mode,
+            "context_window": self.rwkv_context_window,
+            "sweet_spot_tokens": self.rwkv_sweet_spot_tokens,
+            "protocol": self.rwkv_protocol,
+            "endpoint_count": len(self.rwkv_base_urls),
             "summary_workers": self.rwkv_summary_workers,
             "summary_max_tokens": self.rwkv_summary_max_tokens,
             "reduce_chunk_chars": self.rwkv_reduce_chunk_chars,
@@ -235,37 +296,61 @@ class Settings:
             "research_plan_max_queries": self.research_plan_max_queries,
             "rwkv_configured": self.rwkv_configured,
             "final_model": self.final_model,
-            "final_model_configured": bool(self.final_base_url and self.final_model),
+            "final_model_configured": bool(self.final_base_urls and self.final_model),
             "answer_max_tokens": self.rwkv_max_tokens,
         }
 
 
+def _continuation_protocol(raw: str, *, allow_empty: bool = False) -> str:
+    value = raw.casefold()
+    if allow_empty and not value:
+        return ""
+    if value in {"lightning", "batch_completions", "batch"}:
+        return "lightning"
+    return "completions"
+
+
 def get_settings() -> Settings:
-    provider = _text("SEARCH_READER_SEARCH_PROVIDER", "tavily").casefold()
-    if provider not in {"tavily", "wigolo", "searxng"}:
-        provider = "tavily"
-    protocol = _text("SEARCH_READER_RWKV_PROTOCOL", "completions").casefold()
-    if protocol not in {"completions", "chat"}:
-        protocol = "completions"
-    final_protocol = _text("SEARCH_READER_RWKV_FINAL_PROTOCOL").casefold()
-    if final_protocol not in {"", "completions", "chat"}:
-        final_protocol = ""
+    provider = _text("SEARCH_READER_SEARCH_PROVIDER", "deepseek").casefold()
+    if provider not in {"deepseek", "tavily", "wigolo", "searxng"}:
+        provider = "deepseek"
+    protocol = _continuation_protocol(_text("SEARCH_READER_RWKV_PROTOCOL", "completions"))
+    final_protocol = _continuation_protocol(
+        _text("SEARCH_READER_RWKV_FINAL_PROTOCOL"), allow_empty=True
+    )
+    router_protocol = _continuation_protocol(
+        _text("SEARCH_READER_ROUTER_PROTOCOL", "completions")
+    )
+    execution_mode = _text("SEARCH_READER_EXECUTION_MODE", "pipeline").casefold()
+    if execution_mode == "dsh":
+        execution_mode = "dsh_agent"
+    if execution_mode not in {"pipeline", "pi_agent", "dsh_agent"}:
+        execution_mode = "pipeline"
+    thinking_mode = _text("SEARCH_READER_RWKV_THINKING_MODE", "auto").casefold()
+    if thinking_mode not in {"off", "auto", "on"}:
+        thinking_mode = "auto"
     chunk_chars = _integer("SEARCH_READER_CHUNK_CHARS", 2600, 600, 12000)
+    deepseek_api_key = _first_deepseek_key()
     tavily_api_key = _first_tavily_key()
     return Settings(
         search_provider=provider,
+        deepseek_api_key=deepseek_api_key,
+        deepseek_base_url=_text(
+            "SEARCH_READER_DEEPSEEK_BASE_URL", "https://api.deepseek.com"
+        ).rstrip("/"),
+        deepseek_need_content=_boolean("SEARCH_READER_DEEPSEEK_NEED_CONTENT", True),
         tavily_api_key=tavily_api_key,
         tavily_api_keys=(tavily_api_key,) if tavily_api_key else (),
         wigolo_base_url=_text("SEARCH_READER_WIGOLO_BASE_URL", "http://127.0.0.1:3333"),
         wigolo_api_token=_text("SEARCH_READER_WIGOLO_API_TOKEN"),
         searxng_base_url=_text("SEARCH_READER_SEARXNG_BASE_URL"),
-        search_max_results=_integer("SEARCH_READER_SEARCH_MAX_RESULTS", 10, 1, 10),
-        fetch_pages=_integer("SEARCH_READER_FETCH_PAGES", 10, 1, 10),
+        search_max_results=_integer("SEARCH_READER_SEARCH_MAX_RESULTS", 8, 1, 10),
+        fetch_pages=_integer("SEARCH_READER_FETCH_PAGES", 8, 1, 10),
         research_plan_enabled=_boolean("SEARCH_READER_RESEARCH_PLAN_ENABLED", True),
         research_plan_max_queries=_integer(
             "SEARCH_READER_RESEARCH_PLAN_MAX_QUERIES", 4, 1, 6
         ),
-        review_max_rounds=_integer("SEARCH_READER_REVIEW_MAX_ROUNDS", 2, 0, 10),
+        review_max_rounds=_integer("SEARCH_READER_REVIEW_MAX_ROUNDS", 1, 0, 10),
         review_max_queries=_integer("SEARCH_READER_REVIEW_MAX_QUERIES", 3, 1, 4),
         conversation_turns=_integer("SEARCH_READER_CONVERSATION_TURNS", 100, 1, 100),
         request_timeout_seconds=_integer(
@@ -283,26 +368,44 @@ def get_settings() -> Settings:
         router_base_url=_text("SEARCH_READER_ROUTER_BASE_URL"),
         router_api_key=_text("SEARCH_READER_ROUTER_API_KEY", "local"),
         router_model=_text("SEARCH_READER_ROUTER_MODEL"),
-        router_protocol=_text("SEARCH_READER_ROUTER_PROTOCOL", "completions"),
+        router_protocol=router_protocol,
         router_timeout_seconds=_integer("SEARCH_READER_ROUTER_TIMEOUT_SECONDS", 20, 1, 120),
         router_cf_access_client_id=_text("SEARCH_READER_ROUTER_CF_ACCESS_CLIENT_ID"),
         router_cf_access_client_secret=_text("SEARCH_READER_ROUTER_CF_ACCESS_CLIENT_SECRET"),
-        rwkv_base_url=_text("SEARCH_READER_RWKV_BASE_URL", "http://127.0.0.1:29613/v1"),
+        router_adapter_id=_text("SEARCH_READER_ROUTER_ADAPTER_ID"),
+        router_state_id=_text("SEARCH_READER_ROUTER_STATE_ID"),
+        execution_mode=execution_mode,
+        pi_agent_max_turns=_integer("SEARCH_READER_PI_AGENT_MAX_TURNS", 12, 2, 48),
+        pi_epoch_budget_tokens=_integer(
+            "SEARCH_READER_PI_EPOCH_BUDGET_TOKENS", 9600, 2000, 65536
+        ),
+        rwkv_base_url=_text("SEARCH_READER_RWKV_BASE_URL", "http://127.0.0.1:18430/v1"),
         rwkv_api_key=_text("SEARCH_READER_RWKV_API_KEY", "local"),
         rwkv_model=_text("SEARCH_READER_RWKV_MODEL"),
         rwkv_protocol=protocol,
+        rwkv_context_window=_integer(
+            "SEARCH_READER_RWKV_CONTEXT_WINDOW", 34304, 4096, 262144
+        ),
+        rwkv_sweet_spot_tokens=_integer(
+            "SEARCH_READER_RWKV_SWEET_SPOT_TOKENS", 9600, 2000, 32768
+        ),
+        rwkv_thinking_mode=thinking_mode,
+        rwkv_adapter_id=_text("SEARCH_READER_RWKV_ADAPTER_ID"),
+        rwkv_adapter_version=_text("SEARCH_READER_RWKV_ADAPTER_VERSION"),
+        rwkv_adapter_scale=_number("SEARCH_READER_RWKV_ADAPTER_SCALE", 1.0, 0.0, 4.0),
+        rwkv_state_id=_text("SEARCH_READER_RWKV_STATE_ID"),
         rwkv_cf_access_client_id=_text("SEARCH_READER_RWKV_CF_ACCESS_CLIENT_ID"),
         rwkv_cf_access_client_secret=_text("SEARCH_READER_RWKV_CF_ACCESS_CLIENT_SECRET"),
-        rwkv_summary_workers=_integer("SEARCH_READER_RWKV_SUMMARY_WORKERS", 10, 1, 32),
+        rwkv_summary_workers=_integer("SEARCH_READER_RWKV_SUMMARY_WORKERS", 12, 1, 32),
         rwkv_summary_max_tokens=_integer(
             "SEARCH_READER_RWKV_SUMMARY_MAX_TOKENS", 1024, 96, 2048
         ),
         rwkv_reduce_chunk_chars=_integer(
-            "SEARCH_READER_RWKV_REDUCE_CHUNK_CHARS", 6000, 1200, 12000
+            "SEARCH_READER_RWKV_REDUCE_CHUNK_CHARS", 6000, 1200, 16000
         ),
         rwkv_reduce_fan_in=_integer("SEARCH_READER_RWKV_REDUCE_FAN_IN", 4, 2, 8),
         rwkv_final_material_chars=_integer(
-            "SEARCH_READER_RWKV_FINAL_MATERIAL_CHARS", 9000, 3000, 12000
+            "SEARCH_READER_RWKV_FINAL_MATERIAL_CHARS", 9000, 3000, 24000
         ),
         rwkv_max_tokens=_integer("SEARCH_READER_RWKV_MAX_TOKENS", 4090, 128, 4090),
         rwkv_temperature=_number("SEARCH_READER_RWKV_TEMPERATURE", 0.1, 0.0, 2.0),

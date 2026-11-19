@@ -12,8 +12,11 @@ logs/*.sqlite3*
 runs/
 .env.server
 logs/*.log
+logs/*.pid
+logs/*.lock
 .env
 evals/results/
 data/*.sqlite3*
 data/*.log
 data/*.pid
+data/*.lock

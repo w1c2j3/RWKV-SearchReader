@@ -25,6 +25,8 @@ class SearchHit:
         default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
     language: str | None = None
+    authority: int = 0
+    site_name: str = ""
 
 
 @dataclass(slots=True)
@@ -38,6 +40,7 @@ class DocumentChunk:
     published_date: str = ""
     retrieval_point: str = ""
     retrieval_query: str = ""
+    authority: int = 0
 
 
 @dataclass(slots=True)
@@ -52,6 +55,7 @@ class Evidence:
     published_date: str = ""
     retrieval_point: str = ""
     retrieval_query: str = ""
+    authority: int = 0
 
 
 @dataclass(slots=True)

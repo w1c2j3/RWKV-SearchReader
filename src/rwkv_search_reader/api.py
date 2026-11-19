@@ -394,11 +394,13 @@ def health() -> dict[str, Any]:
 def readiness() -> dict[str, Any]:
     settings = get_settings()
     payload = settings.readiness()
-    reader_reachable = _endpoint_reachable(settings.rwkv_base_url)
+    reader_reachable = any(
+        _endpoint_reachable(url) for url in settings.rwkv_base_urls
+    )
     final_reachable = (
         reader_reachable
-        if settings.final_base_url == settings.rwkv_base_url
-        else _endpoint_reachable(settings.final_base_url)
+        if settings.final_base_urls == settings.rwkv_base_urls
+        else any(_endpoint_reachable(url) for url in settings.final_base_urls)
     )
     payload["reader_model_reachable"] = reader_reachable
     payload["final_model_reachable"] = final_reachable

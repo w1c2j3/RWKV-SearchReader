@@ -18,6 +18,11 @@ import yaml
 
 from .config import Settings
 from .documents import full_document_read_requested
+from .epoch_compress import (
+    DEFAULT_EPOCH_BACKBONE_MAX_TOKENS,
+    estimate_rwkv_tokens,
+    slim_sweet_spot_text,
+)
 from .model_client import OpenAICompatibleClient
 from .models import (
     DocumentChunk,
@@ -104,7 +109,7 @@ _CONTEXT_REFERENCE_RE = re.compile(
 )
 _PREVIOUS_TURN_REFERENCE_RE = re.compile(
     r"^\s*(?:它|它们|他们|她们|这个|那个|这些|那些|这两个|那两个|"
-    r"二者|两者|那|那么|然后)|上述|前者|后者|刚才|前面|之前|此前"
+    r"二者|两者|那|那么|然后)|上述|上面|上文|这两|那两|两者|二者|前者|后者|刚才|前面|之前|此前"
 )
 _KNOWN_SECONDARY_HOSTS = (
     "wikipedia.org",
@@ -122,6 +127,10 @@ _FINAL_MODEL_STAGES = {
     "document",
     "finalize",
     "memory",
+}
+_OPEN_THINK_STAGES = {
+    "branch_finalize",
+    "finalize",
 }
 _SCOPE_ACCEPTANCE_RE = re.compile(
     r"^(?:都需要|都要|全部|全都要|所有|这些都要|就这些|都可以|都行)[。.!！?？]*$"
@@ -147,7 +156,7 @@ def _parse_source_summary(value: str) -> str:
     """Remove transport wrappers and exact sentence repetition only."""
 
     text = str(value or "").strip()
-    text = re.sub(r"^\x60{3}(?:text|markdown)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\x60{3}(?:text|markdown|json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*\x60{3}$", "", text)
     text = re.sub(r"^\s*<(?:材料|摘要|summary)>\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*</(?:材料|摘要|summary)>\s*$", "", text, flags=re.IGNORECASE)
@@ -245,6 +254,12 @@ def _normalize_numeric_markup(value: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    text = re.sub(
+        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_names})\.?\b",
+        lambda match: f"{match.group(1)} {_ENGLISH_MONTHS[match.group(2).casefold()]}",
+        text,
+        flags=re.IGNORECASE,
+    )
 
     def replace_fraction(match: re.Match[str]) -> str:
         try:
@@ -273,6 +288,7 @@ def _normalize_numeric_markup(value: str) -> str:
 
 def _normalized_number_pairs(value: str) -> list[tuple[str, str]]:
     value = _normalize_numeric_markup(value)
+    value = re.sub(r"\[S\d+\]", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"(?m)^\s*(?:#{1,6}\s*)?\d{1,3}[.)、]\s+", "", value)
     normalized: list[tuple[str, str]] = []
     for match in _NUMBER_RE.finditer(value):
@@ -307,7 +323,10 @@ def _normalized_numbers(value: str) -> set[str]:
 
 
 def _unsupported_summary_numbers(summary: str, material: str) -> set[str]:
-    material_numbers = _normalized_numbers(material)
+    durations = _derived_duration_equivalents(material)
+    material_numbers = _normalized_numbers(
+        f"{material}\n{durations}" if durations else material
+    )
     return {
         display
         for canonical, display in _normalized_number_pairs(summary)
@@ -338,6 +357,21 @@ def _normalized_full_dates(value: str) -> set[str]:
         flags=re.IGNORECASE,
     ):
         month_name, day, year = match.groups()
+        try:
+            dates.add(
+                date(
+                    int(year), _ENGLISH_MONTHS[month_name.casefold()], int(day)
+                ).isoformat()
+            )
+        except ValueError:
+            continue
+    for match in re.finditer(
+        rf"\b(3[01]|[12]\d|0?[1-9])(?:st|nd|rd|th)?\s+({month_names})\.?"
+        rf",?\s+(20\d{{2}})\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        day, month_name, year = match.groups()
         try:
             dates.add(
                 date(
@@ -392,23 +426,56 @@ def _requested_date_difference_material(material: str, question: str) -> str:
     )
 
 
+def _derived_duration_equivalents(material: str) -> str:
+    """Expose exact unit conversions for duration literals such as 1m30s -> 90s."""
+
+    conversions: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9])(?:(?P<h>\d{1,3})h)?(?:(?P<m>\d{1,3})m)(?:(?P<s>\d{1,3})s)?(?![A-Za-z0-9])",
+        str(material or ""),
+    ):
+        raw = match.group(0)
+        if raw in seen:
+            continue
+        seen.add(raw)
+        hours = int(match.group("h") or 0)
+        minutes = int(match.group("m") or 0)
+        seconds = int(match.group("s") or 0)
+        total_seconds = hours * 3600 + minutes * 60 + seconds
+        total_minutes = hours * 60 + minutes
+        conversions.append(f"时长换算：{raw} = {total_seconds}s（{total_minutes}m）")
+        if len(conversions) >= 20:
+            break
+    return "\n".join(conversions)
+
+
 def _final_validation_material(material: str, question: str) -> str:
-    """Include question constants and explicitly requested date arithmetic.
+    """Include question constants and explicitly requested date/duration arithmetic.
 
     The final reader may legitimately repeat an identifier from the question, or
-    use a deterministic day interval derived from two dates in the evidence.
+    use a deterministic day interval / duration conversion derived from evidence.
     Neither case is a newly invented number.
     """
 
     derived = _requested_date_difference_material(material, question)
-    return f"{material}\n{derived}\n用户问题：{question}".strip()
+    durations = _derived_duration_equivalents(material)
+    return f"{material}\n{derived}\n{durations}\n用户问题：{question}".strip()
 
 
 def _remove_unsupported_number_sentences(summary: str, material: str) -> str:
     """Keep supported parts of a summary instead of discarding the whole page."""
 
     lines: list[str] = []
+    in_fence = False
     for raw_line in str(summary or "").splitlines() or [str(summary or "")]:
+        if raw_line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            lines.append(raw_line.rstrip())
+            continue
+        if in_fence:
+            lines.append(raw_line.rstrip())
+            continue
         prefix = ""
         content = raw_line.strip()
         marker = re.match(r"^\s*((?:[-*+]\s+)|(?:\d{1,3}[.)、]\s+))(.*)$", raw_line)
@@ -438,24 +505,31 @@ def _normalized_copy_text(value: str) -> str:
 def _copied_fact_supported(fact: str, material: str) -> bool:
     fact_key = _normalized_copy_text(fact)
     material_key = _normalized_copy_text(material)
-    if fact_key in material_key:
+    if fact_key and fact_key in material_key:
         return True
-    date_pattern = re.compile(
-        r"(?<!\d)(\d{4})[年/.-](\d{1,2})[月/.-](\d{1,2})(?:日)?(?!\d)"
-    )
-    fact_dates = {
-        tuple(int(value) for value in match)
-        for match in date_pattern.findall(str(fact or ""))
-    }
-    material_dates = {
-        tuple(int(value) for value in match)
-        for match in date_pattern.findall(str(material or ""))
-    }
+    fact_dates = _normalized_full_dates(fact)
+    material_dates = _normalized_full_dates(material)
     if fact_dates and not fact_dates <= material_dates:
         return False
+    fact_numbers = _normalized_numbers(fact)
+    if fact_numbers and not fact_numbers <= _normalized_numbers(material):
+        if not (fact_dates and fact_dates <= material_dates):
+            return False
     fact_terms = _claim_terms(fact)
     material_terms = _claim_terms(material)
-    return bool(_normalized_numbers(fact)) and fact_terms <= material_terms
+    if not fact_terms:
+        return bool(fact_dates or fact_numbers)
+    if fact_numbers or fact_dates:
+        return fact_terms <= material_terms or (
+            len(fact_terms) >= 3
+            and (len(fact_terms & material_terms) / len(fact_terms)) >= 0.85
+        )
+    if fact_terms <= material_terms:
+        return True
+    return (
+        len(fact_terms) >= 4
+        and (len(fact_terms & material_terms) / len(fact_terms)) >= 0.85
+    )
 
 
 def _eligible_evidence(question: str, evidence: list[Evidence]) -> list[Evidence]:
@@ -1946,7 +2020,10 @@ def _source_relevance(question: str, evidence: Evidence) -> float:
     # actual title and source text so invented claims cannot boost a hit.
     source_terms = _claim_terms(f"{evidence.title} {evidence.quote[:2000]}")
     coverage = len(question_terms & source_terms) / max(1, len(question_terms))
-    return coverage * 0.65 + max(0.0, min(1.0, evidence.score)) * 0.35
+    raw_score = max(0.0, float(evidence.score or 0.0))
+    normalized_score = min(1.0, raw_score / 3.0) if raw_score > 1.0 else raw_score
+    authority_bonus = max(0, min(4, int(getattr(evidence, "authority", 0) or 0))) * 0.04
+    return coverage * 0.65 + normalized_score * 0.35 + authority_bonus
 
 
 def _document_answer_points(question: str) -> list[str]:
@@ -2423,8 +2500,20 @@ def _clean_final_answer(value: str) -> str:
         text,
     )
     text = re.sub(
-        r"\[\s*s(\d+)\s*\]",
+        r"(?ms)\n*\s*(?:#{1,6}\s*|\*\*)?来源身份索引[^\n]*\n(?:^\s*\{[^\n]*$\n?)+",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"[\[\【]\s*s(\d+)\s*[\]\】]",
         lambda match: f"[S{match.group(1)}]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\s*[（(]\s*来源\s*[:：]\s*(S\d+(?:[、，,\s]+S\d+)*)\s*[)）]",
+        lambda match: " "
+        + "".join(f"[S{num}]" for num in re.findall(r"\d+", match.group(1))),
         text,
         flags=re.IGNORECASE,
     )
@@ -2648,25 +2737,97 @@ def _bind_previous_question_anchor(question: str, previous_question: str) -> str
     )
 
 
+def _unwrap_extracted_fact(raw: str, field: str) -> str:
+    """Unwrap accidental JSON or code-fenced outputs from pure continuation."""
+
+    text = str(raw or "").strip()
+    text = re.sub(r"^\x60{3}[a-zA-Z0-9_-]*\s*", "", text)
+    text = re.sub(r"\s*\x60{3}$", "", text)
+    text = re.sub(r"^json\s*(?=\{)", "", text, flags=re.IGNORECASE).strip()
+    if text.startswith("{"):
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            field_norm = _normalized_text(field)
+            for key, val in payload.items():
+                if _normalized_text(str(key)) == field_norm and isinstance(val, (str, int, float)):
+                    return str(val).strip()
+            for preferred in ("fact", "value", "answer", "url", "version", "version_name", "date", "theme"):
+                val = payload.get(preferred)
+                if isinstance(val, (str, int, float)) and str(val).strip():
+                    return str(val).strip()
+            for val in payload.values():
+                if isinstance(val, (str, int, float)) and str(val).strip():
+                    return str(val).strip()
+            return "NONE"
+    return _parse_source_summary(text).strip()
+
+
 def _parse_audit_output(value: str, max_queries: int) -> EvidenceAudit:
     text = str(value or "").strip()
-    text = re.sub(r"^\x60{3}(?:text|markdown)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\x60{3}[a-zA-Z0-9_-]*\s*", "", text)
     text = re.sub(r"\s*\x60{3}$", "", text)
-    if re.fullmatch(r"\s*ENOUGH[。.!！]?\s*", text, flags=re.IGNORECASE):
+    plain = re.sub(r"[*`]+", "", text).strip()
+    if re.fullmatch(r"\s*ENOUGH[。.!！]?\s*", plain, flags=re.IGNORECASE):
         return EvidenceAudit(sufficient=True)
+    if text.lstrip().startswith("{"):
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            if payload.get("sufficient") is True or str(payload.get("status", "")).upper() == "ENOUGH":
+                return EvidenceAudit(sufficient=True)
+            raw_list = payload.get("queries") or payload.get("search") or []
+            if isinstance(raw_list, list):
+                parsed_q = [
+                    " ".join(str(item).split()).strip(" -•")[:800]
+                    for item in raw_list
+                    if " ".join(str(item).split()).strip(" -•")
+                ][:max_queries]
+                if parsed_q:
+                    return EvidenceAudit(sufficient=False, queries=parsed_q)
     queries: list[str] = []
-    for line in text.splitlines():
-        match = re.match(r"\s*SEARCH\s*[:：]\s*(.+?)\s*$", line, flags=re.IGNORECASE)
-        if not match:
+    in_search_block = False
+    for raw_line in text.splitlines():
+        line = re.sub(r"[*`]+", "", raw_line).strip()
+        if not line:
             continue
-        query = " ".join(match.group(1).split()).strip(" -•")[:800]
+        if re.fullmatch(r"\s*(?:[-*•]|\d+[.)、])?\s*ENOUGH[。.!！]?\s*", line, flags=re.IGNORECASE):
+            return EvidenceAudit(sufficient=True)
+        if re.fullmatch(r"(?:[-*•]|\d+[.)、])?\s*SEARCH\s*[:：]?", line, flags=re.IGNORECASE):
+            in_search_block = True
+            continue
+        match = re.match(
+            r"\s*(?:[-*•]|\d+[.)、])?\s*SEARCH\s*[:：]\s*(.+?)\s*$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            candidate = match.group(1)
+        elif in_search_block and not line.startswith("```"):
+            candidate = re.sub(r"^(?:[-*•]|\d+[.)、])\s*", "", line)
+        else:
+            continue
+        query = " ".join(candidate.split()).strip(" -•")[:800]
         if query and query.casefold() not in {item.casefold() for item in queries}:
             queries.append(query)
         if len(queries) >= max_queries:
             break
-    if not queries:
-        raise SearchReaderError("audit", "RWKV returned an invalid evidence audit")
-    return EvidenceAudit(sufficient=False, queries=queries)
+    if queries:
+        return EvidenceAudit(sufficient=False, queries=queries)
+    first_clause = re.split(r"[。！？!?\n]", plain, maxsplit=1)[0].strip()
+    if (
+        re.match(
+            r"^(?:审核结果\s*[:：]\s*)?(?:当前|现有)?(?:材料)?(?:已经|已)?足够(?:回答)?$",
+            first_clause,
+        )
+        and not re.search(r"不足|不够|缺少|未包含|需要补充|SEARCH", plain, flags=re.IGNORECASE)
+    ):
+        return EvidenceAudit(sufficient=True)
+    raise SearchReaderError("audit", "RWKV returned an invalid evidence audit")
 
 
 def _json_object_from_output(value: str, stage: str) -> dict[str, object]:
@@ -2793,13 +2954,33 @@ def _parse_research_plan_output(
             if suffix and re.search(r"最新|当前|稳定|版本|日期|时间|发布|价格|名称|主题|更新|什么时候|多少", suffix):
                 records[0].subject = anchor
                 queries = [query.replace(original, anchor) for query in queries]
+    url_queries = [
+        item.split("#", 1)[0]
+        for item in queries
+        if re.fullmatch(r"https?://\S+", item)
+    ]
+    queries = [
+        item
+        for item in queries
+        if not re.search(r"https?://|^//", item)
+    ]
+    explicit_question_urls = [
+        match.group(0).rstrip(".,;:!?)）】》\"'")
+        for match in re.finditer(r"https?://[^\s,，。；;、)）\"'<>]+", fallback_question)
+    ]
     direct_urls = list(
         dict.fromkeys(
             " ".join(str(item).split()).strip()[:2000]
-            for item in (payload.get("urls") or [])
+            for item in [*(payload.get("urls") or []), *explicit_question_urls, *url_queries]
             if " ".join(str(item).split()).strip()
         )
     )[:10]
+    if (
+        direct_urls
+        and re.search(r"(?:阅读|打开)\s*(?:上面|上述|这两份|https?://)", fallback_question)
+        and not re.search(r"其他来源|第三方|以外|补充搜索", fallback_question)
+    ):
+        queries = []
     goal = " ".join(str(payload.get("goal") or fallback_question).split()).strip()
     clarification = " ".join(str(payload.get("clarification") or "").split()).strip()[
         :1200
@@ -2821,7 +3002,7 @@ def _parse_research_plan_output(
         queries=queries or ([] if direct_urls else [fallback_question]),
         scope_mode=scope_mode,
         direct_urls=direct_urls,
-        fallback=not queries,
+        fallback=(not queries and not direct_urls),
     )
 
 
@@ -3109,6 +3290,8 @@ class RWKVReader:
         self.output_locale = ""
         self._call_lock = threading.Lock()
         self._call_sequence = 0
+        self._rr_cursor = 0
+        self._inflight_by_url: dict[str, int] = {}
         self.call_observer = None
         self._call_records: list[dict[str, object]] = []
         self._field_candidate_cache: dict[
@@ -3152,18 +3335,52 @@ class RWKVReader:
         with self._call_lock:
             self._call_records.append(record)
 
+    def _select_base_url(self, urls: tuple[str, ...], fallback: str) -> str:
+        if not urls:
+            return fallback
+        if len(urls) == 1:
+            return urls[0]
+        with self._call_lock:
+            start = self._rr_cursor % len(urls)
+            self._rr_cursor += 1
+            ordered = [urls[(start + offset) % len(urls)] for offset in range(len(urls))]
+            return min(ordered, key=lambda url: self._inflight_by_url.get(url, 0))
+
     def _model_profile(self, stage: str) -> tuple[str, str, str]:
         if stage in _FINAL_MODEL_STAGES:
             return (
-                self.settings.final_base_url,
+                self._select_base_url(
+                    self.settings.final_base_urls, self.settings.final_base_url
+                ),
                 self.settings.final_api_key,
                 self.settings.final_model,
             )
         return (
-            self.settings.rwkv_base_url,
+            self._select_base_url(
+                self.settings.rwkv_base_urls, self.settings.rwkv_base_url
+            ),
             self.settings.rwkv_api_key,
             self.settings.rwkv_model,
         )
+
+    def _thinking_for_stage(self, stage: str) -> bool:
+        mode = getattr(self.settings, "rwkv_thinking_mode", "auto")
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        return stage in _OPEN_THINK_STAGES
+
+    def _adapter_config(self) -> dict[str, object]:
+        cfg: dict[str, object] = {}
+        if self.settings.rwkv_adapter_id:
+            cfg["adapter_id"] = self.settings.rwkv_adapter_id
+            if self.settings.rwkv_adapter_version:
+                cfg["adapter_version"] = self.settings.rwkv_adapter_version
+            cfg["adapter_scale"] = self.settings.rwkv_adapter_scale
+        if self.settings.rwkv_state_id:
+            cfg["state_id"] = self.settings.rwkv_state_id
+        return cfg
 
     def _client(self, stage: str) -> OpenAICompatibleClient:
         base_url, api_key, model = self._model_profile(stage)
@@ -3177,6 +3394,8 @@ class RWKVReader:
                 if stage in _FINAL_MODEL_STAGES
                 else self.settings.rwkv_access_headers
             ),
+            context_window=self.settings.rwkv_context_window,
+            adapter_config=self._adapter_config(),
         )
 
     def _observe_call(self, event: dict[str, object]) -> None:
@@ -3193,18 +3412,22 @@ class RWKVReader:
         call_id = self._next_call_id()
         started_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
         started = time.perf_counter()
-        base_url, _, model = self._model_profile(stage)
         protocol = (
             self.settings.final_protocol
             if stage in _FINAL_MODEL_STAGES
             else self.settings.rwkv_protocol
         )
+        client = self._client(stage)
+        base_url = getattr(client, "base_url", "") or self._model_profile(stage)[0]
+        model = getattr(client, "model", "") or self._model_profile(stage)[2]
         context = {"call_id": call_id, "stage": stage, "model": model,
                    "max_tokens": max_tokens, **(observation or {})}
         self._observe_call({**context, "state": "queued",
                             "input_preview": user if len(user) <= 1600 else user[:700] + "\n…\n" + user[-900:]})
-        client = self._client(stage)
         client.on_request = lambda event: self._observe_call({**context, **event})
+        use_thinking = self._thinking_for_stage(stage)
+        with self._call_lock:
+            self._inflight_by_url[base_url] = self._inflight_by_url.get(base_url, 0) + 1
         try:
             if protocol == "chat":
                 output = client.chat(
@@ -3214,14 +3437,35 @@ class RWKVReader:
                     temperature=self.settings.rwkv_temperature,
                     stage=stage,
                 )
-            else:
-                output = client.completion(
+            elif protocol in {"lightning", "batch_completions"} and hasattr(
+                client, "lightning_completion"
+            ):
+                output = client.lightning_completion(
                     system="",
                     user=user,
                     max_tokens=max_tokens,
                     temperature=self.settings.rwkv_temperature,
                     stage=stage,
+                    thinking=use_thinking,
                 )
+            else:
+                try:
+                    output = client.completion(
+                        system="",
+                        user=user,
+                        max_tokens=max_tokens,
+                        temperature=self.settings.rwkv_temperature,
+                        stage=stage,
+                        thinking=use_thinking,
+                    )
+                except TypeError:
+                    output = client.completion(
+                        system="",
+                        user=user,
+                        max_tokens=max_tokens,
+                        temperature=self.settings.rwkv_temperature,
+                        stage=stage,
+                    )
             value = output.strip()
             if not value:
                 raise SearchReaderError(stage, "RWKV returned an empty answer")
@@ -3267,19 +3511,23 @@ class RWKVReader:
             )
             raise
         finally:
+            with self._call_lock:
+                self._inflight_by_url[base_url] = max(
+                    0, self._inflight_by_url.get(base_url, 1) - 1
+                )
             session = getattr(client, "session", None)
             if session is not None:
                 session.close()
 
     def plan_research(self, question: str) -> ResearchPlan:
-        """Let RWKV define scope and search records without choosing tools."""
+        """Let RWKV define scope, records, and search queries in a single pass."""
 
         user = f"""当前日期：{_today()}
 问题：{question}
 
-当前日期只用于判断时间，不是待检索对象。列出待检索的对象和字段，不回答问题。decision 只能是 search 或 clarify，scope_mode 只能是 fixed 或 discover。records 按具体对象组织，同一对象只写一条。fields 必须是用户所问字段名称的字符串数组，不填写值。未列名的一类对象用 discover，records 留空。用户原文已有的网址放进 urls。
-只输出 JSON：
-{{"decision":"search","scope_mode":"fixed","goal":"","records":[{{"subject":"","question":"","fields":[""]}}],"urls":[],"clarification":""}}
+当前日期只用于判断时间，不是待检索对象。列出待检索的对象和字段，不回答问题。decision 只能是 search 或 clarify，scope_mode 只能是 fixed 或 discover。records 按具体对象组织，同一对象只写一条。fields 必须是用户所问字段名称的字符串数组，不填写值。未列名的一类对象用 discover，records 留空。queries 给出最多 {self.settings.research_plan_max_queries} 条精炼检索词（保持与问题相同的单一语言，不中英混杂，不拼接英文键名如 url/release_date，不猜答案数字，不要把网址放进 queries；若已有网址足以完成问题则留空）。用户原文已有的网址放进 urls。
+只输出一行合法 JSON（不要代码块，字符串内不要用未转义双引号）：
+{{"decision":"search","scope_mode":"fixed","goal":"","records":[{{"subject":"","question":"","fields":[""]}}],"queries":[""],"urls":[],"clarification":""}}
 待检索项 JSON："""
         output = self._complete(user, max_tokens=768, stage="plan")
         plan = _parse_research_plan_output(
@@ -3823,9 +4071,17 @@ class RWKVReader:
                     subject = titled[0]
                 elif len(titled) > 1:
                     continue
+                needle_clean = subject.strip("《》「」“”\"' ")
+                full_text = f"{source.title}\n{material}"
+                is_corner_bracket_theme = (
+                    bool(needle_clean)
+                    and f"「{needle_clean}" in full_text
+                    and f"《{needle_clean}》" not in full_text
+                )
                 subject_key = _normalized_text(subject)
                 if (
                     not subject_key
+                    or is_corner_bracket_theme
                     or subject_key
                     in {
                         "二游",
@@ -4093,6 +4349,7 @@ B：无关
 
         rows: list[str] = []
         total = 0
+        total_tokens = 0
         for index, turn in reversed(list(enumerate(history, start=1))):
             row = json.dumps(
                 {
@@ -4102,10 +4359,15 @@ B：无关
                 },
                 ensure_ascii=False,
             )
-            if rows and total + len(row) > self.settings.rwkv_final_material_chars:
+            row_tokens = estimate_rwkv_tokens(row)
+            if rows and (
+                total + len(row) > self.settings.rwkv_final_material_chars
+                or total_tokens + row_tokens > DEFAULT_EPOCH_BACKBONE_MAX_TOKENS
+            ):
                 break
             rows.append(row)
             total += len(row)
+            total_tokens += row_tokens
         material = "\n".join(reversed(rows))
         user = f"""{material}
 
@@ -4142,37 +4404,6 @@ B：无关
     ) -> EvidenceAudit:
         """Ask RWKV whether the accumulated material can answer the question."""
 
-        material = _bounded_audit_material(
-            evidence,
-            min(
-                self.settings.rwkv_reduce_chunk_chars,
-                self.settings.rwkv_final_material_chars,
-            ),
-            field_selections,
-        )
-        tried = "\n".join(f"- {query}" for query in tried_queries)
-        records = _render_research_records(research_records)
-        user = f"""{material}
-
-记录：{records}
-问题：{question}
-已检索：{tried}
-当前日期：{_today()}
-
-判断材料是否足以覆盖问题和记录中的字段。“当前/最新”必须有明确写着当前/最新的材料或版本列表；某一个发布页只能证明该版本存在。足够只输出 ENOUGH；不足输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词。
-审核结果："""
-        output = self._complete(user, max_tokens=192, stage="audit")
-        try:
-            audit = _parse_audit_output(output, self.settings.review_max_queries)
-        except SearchReaderError:
-            repair = f"""请把下列材料审核结果整理成规定格式，不增加事实或猜测答案。
-问题：{question[:800]}
-已检索：{tried[:1200]}
-材料审核结果：{output[:1200]}
-证据不足时只输出最多 {self.settings.review_max_queries} 行 SEARCH: 检索词；明确足够时只输出 ENOUGH。不要解释。
-整理结果："""
-            repaired = self._complete(repair, max_tokens=192, stage="audit")
-            audit = _parse_audit_output(repaired, self.settings.review_max_queries)
         missing_queries = _missing_field_queries(
             question,
             field_selections,
@@ -4195,7 +4426,37 @@ B：无关
             item.status == "supported" for item in field_selections
         ):
             return EvidenceAudit(sufficient=True)
-        return audit
+
+        material = _bounded_audit_material(
+            evidence,
+            min(
+                self.settings.rwkv_reduce_chunk_chars,
+                self.settings.rwkv_final_material_chars,
+            ),
+            field_selections,
+        )
+        tried = "\n".join(f"- {query}" for query in tried_queries)
+        records = _render_research_records(research_records)
+        user = f"""{material}
+
+记录：{records}
+问题：{question}
+已检索：{tried}
+当前日期：{_today()}
+
+判断材料是否足以覆盖问题和记录中的字段。“当前/最新”必须有明确写着当前/最新的材料或版本列表；某一个发布页只能证明该版本存在。足够只输出 ENOUGH；不足只输出最多 {self.settings.review_max_queries} 行新检索词，每行格式为 SEARCH: 检索词（不要解释，不要 Markdown 加粗）："""
+        output = self._complete(user, max_tokens=192, stage="audit")
+        try:
+            return _parse_audit_output(output, self.settings.review_max_queries)
+        except SearchReaderError:
+            repair = f"""请把下列材料审核结果整理成规定格式，不增加事实或猜测答案。
+问题：{question[:800]}
+已检索：{tried[:1200]}
+材料审核结果：{output[:1200]}
+证据不足时只输出最多 {self.settings.review_max_queries} 行 SEARCH: 检索词；明确足够时只输出 ENOUGH。不要解释。
+整理结果："""
+            repaired = self._complete(repair, max_tokens=192, stage="audit")
+            return _parse_audit_output(repaired, self.settings.review_max_queries)
 
     def _extract_one_field(
         self,
@@ -4218,27 +4479,40 @@ B：无关
             return None
         material = f"页面地址：{evidence.url}\n{source_snippets or source_material}"
 
+        plain_rule = "只输出一行纯文本结果，不要输出 JSON、键名或代码块。"
         if re.search(r"日期|时间|上线|发布|上市|\bdate\b|\btime\b", field, re.IGNORECASE):
             request = (
                 f"待查项是“{record.subject}：{record.question}”。"
                 f"复制明确写着字段“{field}”的完整原句。"
-                "相关活动、申购日期不算；没有则输出 NONE。"
+                f"相关活动、申购日期不算；没有则输出 NONE。{plain_rule}"
             )
         elif re.search(r"补丁|patch", field, re.IGNORECASE):
             request = (
                 f"待查项是“{record.subject}：{record.question}”。"
-                f"复制字段“{field}”的补丁版本号本身；没有则输出 NONE。"
+                f"复制字段“{field}”的补丁版本号本身；没有则输出 NONE。{plain_rule}"
             )
         elif re.search(r"代号|codename", field, re.IGNORECASE):
             request = (
                 f"待查项是“{record.subject}：{record.question}”。"
-                "复制代号本身，不要版本号和描述；没有则输出 NONE。"
+                f"复制代号本身，不要版本号和描述；没有则输出 NONE。{plain_rule}"
+            )
+        elif re.search(r"链接|网址|入口|地址|\burl\b|\blink\b", field, re.IGNORECASE):
+            request = (
+                f"待查项是“{record.subject}：{record.question}”。"
+                "若该页面本身就是目标官方入口或正文明确给出目标网址，只直接输出该完整 https:// 网址；"
+                f"若是无关教程、子章节或第三方转载则输出 NONE。{plain_rule}"
+            )
+        elif re.search(r"主题|变化|改动|内容|动态|亮点|玩法|概述|概括", field, re.IGNORECASE):
+            request = (
+                f"待查项是“{record.subject}：{record.question}”。"
+                f"根据页面原文简要提炼字段“{field}”的明确信息（只使用原文已有的名称、数字和事实，不超过120字）；"
+                f"页面未提及则输出 NONE。{plain_rule}"
             )
         else:
             request = (
                 f"待查项是“{record.subject}：{record.question}”。"
                 f"复制字段“{field}”的值，只保留包含答案的最短原句。"
-                "没有则输出 NONE。不要把转载站、教程站或镜像自称官方当成身份验证；注意对象和版本。"
+                f"没有则输出 NONE。不要把转载站、教程站或镜像自称官方当成身份验证；注意对象和版本。{plain_rule}"
             )
         continuation = (
             "代号："
@@ -4250,7 +4524,7 @@ B：无关
             max_tokens=min(256, self.settings.rwkv_summary_max_tokens),
             stage="evidence_extract",
         )
-        fact = _parse_source_summary(output).strip()
+        fact = _unwrap_extracted_fact(output, field)
         if _is_missing_fact_output(fact):
             return None
 
@@ -4947,6 +5221,7 @@ B：无关
                     ]
                     if direct:
                         direct_prices[(record_index, field)] = direct
+                candidate_cap = 5 if len(record.fields) >= 2 else 10
                 ranked = sorted(
                     related,
                     key=lambda item: (
@@ -4956,7 +5231,7 @@ B：无关
                         item.source_id in related_ids,
                     ),
                     reverse=True,
-                )[:10]
+                )[:candidate_cap]
                 for item in ranked:
                     relevance = _source_relevance(f"{record.subject} {field}", item)
                     structured = _structured_field_candidates(
@@ -4966,6 +5241,8 @@ B：无关
                         extracted.setdefault((record_index, field), []).extend(
                             structured
                         )
+                        if not re.search(r"代号|codename", field, re.IGNORECASE):
+                            continue
                     cache_key = (
                         _normalized_text(record.subject),
                         _normalized_text(field),
@@ -5171,6 +5448,11 @@ B：无关
                 if point
                 else "总结以上网页内容。"
             )
+            if point.startswith(("http://", "https://")):
+                instruction += (
+                    "只总结当前这一个网页自身明确写出的功能、不支持项和参数要求；"
+                    "严禁在单页摘要中对比或推测问题中提到的另一份网页或另一个模块。"
+                )
             if _recency_requested(question) and re.search(r"新闻|动态|热点|大事", question):
                 instruction += (
                     "只总结网页主标题对应的事件；新闻合集仅保留明确属于用户主题和时间范围的独立条目。"
@@ -5207,9 +5489,16 @@ B：无关
                 summary
             ):
                 summary = f"{summary}\n相关原始表格：\n{exact_tables}".strip()
-        unsupported = _unsupported_summary_bindings(summary, material)
+        summary_validation_material = (
+            material
+            if document_source
+            else f"{chunk.title}\n{chunk.url}\n{chunk.published_date}\n{material}"
+        )
+        unsupported = _unsupported_summary_bindings(summary, summary_validation_material)
         if unsupported:
-            summary = _remove_unsupported_number_sentences(summary, material)
+            summary = _remove_unsupported_number_sentences(
+                summary, summary_validation_material
+            )
             if not summary:
                 values = ", ".join(sorted(unsupported))
                 raise SearchReaderError(
@@ -5226,6 +5515,7 @@ B：无关
             published_date=chunk.published_date,
             retrieval_point=chunk.retrieval_point,
             retrieval_query=chunk.retrieval_query,
+            authority=chunk.authority,
         )
 
     def summarize(
@@ -5497,6 +5787,19 @@ B：无关
                 for point, item in document_anchors
                 if len(node.source_ids) > 1
             ]
+        elif (
+            len(node.source_ids) == 1
+            and branch_sources
+            and branch_sources[0].quote
+            and branch_sources[0].url == node.retrieval_point
+        ):
+            anchor_nodes = [
+                _MaterialNode(
+                    source_ids=(branch_sources[0].source_id,),
+                    summary=f"原文摘录：\n{branch_sources[0].quote[:4500]}",
+                    retrieval_point=node.retrieval_point,
+                )
+            ]
         else:
             anchor_nodes = [
                 _MaterialNode(
@@ -5605,8 +5908,17 @@ B：无关
         warnings: list[str] = []
         level = 0
         final_node_target = self.settings.rwkv_reduce_fan_in + 1
+        document_only = bool(evidence) and all(
+            item.url.startswith("document://") for item in evidence
+        )
+        distinct_points = {
+            node.retrieval_point for node in nodes if node.retrieval_point
+        }
+        single_web_branch = not document_only and len(distinct_points) <= 1
         while True:
             rendered_chars = len(_render_material_nodes(nodes))
+            if single_web_branch and rendered_chars <= material_limit and len(nodes) <= 10:
+                break
             points_collapsed = _retrieval_points_collapsed(nodes)
             point_bound_nodes = bool(nodes) and all(
                 node.retrieval_point for node in nodes
@@ -5746,7 +6058,7 @@ B：无关
             if level >= 6:
                 warnings.append("funnel reduction reached the six-level safety limit")
                 break
-        if _retrieval_points_collapsed(nodes):
+        if _retrieval_points_collapsed(nodes) and not (single_web_branch and level == 0):
             label_overhead = sum(
                 len(node.retrieval_point)
                 + sum(len(source_id) for source_id in node.source_ids)
@@ -5816,7 +6128,7 @@ B：无关
         user = f"""{material}
 
 问题：{question}
-将以上分支总结整理成一份汇总材料。只保留这些检索点：{point_list}。每个检索点单独成段，只保留该分支已经给出的最终值和 [S1] 来源编号；不新增对象，不回答问题，不改变事实归属。只输出汇总材料。
+将以上分支总结整理成一份汇总材料。只保留这些检索点：{point_list}。每个检索点必须使用“## 原检索点名称”作为标题单独成段，只保留该分支已经给出的最终值和 [S1] 来源编号；不新增对象，不回答问题，不改变事实归属。只输出汇总材料。
 汇总材料："""
         warnings: list[str] = []
         requested_tokens = min(self.settings.rwkv_max_tokens, 2048)
@@ -5867,7 +6179,8 @@ B：无关
         unknown_headings = [
             heading
             for heading in headings
-            if not any(
+            if _normalized_text(heading) not in {"汇总材料", "综合材料", "资料汇总"}
+            and not any(
                 _normalized_text(point) in _normalized_text(heading)
                 for point in retrieval_points
             )
@@ -6006,9 +6319,24 @@ B：无关
             return next_release_answer, [
                 "next-release details withheld because no future update date was verified"
             ]
+        only_unextracted_links = bool(evidence_selections) and all(
+            item.status != "supported"
+            and re.search(r"链接|网址|入口|地址|\burl\b|\blink\b", item.field, re.IGNORECASE)
+            for item in evidence_selections
+        )
+        # Allow full LLM synthesis when research_records are present and we have
+        # non-trivial source summaries (except strict representative_scope guards),
+        # while keeping deterministic atomic fallback for bare missing-field checks.
+        can_synthesize_with_context = (
+            research_records is not None
+            and not representative_scope
+            and any(not _is_irrelevant_summary(item.claim) for item in evidence)
+        )
         if (
             evidence_sufficient is not None
             and evidence_selections
+            and not only_unextracted_links
+            and not can_synthesize_with_context
             and any(item.status != "supported" for item in evidence_selections)
         ):
             if on_progress:
@@ -6209,7 +6537,23 @@ B：无关
             identity_chars += len(row) + 1
         user_source_index = identity_header + "\n".join(identity_rows)
         base_budget = max(0, self.settings.rwkv_final_material_chars - len(user_source_index) - 2)
-        answer_material = answer_material[:base_budget].rstrip()
+        if len(answer_material) > base_budget and base_budget >= 800:
+            head_len = int(base_budget * 0.75)
+            tail_len = max(0, base_budget - head_len - 72)
+            answer_material = (
+                f"{answer_material[:head_len]}\n"
+                "[... middle content omitted to preserve context sweet spot ...]\n"
+                f"{answer_material[-tail_len:] if tail_len else ''}"
+            ).rstrip()
+        else:
+            answer_material = answer_material[:base_budget].rstrip()
+        sweet_spot = getattr(self.settings, "rwkv_sweet_spot_tokens", 9600)
+        overhead_tokens = estimate_rwkv_tokens(user_source_index) + estimate_rwkv_tokens(answer_question) + 280
+        material_token_budget = max(1200, sweet_spot - overhead_tokens)
+        if estimate_rwkv_tokens(answer_material) > material_token_budget:
+            answer_material = slim_sweet_spot_text(
+                answer_material, material_token_budget, estimate_rwkv_tokens
+            ).rstrip()
         if document_only:
             user = f"""{answer_material}
 
@@ -6224,7 +6568,7 @@ B：无关
 {user_source_index}
 
 问题：{answer_question}
-根据以上材料直接回答。{verified_instruction}{example_instruction}覆盖每个问项，合并重复，只使用材料已有事实；核对来源实际地址、对象及版本，第三方页面不能称为该项目官方原文，无法确认则说明。每个事实保留一个最直接的 [S1] 来源编号。材料没有的信息就说明。{final_point_scope}{scope_note}
+根据以上材料直接回答。{verified_instruction}{example_instruction}覆盖每个问项，合并重复，只使用材料已有事实；核对来源实际地址、对象及版本，第三方页面不能称为该项目官方原文，无法确认则说明。除非问题询问时间，不要单独附带网页抓取或发布时间戳。每个事实保留一个最直接的 [S1] 来源编号。材料没有的信息就说明。{final_point_scope}{scope_note}
 最终回答："""
         if on_progress:
             on_progress(
@@ -6239,9 +6583,13 @@ B：无关
         if on_delta is not None:
             # Evidence reduction/auditing happens before any public text. Streaming
             # output is append-only; failed validation fails the job, never rewrites it.
+            use_thinking = self._thinking_for_stage("finalize")
             if self.output_locale:
                 user += f"\n\n回答语言要求：使用 {self.output_locale} 回答正文。"
-            user += "\n只输出答案正文，不输出思考过程、材料或提示词。区分计划日期和实际发生日期，来源冲突时优先采用直接官方记录，不能确认时说明不确定。"
+            if use_thinking:
+                user += "\n先核对各对象支持与明确不支持的能力、计划日期与实际发生日期；在思考结束后的正文中只输出答案正文，来源冲突时优先采用直接官方记录，不能确认时说明不确定。"
+            else:
+                user += "\n只输出答案正文，不输出思考过程、材料或提示词。区分计划日期和实际发生日期，来源冲突时优先采用直接官方记录，不能确认时说明不确定。"
             call_id = self._next_call_id()
             stream_started = time.perf_counter()
             client = self._client("finalize")
@@ -6249,7 +6597,7 @@ B：无关
             try:
                 for delta in client.stream_answer(user=user, max_tokens=requested_tokens,
                         temperature=self.settings.rwkv_temperature, stage="finalize",
-                        protocol=self.settings.final_protocol):
+                        protocol=self.settings.final_protocol, thinking=use_thinking):
                     parts.append(delta)
                     on_delta(delta)
             finally:
@@ -6263,7 +6611,7 @@ B：无关
             if not answer.strip() or _contains_prompt_leakage(answer):
                 raise SearchReaderError("finalize", "streamed answer failed content validation")
             validation_material = _final_validation_material(
-                f"{answer_material}\n当前日期：{_today()}", answer_question)
+                f"{answer_material}\n{user_source_index}\n当前日期：{_today()}", answer_question)
             if _unsupported_summary_bindings(answer, validation_material):
                 raise SearchReaderError("finalize", "streamed answer introduced unsupported facts")
             if any("unknown source" in warning for warning in citation_warnings(answer, ordered)):
@@ -6338,7 +6686,7 @@ B：无关
                 "read", "RWKV returned invalid YAML example: " + "; ".join(yaml_errors)
             )
         validation_material = _final_validation_material(
-            f"{answer_material}\n当前日期：{_today()}", answer_question
+            f"{answer_material}\n{user_source_index}\n当前日期：{_today()}", answer_question
         )
         document_coverage_names = (
             retrieval_points

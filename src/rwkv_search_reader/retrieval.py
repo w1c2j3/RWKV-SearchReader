@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urldefrag, urljoin, urlparse
 
 import requests
 from requests.compat import chardet
@@ -307,12 +307,53 @@ def rank_chunks(
                     published_date=hit.published_date,
                     retrieval_point=hit.retrieval_point,
                     retrieval_query=hit.retrieval_query,
+                    authority=hit.authority,
                 )
             )
     chunks.sort(
         key=lambda item: (-item.score, int(item.source_id[1:]), item.chunk_index)
     )
     return chunks
+
+
+def _focus_direct_url_content(content: str, question: str, max_chars: int) -> str:
+    """Keep page overview plus the most relevant reference sections in document order."""
+
+    if len(content) <= max_chars or max_chars < 1000:
+        return content[:max_chars]
+    header_budget = min(2400, max_chars // 4)
+    header = content[:header_budget]
+    remainder = content[header_budget:]
+    block_size = 1800
+    blocks: list[tuple[int, float, str]] = []
+    q_terms = _terms(question)
+    q_tokens = set(re.findall(r"[a-zA-Z_][a-zA-Z0-9_.()]{1,}", question.casefold()))
+    for idx, start in enumerate(range(0, len(remainder), block_size)):
+        piece = remainder[start : start + block_size]
+        if not piece.strip():
+            continue
+        p_lower = piece.casefold()
+        token_hits = sum(3.0 for tok in q_tokens if tok in p_lower)
+        func_hits = (
+            4.0
+            if re.search(r"\b(?:dump|dumps|load|loads|join|joinpath)\s*\(", piece)
+            else 0.0
+        )
+        overlap = len(q_terms & _terms(piece))
+        blocks.append((idx, token_hits + func_hits + overlap, piece))
+    ranked = sorted(blocks, key=lambda item: (-item[1], item[0]))
+    chosen: list[tuple[int, str]] = []
+    used = len(header) + 2
+    for idx, _score, piece in ranked:
+        if used >= max_chars:
+            break
+        take = piece[: max(0, max_chars - used - 2)]
+        if take:
+            chosen.append((idx, take))
+            used += len(take) + 2
+    chosen.sort(key=lambda item: item[0])
+    combined = "\n\n".join([header, *(piece for _idx, piece in chosen)])
+    return combined[:max_chars]
 
 
 def provider_materials(hits: list[SearchHit]) -> list[DocumentChunk]:
@@ -329,6 +370,7 @@ def provider_materials(hits: list[SearchHit]) -> list[DocumentChunk]:
             published_date=hit.published_date,
             retrieval_point=hit.retrieval_point,
             retrieval_query=hit.retrieval_query,
+            authority=hit.authority,
         )
         for source_index, hit in enumerate(hits, start=1)
         if hit.content.strip() or hit.snippet.strip()
@@ -440,31 +482,52 @@ def _balanced_hits(
     groups: list[list[SearchHit]],
     limit: int,
     excluded_urls: set[str] | None = None,
+    max_content_chars: int = 12000,
 ) -> list[SearchHit]:
-    """Preserve each query's Tavily rank while giving every subquestion coverage."""
+    """Preserve each query's provider rank while merging same-page section hits."""
 
     selected: list[SearchHit] = []
     seen = {_url_identity(url) for url in (excluded_urls or set())}
     seen.discard("")
+    selected_by_identity: dict[str, SearchHit] = {}
     depth = 0
     while len(selected) < limit and any(depth < len(group) for group in groups):
         for group in groups:
             if depth >= len(group):
                 continue
             hit = group[depth]
-            hit.url = normalize_url(hit.url)
+            raw_url = str(hit.url or "").strip()
+            had_fragment = "#" in raw_url
+            hit.url = normalize_url(raw_url)
             identity = _url_identity(hit.url)
-            if hit.url and identity not in seen:
+            if not hit.url:
+                continue
+            if identity not in seen:
                 seen.add(identity)
                 selected.append(hit)
+                selected_by_identity[identity] = hit
                 if len(selected) >= limit:
                     break
+            elif had_fragment and identity in selected_by_identity:
+                existing = selected_by_identity[identity]
+                extra = hit.content.strip()
+                if (
+                    extra
+                    and extra[:160] not in existing.content
+                    and len(existing.content) + 2 < max_content_chars
+                ):
+                    budget = max_content_chars - len(existing.content) - 2
+                    existing.content = f"{existing.content}\n\n{extra[:budget]}".strip()
+                    if hit.content_markdown.strip():
+                        existing.content_markdown = (
+                            f"{existing.content_markdown}\n\n{hit.content_markdown}".strip()
+                        )
         depth += 1
     return selected
 
 
 def _url_identity(url: str) -> str:
-    """Treat HTTP/HTTPS variants of the same page as one evidence source."""
+    """Treat HTTP/HTTPS and tracking-param variants of the same page as one source."""
 
     normalized = normalize_url(url)
     if not normalized:
@@ -478,7 +541,22 @@ def _url_identity(url: str) -> str:
     ):
         host = f"{host}:{port}"
     path = parsed.path.rstrip("/") or "/"
-    query = f"?{parsed.query}" if parsed.query else ""
+    ignored_params = {
+        "rand",
+        "scm",
+        "spm",
+        "spm_id_from",
+        "from",
+        "vd_source",
+    }
+    clean_pairs = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if not k.casefold().startswith("utm_")
+        and k.casefold() not in ignored_params
+        and not (host.endswith("ngabbs.com") and k.casefold() == "page")
+    ]
+    query = f"?{urlencode(clean_pairs)}" if clean_pairs else ""
     return f"{host}{path}{query}".casefold()
 
 
@@ -512,6 +590,15 @@ class Retriever:
         pending = [SearchHit(title="", url=url, provider="direct-url") for url in normalized]
 
         def read_with_retry(hit: SearchHit) -> SearchHit:
+            provider_fetched = self.provider.fetch_url(hit.url)
+            if provider_fetched and provider_fetched[1].strip():
+                title, content = provider_fetched
+                hit.title = title or hit.title
+                hit.content = content[:120_000]
+                hit.content_markdown = content
+                hit.content_status = "fetched"
+                hit.canonical_url = hit.url
+                return hit
             for _ in range(2):
                 hit.error = ""
                 fetched = fetch_page(hit, self.settings)
@@ -546,7 +633,9 @@ class Retriever:
             )
         for index, hit in enumerate(readable, start=start_index):
             hit.source_id = f"S{index}"
-            hit.content = hit.content[: self.settings.max_evidence_chars]
+            hit.content = _focus_direct_url_content(
+                hit.content, question, self.settings.max_evidence_chars
+            )
             hit.retrieval_point = hit.url
             hit.retrieval_query = question
         return normalized, readable, provider_materials(readable), warnings
@@ -572,17 +661,24 @@ class Retriever:
         )
         if not queries:
             raise SearchReaderError("input", "search query is empty")
+        distinct_points = {
+            str((retrieval_point_by_query or {}).get(query) or query).strip()
+            for query in queries
+        }
+        object_count = max(1, len(distinct_points))
         per_query = max(1, min(10, results_per_query or self.settings.search_max_results))
-        total_limit = max_total_results or per_query * len(queries)
+        total_limit = max_total_results or per_query * object_count
         total_limit = max(1, min(60, total_limit))
-        groups: list[list[SearchHit]] = []
-        search_warnings: list[str] = []
-        for query in queries:
+
+        def run_single(query: str) -> tuple[list[SearchHit] | None, list[str]]:
+            local_warnings: list[str] = []
             try:
-                hits = self.provider.search(query, per_query)
+                hits = self.provider.search_with_context(
+                    query, per_query, ori_question=question
+                )
                 timely = _filter_expired_news_hits(hits, question)
                 if len(timely) != len(hits):
-                    search_warnings.append(
+                    local_warnings.append(
                         f"{query}: discarded {len(hits) - len(timely)} pages outside the requested news window"
                     )
                 hits = timely
@@ -591,7 +687,7 @@ class Retriever:
                     filtered = _filter_subject_hits(hits, subject)
                     removed = len(hits) - len(filtered)
                     if removed:
-                        search_warnings.append(
+                        local_warnings.append(
                             f"{query}: discarded {removed} pages unrelated to {subject}"
                         )
                     hits = filtered
@@ -599,17 +695,18 @@ class Retriever:
                     announcement_hits = [
                         hit
                         for hit in hits
-                        if re.search(
-                            r"公告|更新|版本|发布|预告|前瞻|新闻|资讯|"
-                            r"release|changelog|news",
-                            hit.title,
+                        if hit.authority >= 3
+                        or re.search(
+                            r"公告|更新|版本|发布|预告|前瞻|新闻|资讯|官网|"
+                            r"release|changelog|news|download|version|doc",
+                            f"{hit.title} {hit.url}",
                             re.IGNORECASE,
                         )
                     ]
                     if announcement_hits:
                         removed = len(hits) - len(announcement_hits)
                         if removed:
-                            search_warnings.append(
+                            local_warnings.append(
                                 f"{query}: discarded {removed} pages without an announcement title"
                             )
                         hits = announcement_hits
@@ -619,9 +716,34 @@ class Retriever:
                 for hit in hits:
                     hit.retrieval_point = retrieval_point
                     hit.retrieval_query = query
-                groups.append(hits)
+                return hits, local_warnings
             except SearchReaderError as exc:
-                search_warnings.append(f"{query}: {exc}"[:500])
+                local_warnings.append(f"{query}: {exc}"[:500])
+                return None, local_warnings
+
+        groups: list[list[SearchHit]] = []
+        search_warnings: list[str] = []
+        if self.provider.concurrent_queries and len(queries) > 1:
+            results_by_index: dict[int, tuple[list[SearchHit] | None, list[str]]] = {}
+            with ThreadPoolExecutor(max_workers=min(6, len(queries))) as pool:
+                futures = {
+                    pool.submit(run_single, query): idx
+                    for idx, query in enumerate(queries)
+                }
+                for future in as_completed(futures):
+                    results_by_index[futures[future]] = future.result()
+            for idx in range(len(queries)):
+                hits_or_none, w = results_by_index[idx]
+                search_warnings.extend(w)
+                if hits_or_none is not None:
+                    groups.append(hits_or_none)
+        else:
+            for query in queries:
+                hits_or_none, w = run_single(query)
+                search_warnings.extend(w)
+                if hits_or_none is not None:
+                    groups.append(hits_or_none)
+
         if not groups:
             detail = "; ".join(search_warnings)
             message = "all deterministic search queries failed"
@@ -644,6 +766,7 @@ class Retriever:
             groups,
             total_limit,
             excluded_urls=excluded_urls,
+            max_content_chars=self.settings.max_evidence_chars,
         )
         if not deduplicated:
             raise SearchReaderError("search", "search provider returned no usable results")
@@ -651,7 +774,7 @@ class Retriever:
             hit.source_id = f"S{index}"
 
         selected = (
-            deduplicated[: self.settings.fetch_pages * len(queries)]
+            deduplicated[: self.settings.fetch_pages * object_count]
             if self.provider.results_are_material
             else deduplicated[: self.settings.fetch_pages]
         )

@@ -21,7 +21,7 @@ def test_request_slots_reject_work_past_the_concurrency_limit() -> None:
 def test_runtime_readiness_requires_reachable_model_endpoints(monkeypatch) -> None:
     settings = replace(
         Settings(),
-        tavily_api_key="configured",
+        deepseek_api_key="configured",
         rwkv_model="reader",
         rwkv_final_model="final",
         rwkv_final_base_url="http://127.0.0.1:29999/v1",

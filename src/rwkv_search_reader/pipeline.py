@@ -202,9 +202,14 @@ def _sanitize_supplemental_query(query: str, question: str) -> str:
         question,
     ):
         current = time.localtime()
-        anchor = f"{current.tm_year}年{current.tm_mon}月"
-        if anchor not in sanitized:
+        if re.search(r"下一个|下一版|后续版本|本月|这个月", question):
+            anchor = f"{current.tm_year}年{current.tm_mon}月"
+        else:
+            anchor = f"{current.tm_year}年"
+        if str(current.tm_year) not in sanitized:
             sanitized = f"{sanitized} {anchor} 最新"
+        elif "最新" not in sanitized and re.search(r"当前|现在|最新|下一个|下一版", question):
+            sanitized = f"{sanitized} 最新"
     return sanitized[:800]
 
 
@@ -295,7 +300,8 @@ def _current_release_scope(
     online_sources = [
         source
         for source in sources
-        if re.search(r"现已上线|已上线|当前版本|最新版本", source.title)
+        if re.search(r"现已上线|已上线|更新公告|更新说明|当前版本|最新版本", source.title)
+        and not re.search(r"即将|将于|预下载|前瞻|预览", source.title)
         and _title_release_version(source.title) is not None
     ]
     if not online_sources:
@@ -371,7 +377,7 @@ def _record_current_release_scopes(
             for source in related
             if official(source)
             and _title_release_version(source.title) is not None
-            and re.search(r"上线|当前版本|最新版本", source.title)
+            and re.search(r"上线|更新公告|更新说明|当前版本|最新版本", source.title)
             and not re.search(r"即将|将于|预下载|前瞻|预览", source.title)
         ]
         if not online:
@@ -776,6 +782,31 @@ class SearchReaderPipeline:
             web_enabled = not local_passages or bool(
                 _EXPLICIT_WEB_RE.search(normalized)
             )
+            if web_enabled and not local_passages:
+                if self.settings.execution_mode == "dsh_agent":
+                    from .dsh_agent import DshWebAgent
+
+                    agent = DshWebAgent(self.settings, self.provider)
+                    return agent.run(
+                        normalized,
+                        session_id=session_id,
+                        conversation_history=history,
+                        on_progress=on_progress,
+                        on_delta=on_delta,
+                        on_sources=on_sources,
+                    )
+                if self.settings.execution_mode == "pi_agent":
+                    from .pi_agent import PiWebAgent
+
+                    agent = PiWebAgent(self.settings, self.provider)
+                    return agent.run(
+                        normalized,
+                        session_id=session_id,
+                        conversation_history=history,
+                        on_progress=on_progress,
+                        on_delta=on_delta,
+                        on_sources=on_sources,
+                    )
             research_plan = None
             representative_scope = False
             if (
@@ -914,6 +945,19 @@ class SearchReaderPipeline:
                 )
                 planned_retrieval_points = list(planned_queries)
                 if (
+                    research_plan
+                    and research_plan.decision == "search"
+                    and research_plan.scope_mode != "discover"
+                    and len(research_plan.records) <= 1
+                    and len(planned_queries) > 1
+                ):
+                    unified_point = (
+                        research_plan.records[0].subject
+                        if research_plan.records and research_plan.records[0].subject
+                        else (research_plan.goal or effective_question)[:120]
+                    )
+                    planned_retrieval_points = [unified_point] * len(planned_queries)
+                elif (
                     research_plan
                     and len(research_plan.retrieval_points) == len(planned_queries)
                 ):
@@ -1522,6 +1566,11 @@ class SearchReaderPipeline:
                 if not web_enabled:
                     audit_warnings.append(
                         "attached document material may be incomplete; external search was not requested"
+                    )
+                    break
+                if direct_url_used and not search_used:
+                    audit_warnings.append(
+                        "specified direct URL material did not cover all fields; skipped open-web expansion"
                     )
                     break
                 if not supplemental_queries:
