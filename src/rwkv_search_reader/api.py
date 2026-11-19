@@ -9,10 +9,12 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
 
+import anyio
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -86,10 +88,20 @@ class DocumentUploadRequest(BaseModel):
     content_base64: str = Field(default="", max_length=70_000_000)
 
 
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    try:
+        anyio.to_thread.current_default_thread_limiter().total_tokens = 512
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+
+
 app = FastAPI(
     title="RWKV SearchReader",
     version=__version__,
     description="Deterministic small-talk bypass plus retrieve-then-read answers.",
+    lifespan=_app_lifespan,
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -748,6 +760,8 @@ def main() -> None:
         host=settings.api_host,
         port=settings.api_port,
         reload=False,
+        backlog=2048,
+        timeout_keep_alive=30,
     )
 
 

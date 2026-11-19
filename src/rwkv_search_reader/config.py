@@ -140,9 +140,9 @@ class Settings:
     review_max_queries: int = 3
     conversation_turns: int = 100
     request_timeout_seconds: int = 45
-    api_max_concurrent_requests: int = 4
-    api_queue_timeout_seconds: int = 20
-    api_rate_limit_per_minute: int = 20
+    api_max_concurrent_requests: int = 256
+    api_queue_timeout_seconds: int = 120
+    api_rate_limit_per_minute: int = 1200
 
     router_base_url: str = ""
     router_api_key: str = "local"
@@ -357,13 +357,13 @@ def get_settings() -> Settings:
             "SEARCH_READER_REQUEST_TIMEOUT_SECONDS", 45, 5, 180
         ),
         api_max_concurrent_requests=_integer(
-            "SEARCH_READER_API_MAX_CONCURRENT_REQUESTS", 4, 1, 32
+            "SEARCH_READER_API_MAX_CONCURRENT_REQUESTS", 256, 1, 2048
         ),
         api_queue_timeout_seconds=_integer(
-            "SEARCH_READER_API_QUEUE_TIMEOUT_SECONDS", 20, 1, 300
+            "SEARCH_READER_API_QUEUE_TIMEOUT_SECONDS", 120, 1, 600
         ),
         api_rate_limit_per_minute=_integer(
-            "SEARCH_READER_API_RATE_LIMIT_PER_MINUTE", 20, 1, 600
+            "SEARCH_READER_API_RATE_LIMIT_PER_MINUTE", 1200, 1, 100000
         ),
         router_base_url=_text("SEARCH_READER_ROUTER_BASE_URL"),
         router_api_key=_text("SEARCH_READER_ROUTER_API_KEY", "local"),

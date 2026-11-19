@@ -60,7 +60,7 @@ def _shared_session(base_url: str) -> requests.Session:
         if session is None:
             session = _PooledSession()
             session.trust_env = False
-            adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32)
+            adapter = HTTPAdapter(pool_connections=64, pool_maxsize=256)
             session.mount("http://", adapter)
             session.mount("https://", adapter)
             _POOLED_SESSIONS[key] = session

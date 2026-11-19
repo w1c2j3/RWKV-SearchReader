@@ -36,12 +36,13 @@ SEARCH_READER_SSH_TARGET=user@your-g1l-host
 SEARCH_READER_SSH_PASSWORD=your-ssh-password
 SEARCH_READER_SSH_FORWARDS=18430:172.17.0.1:18430,18431:172.17.0.1:18431,18432:172.17.0.1:18432,18433:172.17.0.1:18433
 
-# RWKV-7 G1L 纯续写端点（推荐用 rwkv_peft_weight_merge 离线合并 NoRA 权重后直接加载，单流速度翻倍）
+# RWKV-7 G1L 纯续写端点（推荐用 scripts/merge_dsh_nora.py 离线合并 NoRA 并量化为 W8A16 .rwkvq 直接加载）
 SEARCH_READER_RWKV_BASE_URL=http://127.0.0.1:18430/v1,http://127.0.0.1:18431/v1,http://127.0.0.1:18432/v1,http://127.0.0.1:18433/v1
 SEARCH_READER_RWKV_API_KEY=your-model-key
 SEARCH_READER_RWKV_MODEL=rwkv7-g1l-7.2b-dsh-r32-merged
 SEARCH_READER_RWKV_PROTOCOL=completions
-SEARCH_READER_API_MAX_CONCURRENT_REQUESTS=16
+SEARCH_READER_API_MAX_CONCURRENT_REQUESTS=256
+SEARCH_READER_API_RATE_LIMIT_PER_MINUTE=1200
 
 # 联网判断路由模型（复用 G1L 多端点池并利用 Lightning Prefix Cache 加速）
 SEARCH_READER_ROUTER_BASE_URL=http://127.0.0.1:18430/v1,http://127.0.0.1:18431/v1,http://127.0.0.1:18432/v1,http://127.0.0.1:18433/v1
@@ -49,6 +50,26 @@ SEARCH_READER_ROUTER_API_KEY=your-model-key
 SEARCH_READER_ROUTER_MODEL=rwkv7-g1l-7.2b-dsh-r32-merged
 SEARCH_READER_ROUTER_PROTOCOL=completions
 ```
+
+### 外部开发者准备权重与复现 DSH 原生 NoRA（3 步开箱即用）
+
+我们训练好的 DSH 原生 NoRA 适配器（`dsh-searchreader-g1l-r32-adapter.pth`，`144.1 MiB`，因超过 GitHub 普通 Git 仓库 100 MiB 单文件限制，已直接发布在本仓库 **GitHub Releases `v0.2.0-dsh-nora`** 中，免费不限带宽下载）：
+
+1. 准备原始未量化基座模型 `rwkv7-g1l-7.2b-20261031-ctx34304.pth`（SHA256: `ce81c2d5...`）。
+2. 运行内置一键合并与量化脚本（自动从 GitHub Releases 下载适配器、校验 SHA256，调用 `rwkv_peft_weight_merge` 或自动回退 PyTorch 完成 192 层合并，并可选调用 `rwkv_quantize` 生成 7.2 GB W8A16 `.rwkvq`）：
+   ```bash
+   uv run python scripts/merge_dsh_nora.py \
+     --base-model /path/to/rwkv7-g1l-7.2b-20261031-ctx34304.pth \
+     --output /path/to/rwkv7-g1l-7.2b-dsh-r32-merged.pth \
+     --quantize-w8a16 /path/to/rwkv7-g1l-7.2b-dsh-r32-merged-w8a16.rwkvq
+   ```
+3. 启动 `rwkv_lighting_cuda` 直接加载合并模型（24GB 显卡推荐 `RWKV_DECODE_BATCH_SIZE=256`）：
+   ```bash
+   RWKV_MODEL_PATH=/path/to/rwkv7-g1l-7.2b-dsh-r32-merged-w8a16.rwkvq \
+   RWKV_DECODE_BATCH_SIZE=256 \
+   bash deploy/launch_answer.sh
+   ```
+   完整说明见 [adapters/dsh-searchreader-g1l-r32/README.md](adapters/dsh-searchreader-g1l-r32/README.md)。
 
 若使用远端 GPU 服务器，可先启动内置无依赖 SSH 转发守护脚本（自动重连并带文件锁）：
 

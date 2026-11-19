@@ -1,0 +1,20 @@
+{
+  "adapter_id": "dsh-searchreader-g1l-r32",
+  "release_tag": "v0.2.0-dsh-nora",
+  "download_url": "https://github.com/w1c2j3/RWKV-SearchReader/releases/download/v0.2.0-dsh-nora/dsh-searchreader-g1l-r32-adapter.pth",
+  "file": "dsh-searchreader-g1l-r32-adapter.pth",
+  "size_bytes": 151126688,
+  "sha256": "212e08c4abd2ddea24f6281b2e1ad9af3e4dc04cdfd5045e285e8be943312934",
+  "content_version": "a36b680c8b38ae717a784d221638e47340873c88b1968adc633c23fe17b81331",
+  "wire_protocol": "dsh-rwkv-wire-think-v2.0",
+  "base_model": "rwkv7-g1l-7.2b-20261031-ctx34304.pth",
+  "base_sha256": "ce81c2d568bc9fc8c9f7b8ddb47da070d88bf179827b311f221e1e6c5148af91",
+  "method": "nora",
+  "dtype": "bfloat16",
+  "rank": 32,
+  "alpha": 32.0,
+  "scale": 1.0,
+  "num_targets": 192,
+  "training_steps": 1264,
+  "training_rows": 5054
+}

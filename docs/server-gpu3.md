@@ -9,7 +9,7 @@
 | 进程 | 监听/转发地址 | 用途 |
 | --- | --- | --- |
 | `forward_ssh.py`（可选） | 本机 `127.0.0.1:18430..18433` → 远端 `172.17.0.1:18430..18433` | 标准库 PTY SSH 端口转发，带文件锁与断线自动重连 |
-| G1L GPU 0..3（`rwkv_lighting_cuda`） | `18430`、`18431`、`18432`、`18433` | 直接加载合并权重 `rwkv7-g1l-7.2b-dsh-r32-merged.pth`（`--cmix-sparse off --decode-batch-size 64`） |
+| G1L GPU 0..3（`rwkv_lighting_cuda`） | `18430`、`18431`、`18432`、`18433` | 直接加载 W8A16 合并模型 `rwkv7-g1l-7.2b-dsh-r32-merged-w8a16.rwkvq`（`--cmix-sparse off --decode-batch-size 256`，4 卡共 1,024 并发槽位） |
 | `rwkv-search-reader-api`（`uvicorn`） | `0.0.0.0:8790`（或异步队列版 `job_api` `0.0.0.0:8791`） | 网页聊天 UI、实时 `delta` 流式问答、联网路由判断与异步任务 |
 | `cloudflared`（可选公网联调） | `https://*.trycloudflare.com` → `http://127.0.0.1:8790` | Cloudflare 免费免域名 HTTPS 公网隧道转发（自动支持 SSE 流式输出） |
 | `worker`（异步队列可选） | 无监听端口 | 领取并执行 SQLite 任务队列（多卡推荐 `SEARCH_READER_JOB_CONCURRENCY=2`） |
@@ -30,7 +30,12 @@
 
 直接加载合并 `.pth` 的优势：
 - **零运行时旁路开销**：消除每步 192 个 `rank=32` 旁路矩阵投影与 PCIe H2D 暂存开销，在保持 G1L 精确模式 `--cmix-sparse off` 的前提下，单请求解码速度从动态挂载的 **`39.4 tok/s`（`25.39 ms/tok`）** 提升至 **`78.1 tok/s`（`12.80 ms/tok`）**（提速 **1.98×**）。
-- **高并发连续批处理（Continuous Batching）**：4 张 RTX 4090 开启 `--decode-batch-size 64` 后，4 并发总吞吐达 **`295.7 tok/s`**（单用户仍维持 `74.7 tok/s`），16 并发总吞吐达 **`1,040.3 tok/s`**。
+- **高并发连续批处理（4× RTX 4090 满载压测）**：转为 `7.2 GB` 的 W8A16 `.rwkvq` 后，每张 24GB 4090 开启 `--decode-batch-size 256`（单卡显存占用约 `18.0 GiB`，预留 `6.2 GiB` PrefillQueue，4 卡合计 **1,024 路活跃连续批处理槽位**；由于 RWKV-7 为恒定状态大小 RNN，每路并发仅占 ~34 MB 显存，不随上下文增长膨胀）：
+  - **4 并发**：总吞吐 **`295.7 tok/s`**（单用户 `74.7 tok/s`）
+  - **32 并发（单张 4090）**：单卡吞吐 **`1,346.0 tok/s`**
+  - **64 并发（4× 4090）**：总吞吐 **`3,182.4 tok/s`**（128 token 平均耗时仅 `2.54s`）
+  - **128 / 256 并发（4× 4090 满载）**：总吞吐高达 **`5,608.2 tok/s`**（128 并发平均耗时 `2.83s`，256 并发同时输出 32,768 token 总墙钟耗时仅 `5.85s`）
+- **API 与连接池满配**：`SEARCH_READER_API_MAX_CONCURRENT_REQUESTS` 默认提升至 `256`（上限 `2048`），HTTP 连接池扩容至 `256`，AnyIO 线程池扩容至 `512`，建议直接将 `rwkv-search-reader-api` 与 `cloudflared` 同机部署在推理机上直连 `172.17.0.1:18430..18433` 以消除跨机 SSH 隧道开销。
 - **会话亲和 Prefix Cache**：`dsh_agent` 自动将同一请求的多步续写固定在同一空闲 GPU 并携带 `x-rwkv-session-id`，命中增量状态缓存，避免每轮重复重算历史前缀。
 - **磁盘空间友好**：当根分区余量紧张时，可直接将合并后的 `.pth` 输出到内存盘 `/dev/shm/`（注意主机重启后需重新执行上面约 15 秒的 CPU 合并命令，或清理磁盘后落盘保存）。
 

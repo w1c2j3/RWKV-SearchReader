@@ -118,7 +118,7 @@ class SearchProvider(ABC):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+        adapter = HTTPAdapter(pool_connections=64, pool_maxsize=128)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
@@ -159,7 +159,7 @@ class DeepSeekSearchProvider(SearchProvider):
         sess = getattr(self._local, "session", None)
         if sess is None:
             sess = requests.Session()
-            adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+            adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64)
             sess.mount("https://", adapter)
             sess.mount("http://", adapter)
             self._local.session = sess
