@@ -20,6 +20,8 @@ data/*.sqlite3*
 data/*.log
 data/*.pid
 data/*.lock
+lightning/
+models/
 *.pth
 *.rwkvq
 *.part
