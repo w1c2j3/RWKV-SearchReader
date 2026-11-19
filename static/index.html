@@ -462,6 +462,8 @@
         if (stage === 'planning') return ['正在理解问题范围', '判断需要回答的对象、字段和检索任务'];
         if (stage === 'plan_completed') return [detail.decision === 'clarify' ? '需要先确认问题指代' : (detail.scope_mode === 'discover' ? `已设计 ${(detail.queries || []).length || 1} 个检索点` : `已拆分为 ${(detail.queries || []).length || 1} 个检索任务`), detail.decision === 'clarify' ? (detail.clarification || '缺少无法从公开资料确定的指代') : (detail.goal || '已形成本轮资料计划')];
         if (stage === 'clarifying') return ['正在等待你补充范围', detail.message || '补充范围后可以继续'];
+        if (stage === 'thinking') return [`第 ${detail.step || 1} 轮思考与核验`, detail.message || '正在分析问题与已有资料'];
+        if (stage === 'answering') return ['正在实时生成回答', detail.message || '思考完成，正文流式输出中'];
         if (stage === 'searching') return ['开始查找相关资料', (detail.queries && detail.queries.length > 1) ? `并发检索 ${detail.queries.length} 个查询词` : (detail.query ? `围绕“${detail.query}”查找` : '正在理解问题并发起检索')];
         if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, `使用了 ${(detail.queries || []).length || 1} 个检索式`];
         if (stage === 'search_points_collected') return [`${(detail.queries || []).length || 1} 个检索点均已取得材料`, '每个检索点将先独立归纳，再进入最终总结'];
@@ -822,6 +824,7 @@
       };
 
       const finishAssistant = (body, data) => {
+        body.querySelector('.live-stream-wrap')?.remove();
         const label = document.createElement('div');
         label.className = 'answer-label';
         label.textContent = '回答';
@@ -850,6 +853,7 @@
       };
 
       const appendError = (body, message) => {
+        body.querySelector('.live-stream-wrap')?.remove();
         const answer = document.createElement('div');
         answer.className = 'assistant-answer';
         answer.textContent = `暂时无法回答：${message}`;
@@ -862,7 +866,7 @@
         return error;
       };
 
-      const requestAnswer = async (question, requestConversationId, onProgress, signal) => {
+      const requestAnswer = async (question, requestConversationId, onProgress, signal, onDelta = null) => {
         const response = await fetch('/v1/answer/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -889,6 +893,7 @@
           if (!line) return;
           const event = JSON.parse(line.slice(6));
           if (event.type === 'progress') onProgress(event.stage, event.detail || {});
+          if (event.type === 'delta' && onDelta) onDelta(event.content || '');
           if (event.type === 'result') result = event.result;
           if (event.type === 'error') throw serverError(event.error?.message || '请求失败');
         };
@@ -1339,9 +1344,48 @@
         const { body } = assistantShell();
         const trace = createTrace([], true);
         body.appendChild(trace.details);
+        const liveSources = [];
+        let streamedText = '';
+        let liveWrap = null;
+        let liveAnswer = null;
+        let rafPending = false;
+        const handleProgress = (stage, detail = {}) => {
+          if (Array.isArray(detail.sources)) {
+            detail.sources.forEach((src) => {
+              if (src?.source_id && !liveSources.some((item) => item.source_id === src.source_id)) {
+                liveSources.push(src);
+              }
+            });
+          }
+          trace.update(stage, detail);
+        };
+        const handleDelta = (piece) => {
+          if (!piece || generation !== requestGeneration) return;
+          streamedText += piece;
+          if (!liveWrap) {
+            liveWrap = document.createElement('div');
+            liveWrap.className = 'live-stream-wrap';
+            const liveLabel = document.createElement('div');
+            liveLabel.className = 'answer-label';
+            liveLabel.textContent = '回答 · 实时生成中';
+            liveAnswer = document.createElement('div');
+            liveAnswer.className = 'assistant-answer';
+            liveWrap.append(liveLabel, liveAnswer);
+            body.appendChild(liveWrap);
+          }
+          if (!rafPending) {
+            rafPending = true;
+            requestAnimationFrame(() => {
+              rafPending = false;
+              if (!liveAnswer || !liveWrap.isConnected) return;
+              renderAnswer(liveAnswer, streamedText, liveSources);
+              scrollToBottom();
+            });
+          }
+        };
         scrollToBottom();
         try {
-          const data = await requestAnswer(question, requestConversationId, trace.update, controller.signal);
+          const data = await requestAnswer(question, requestConversationId, handleProgress, controller.signal, handleDelta);
           if (generation !== requestGeneration) return;
           finishAssistant(body, data);
           clearPendingAnswer(pendingDescriptor);

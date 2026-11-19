@@ -272,6 +272,10 @@ def _answer_events(
         if not stream_closed.is_set():
             events.put({"type": "progress", "stage": stage, "detail": detail})
 
+    def delta(piece: str) -> None:
+        if piece and not stream_closed.is_set():
+            events.put({"type": "delta", "content": piece})
+
     def work() -> None:
         try:
             settings = get_settings()
@@ -295,6 +299,7 @@ def _answer_events(
             result = _new_pipeline().answer(
                 question,
                 on_progress=progress,
+                on_delta=delta,
                 session_id=identity,
                 conversation_history=history,
                 document_passages=document_passages,

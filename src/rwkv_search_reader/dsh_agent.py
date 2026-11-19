@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -262,8 +263,8 @@ def format_dsh_search_output(
             label = (h.title or "").strip() or (urlsplit(h.url).hostname or h.url)
             meta: list[str] = []
             snippet = " ".join((h.snippet or h.content or "").split()).strip()
-            if len(snippet) > 900:
-                snippet = snippet[:897] + "..."
+            if len(snippet) > 480:
+                snippet = snippet[:477] + "..."
             if snippet:
                 meta.append(snippet)
             if h.published_date:
@@ -589,6 +590,108 @@ def salvage_answer_prose(raw: str) -> str:
     return text
 
 
+_DSH_ROUTE_LOCK = threading.Lock()
+_DSH_INFLIGHT: dict[str, int] = {}
+_DSH_SESSION_AFFINITY: dict[str, str] = {}
+_DSH_RR_COUNTER = 0
+
+
+def _acquire_dsh_endpoint(urls: tuple[str, ...], session_key: str) -> str:
+    global _DSH_RR_COUNTER
+    if not urls:
+        return "http://127.0.0.1:18430/v1"
+    with _DSH_ROUTE_LOCK:
+        min_load = min(_DSH_INFLIGHT.get(u, 0) for u in urls)
+        preferred = _DSH_SESSION_AFFINITY.get(session_key) if session_key else None
+        if preferred in urls and _DSH_INFLIGHT.get(preferred, 0) <= min_load:
+            chosen = preferred
+        else:
+            start = _DSH_RR_COUNTER
+            _DSH_RR_COUNTER += 1
+            chosen = urls[start % len(urls)]
+            for offset in range(len(urls)):
+                cand = urls[(start + offset) % len(urls)]
+                if _DSH_INFLIGHT.get(cand, 0) == min_load:
+                    chosen = cand
+                    break
+            if session_key:
+                if len(_DSH_SESSION_AFFINITY) > 2048:
+                    _DSH_SESSION_AFFINITY.clear()
+                _DSH_SESSION_AFFINITY[session_key] = chosen
+        _DSH_INFLIGHT[chosen] = _DSH_INFLIGHT.get(chosen, 0) + 1
+        return chosen
+
+
+def _release_dsh_endpoint(url: str) -> None:
+    with _DSH_ROUTE_LOCK:
+        cur = _DSH_INFLIGHT.get(url, 0)
+        if cur <= 1:
+            _DSH_INFLIGHT.pop(url, None)
+        else:
+            _DSH_INFLIGHT[url] = cur - 1
+
+
+class _DshAnswerDeltaStreamer:
+    """Streams prose deltas after `</think>` while suppressing `<think>` and `<tool_call>`."""
+
+    def __init__(
+        self,
+        *,
+        thinking: bool,
+        prefill: str = "",
+        on_delta: Callable[[str], None] | None,
+        on_answer_start: Callable[[], None] | None = None,
+    ) -> None:
+        self.thinking = thinking
+        self.prefill = prefill
+        self.on_delta = on_delta
+        self.on_answer_start = on_answer_start
+        self._buf = ""
+        self._emitted = ""
+        self._aborted = False
+        self._started_notice = False
+
+    @property
+    def emitted_text(self) -> str:
+        return self._emitted
+
+    def feed(self, piece: str) -> None:
+        if self._aborted or not piece:
+            return
+        self._buf += piece
+        if self.thinking:
+            idx = self._buf.find("</think>")
+            if idx < 0:
+                return
+            after = self._buf[idx + len("</think>") :]
+        else:
+            after = f"{self.prefill}{self._buf}" if self.prefill else self._buf
+
+        lstripped = after.lstrip()
+        if not lstripped:
+            return
+        if lstripped.startswith("<"):
+            self._aborted = True
+            return
+        if "<tool_call>" in lstripped or "<no_tool_call>" in lstripped:
+            self._aborted = True
+            return
+        if not self._started_notice:
+            self._started_notice = True
+            if self.on_answer_start is not None:
+                self.on_answer_start()
+        if self.on_delta is None:
+            return
+        holdback = 20
+        safe_len = len(lstripped) - holdback
+        if safe_len <= len(self._emitted):
+            return
+        delta = lstripped[len(self._emitted) : safe_len]
+        if delta:
+            self._emitted += delta
+            self.on_delta(delta)
+
+
 class DshWebAgent:
     """Executes multi-step Search + Fetch in native DeepSeek Harness (`dsh-rwkv-plugin`) wire format."""
 
@@ -597,10 +700,7 @@ class DshWebAgent:
         self.provider = provider
         self._rr = 0
 
-    def _next_client(self) -> OpenAICompatibleClient:
-        urls = self.settings.rwkv_base_urls or (self.settings.rwkv_base_url,)
-        url = urls[self._rr % len(urls)]
-        self._rr += 1
+    def _make_client(self, url: str, session_key: str) -> OpenAICompatibleClient:
         adapter_cfg: dict[str, Any] = {}
         if self.settings.rwkv_adapter_id:
             adapter_cfg["adapter_id"] = self.settings.rwkv_adapter_id
@@ -609,15 +709,24 @@ class DshWebAgent:
             adapter_cfg["adapter_scale"] = self.settings.rwkv_adapter_scale
         if self.settings.rwkv_state_id:
             adapter_cfg["state_id"] = self.settings.rwkv_state_id
+        extra_headers = dict(self.settings.rwkv_access_headers or {})
+        if session_key:
+            extra_headers["x-rwkv-session-id"] = session_key
         return OpenAICompatibleClient(
             base_url=url,
             api_key=self.settings.rwkv_api_key,
             model=self.settings.rwkv_model,
             timeout_seconds=self.settings.model_timeout_seconds,
-            extra_headers=self.settings.rwkv_access_headers,
+            extra_headers=extra_headers,
             context_window=self.settings.rwkv_context_window,
             adapter_config=adapter_cfg,
         )
+
+    def _next_client(self) -> OpenAICompatibleClient:
+        urls = self.settings.rwkv_base_urls or (self.settings.rwkv_base_url,)
+        url = urls[self._rr % len(urls)]
+        self._rr += 1
+        return self._make_client(url, "")
 
     def run(
         self,
@@ -791,222 +900,270 @@ class DshWebAgent:
         force_closeout = False
         final_answer = ""
         last_raw_output = ""
+        streamed_answer = ""
 
-        for step_idx in range(1, self.settings.pi_agent_max_turns + 1):
-            entries, epoch_folded = fold_dsh_history_epoch(
-                system_entry,
-                history_items,
-                thinking=use_thinking,
-                max_result_chars=self.settings.max_evidence_chars,
-                budget_tokens=self.settings.pi_epoch_budget_tokens,
-            )
+        urls = self.settings.rwkv_base_urls or (self.settings.rwkv_base_url,)
+        session_key = session_id or request_id
+        pinned_url = _acquire_dsh_endpoint(urls, session_key)
+        pinned_client = self._make_client(pinned_url, session_key)
+        answering_emitted = False
 
-            parsed: dict[str, Any] | None = None
-            retry_note: str | None = None
-            for attempt in range(3):
-                call_entries = (
-                    [*entries, {"role": "user", "text": retry_note}]
-                    if retry_note
-                    else entries
+        def notify_answering() -> None:
+            nonlocal answering_emitted
+            if not answering_emitted:
+                answering_emitted = True
+                emit("answering", {"message": "思考完成，正在实时输出回答"})
+
+        try:
+            for step_idx in range(1, self.settings.pi_agent_max_turns + 1):
+                emit(
+                    "thinking",
+                    {
+                        "step": step_idx,
+                        "message": (
+                            "正在分析问题并决定是否检索"
+                            if step_idx == 1
+                            else f"正在综合已获资料进行第 {step_idx} 轮核验"
+                        ),
+                    },
                 )
-                prompt = render_dsh_prompt(call_entries, thinking=use_thinking, generation=True)
-                client = self._next_client()
-                t0 = time.perf_counter()
-                raw, reason, matched_stop, prompt_tokens = client.raw_continuation(
-                    prompt,
-                    max_tokens=min(4096, self.settings.rwkv_max_tokens + 1536),
-                    stop=DSH_STOP_TEXTS,
+                entries, epoch_folded = fold_dsh_history_epoch(
+                    system_entry,
+                    history_items,
                     thinking=use_thinking,
-                    has_tools=True,
-                    stage="dsh_agent",
+                    max_result_chars=self.settings.max_evidence_chars,
+                    budget_tokens=self.settings.pi_epoch_budget_tokens,
                 )
-                # DSH §3.1.2: if model mentioned `</tool_call>` inside `<think>` before `</think>`, resume!
-                resumes = 0
-                while (
-                    use_thinking
-                    and matched_stop == "</tool_call>"
-                    and "</think>" not in raw
-                    and resumes < 3
-                ):
-                    raw += "</tool_call>"
-                    resumes += 1
-                    more_raw, reason, matched_stop, _ = client.raw_continuation(
-                        prompt + raw,
-                        max_tokens=1536,
+
+                parsed: dict[str, Any] | None = None
+                retry_note: str | None = None
+                for attempt in range(3):
+                    call_entries = (
+                        [*entries, {"role": "user", "text": retry_note}]
+                        if retry_note
+                        else entries
+                    )
+                    prompt = render_dsh_prompt(call_entries, thinking=use_thinking, generation=True)
+                    streamer = _DshAnswerDeltaStreamer(
+                        thinking=use_thinking,
+                        on_delta=on_delta if not streamed_answer else None,
+                        on_answer_start=notify_answering,
+                    )
+                    t0 = time.perf_counter()
+                    raw, reason, matched_stop, prompt_tokens = pinned_client.raw_continuation(
+                        prompt,
+                        max_tokens=min(3072, self.settings.rwkv_max_tokens + 1024),
                         stop=DSH_STOP_TEXTS,
                         thinking=use_thinking,
                         has_tools=True,
-                        stage="dsh_agent_resume",
+                        stage="dsh_agent",
+                        on_raw_delta=streamer.feed,
                     )
-                    raw += more_raw
+                    # DSH §3.1.2: if model mentioned `</tool_call>` inside `<think>` before `</think>`, resume!
+                    resumes = 0
+                    while (
+                        use_thinking
+                        and matched_stop == "</tool_call>"
+                        and "</think>" not in raw
+                        and resumes < 3
+                    ):
+                        streamer.feed("</tool_call>")
+                        raw += "</tool_call>"
+                        resumes += 1
+                        more_raw, reason, matched_stop, _ = pinned_client.raw_continuation(
+                            prompt + raw,
+                            max_tokens=1536,
+                            stop=DSH_STOP_TEXTS,
+                            thinking=use_thinking,
+                            has_tools=True,
+                            stage="dsh_agent_resume",
+                            on_raw_delta=streamer.feed,
+                        )
+                        raw += more_raw
 
-                # DSH §3.1.3: if thinking hit token limit before `</think>`, close `</think>` and ask for action!
-                if use_thinking and reason == "length" and "</think>" not in raw:
-                    raw += "</think>"
-                    more_raw, reason, matched_stop, _ = client.raw_continuation(
-                        prompt + raw,
-                        max_tokens=1024,
-                        stop=DSH_STOP_TEXTS,
-                        thinking=False,
-                        has_tools=True,
-                        stage="dsh_agent_think_close",
+                    # DSH §3.1.3: if thinking hit token limit before `</think>`, close `</think>` and ask for action!
+                    if use_thinking and reason == "length" and "</think>" not in raw:
+                        streamer.feed("</think>")
+                        raw += "</think>"
+                        more_raw, reason, matched_stop, _ = pinned_client.raw_continuation(
+                            prompt + raw,
+                            max_tokens=1024,
+                            stop=DSH_STOP_TEXTS,
+                            thinking=False,
+                            has_tools=True,
+                            stage="dsh_agent_think_close",
+                            on_raw_delta=streamer.feed,
+                        )
+                        raw += more_raw
+
+                    if streamer.emitted_text and not streamed_answer:
+                        streamed_answer = streamer.emitted_text
+
+                    call_ms = round((time.perf_counter() - t0) * 1000, 1)
+                    last_raw_output = raw
+                    cand = parse_dsh_output(
+                        raw,
+                        thinking=use_thinking,
+                        finish_reason=reason,
+                        matched_stop=matched_stop,
                     )
-                    raw += more_raw
+                    model_calls.append(
+                        {
+                            "step": step_idx,
+                            "attempt": attempt + 1,
+                            "stage": "dsh_agent",
+                            "elapsed_ms": call_ms,
+                            "prompt_tokens": prompt_tokens,
+                            "epoch_folded": epoch_folded,
+                            "decision_kind": cand["kind"],
+                            "base_url": pinned_url,
+                        }
+                    )
+                    if cand["kind"] != "error":
+                        parsed = cand
+                        break
+                    err_k = cand.get("error_kind", "other")
+                    action_hint = (
+                        "Either answer directly in ordinary text, or output exactly one "
+                        '<tool_call>{"name":"...","arguments":{...}}</tool_call> and nothing else.'
+                    )
+                    if err_k == "unclosed-think":
+                        retry_note = (
+                            "Your previous reasoning never finished and was cut off. Do not restart it. "
+                            f"Close the thinking block with </think> immediately, then {action_hint}"
+                        )
+                    elif err_k == "length":
+                        retry_note = (
+                            "Your previous response was cut off by the output limit. Be far more concise. "
+                            f"Skip preamble and restated reasoning, then {action_hint}"
+                        )
+                    else:
+                        retry_note = f"Your previous response was invalid. {action_hint}"
 
-                call_ms = round((time.perf_counter() - t0) * 1000, 1)
-                last_raw_output = raw
-                cand = parse_dsh_output(
-                    raw,
-                    thinking=use_thinking,
-                    finish_reason=reason,
-                    matched_stop=matched_stop,
-                )
-                model_calls.append(
-                    {
-                        "step": step_idx,
-                        "attempt": attempt + 1,
-                        "stage": "dsh_agent",
-                        "elapsed_ms": call_ms,
-                        "prompt_tokens": prompt_tokens,
-                        "epoch_folded": epoch_folded,
-                        "decision_kind": cand["kind"],
-                    }
-                )
-                if cand["kind"] != "error":
-                    parsed = cand
+                if parsed is None:
+                    force_closeout = True
                     break
-                err_k = cand.get("error_kind", "other")
-                action_hint = (
-                    "Either answer directly in ordinary text, or output exactly one "
-                    '<tool_call>{"name":"...","arguments":{...}}</tool_call> and nothing else.'
-                )
-                if err_k == "unclosed-think":
-                    retry_note = (
-                        "Your previous reasoning never finished and was cut off. Do not restart it. "
-                        f"Close the thinking block with </think> immediately, then {action_hint}"
-                    )
-                elif err_k == "length":
-                    retry_note = (
-                        "Your previous response was cut off by the output limit. Be far more concise. "
-                        f"Skip preamble and restated reasoning, then {action_hint}"
-                    )
-                else:
-                    retry_note = f"Your previous response was invalid. {action_hint}"
 
-            if parsed is None:
-                force_closeout = True
-                break
-
-            if parsed["kind"] == "final":
-                final_answer = parsed["text"].strip()
-                if final_answer:
-                    history_items.append({"kind": "assistant", "text": final_answer})
+                if parsed["kind"] == "final":
+                    final_answer = parsed["text"].strip()
+                    if final_answer:
+                        history_items.append({"kind": "assistant", "text": final_answer})
+                        break
+                    force_closeout = True
                     break
-                force_closeout = True
-                break
 
-            if parsed["kind"] == "no_tool":
-                if parsed["reason"]:
-                    final_answer = parsed["reason"]
-                    history_items.append({"kind": "assistant", "text": final_answer})
+                if parsed["kind"] == "no_tool":
+                    if parsed["reason"]:
+                        final_answer = parsed["reason"]
+                        history_items.append({"kind": "assistant", "text": final_answer})
+                        break
+                    history_items.append({"kind": "note", "text": EMPTY_EXIT_REASK})
+                    force_closeout = True
                     break
-                history_items.append({"kind": "note", "text": EMPTY_EXIT_REASK})
-                force_closeout = True
-                break
 
-            if parsed["kind"] == "unknown_tool":
-                call_id = f"call_{uuid.uuid4().hex[:16]}"
-                history_items.append(
-                    {"kind": "call", "id": call_id, "name": parsed["name"], "args": parsed["args"]}
-                )
-                history_items.append(
-                    {
-                        "kind": "result",
-                        "id": call_id,
-                        "name": parsed["name"],
-                        "ok": False,
-                        "text": f"Unknown tool '{parsed['name']}'. Use web_search or web_fetch, or answer directly.",
-                    }
-                )
-                continue
-
-            # Valid `web_search` or `web_fetch` tool call — run DSH `gateToolCall` duplicate checks
-            t_name = parsed["name"]
-            t_args = parsed["args"]
-            key = f"{t_name}\x00{json.dumps(t_args, sort_keys=True, ensure_ascii=False)}"
-            if key in success_keys:
-                if not duplicate_retried:
-                    duplicate_retried = True
-                    history_items.append({"kind": "note", "text": DUPLICATE_RETRY_REMINDER})
+                if parsed["kind"] == "unknown_tool":
+                    call_id = f"call_{uuid.uuid4().hex[:16]}"
+                    history_items.append(
+                        {"kind": "call", "id": call_id, "name": parsed["name"], "args": parsed["args"]}
+                    )
+                    history_items.append(
+                        {
+                            "kind": "result",
+                            "id": call_id,
+                            "name": parsed["name"],
+                            "ok": False,
+                            "text": f"Unknown tool '{parsed['name']}'. Use web_search or web_fetch, or answer directly.",
+                        }
+                    )
                     continue
-                warnings.append(f"dsh_agent: duplicate successful {t_name} call triggered closeout")
-                force_closeout = True
-                break
-            if key in failed_keys:
-                warnings.append(f"dsh_agent: repeated failed {t_name} call triggered closeout")
-                force_closeout = True
-                break
 
-            call_id = f"call_{uuid.uuid4().hex[:16]}"
-            history_items.append({"kind": "call", "id": call_id, "name": t_name, "args": t_args})
-            obs_text, ok = execute_dsh_tool(t_name, t_args)
-            history_items.append(
-                {"kind": "result", "id": call_id, "name": t_name, "ok": ok, "text": obs_text}
-            )
-            if ok:
-                success_keys.add(key)
-            else:
-                failed_keys.add(key)
+                # Valid `web_search` or `web_fetch` tool call — run DSH `gateToolCall` duplicate checks
+                t_name = parsed["name"]
+                t_args = parsed["args"]
+                key = f"{t_name}\x00{json.dumps(t_args, sort_keys=True, ensure_ascii=False)}"
+                if key in success_keys:
+                    if not duplicate_retried:
+                        duplicate_retried = True
+                        history_items.append({"kind": "note", "text": DUPLICATE_RETRY_REMINDER})
+                        continue
+                    warnings.append(f"dsh_agent: duplicate successful {t_name} call triggered closeout")
+                    force_closeout = True
+                    break
+                if key in failed_keys:
+                    warnings.append(f"dsh_agent: repeated failed {t_name} call triggered closeout")
+                    force_closeout = True
+                    break
 
-        if not final_answer or force_closeout and not final_answer:
-            # DSH §3.5 Forced Closeout: withdraw tools and ask for prose answer from collected results
-            emit("finalizing", {"source_count": len(sources), "message": "正在根据已检索证据生成回答"})
-            entries, _ = fold_dsh_history_epoch(
-                {"role": "system", "text": DSH_WEB_SYSTEM_HEAD},
-                history_items,
-                thinking=use_thinking,
-                max_result_chars=self.settings.max_evidence_chars,
-                budget_tokens=self.settings.pi_epoch_budget_tokens,
-            )
-            for close_idx, close_note in enumerate(
-                (ONE_STAGE_ANSWER_INSTRUCTION, ANSWER_STAGE_REASK)
-            ):
-                try_think = use_thinking and close_idx == 0
-                prefill = (
-                    ""
-                    if try_think
-                    else ("根据上面的工具结果，" if _HAN_RE.search(question) else "Based on the tool results above,")
+                call_id = f"call_{uuid.uuid4().hex[:16]}"
+                history_items.append({"kind": "call", "id": call_id, "name": t_name, "args": t_args})
+                obs_text, ok = execute_dsh_tool(t_name, t_args)
+                history_items.append(
+                    {"kind": "result", "id": call_id, "name": t_name, "ok": ok, "text": obs_text}
                 )
-                close_entries = [*entries, {"role": "user", "text": close_note}]
-                prompt = render_dsh_prompt(
-                    close_entries,
-                    thinking=try_think,
-                    prefill=prefill,
-                    generation=True,
+                if ok:
+                    success_keys.add(key)
+                else:
+                    failed_keys.add(key)
+
+            if not final_answer or force_closeout and not final_answer:
+                # DSH §3.5 Forced Closeout: withdraw tools and ask for prose answer from collected results
+                emit("finalizing", {"source_count": len(sources), "message": "正在根据已检索证据生成回答"})
+                entries, _ = fold_dsh_history_epoch(
+                    {"role": "system", "text": DSH_WEB_SYSTEM_HEAD},
+                    history_items,
+                    thinking=use_thinking,
+                    max_result_chars=self.settings.max_evidence_chars,
+                    budget_tokens=self.settings.pi_epoch_budget_tokens,
                 )
-                client = self._next_client()
-                raw, reason, matched_stop, _ = client.raw_continuation(
-                    prompt,
-                    max_tokens=self.settings.rwkv_max_tokens,
-                    stop=("<EOD>", "✿", "\nUser:", "\nSystem:"),
-                    thinking=try_think,
-                    has_tools=False,
-                    stage="finalize",
-                )
-                full_raw = (f"{prefill}{raw}" if prefill else raw)
-                cand = parse_dsh_output(
-                    full_raw,
-                    thinking=try_think,
-                    finish_reason=reason,
-                    matched_stop=matched_stop,
-                )
-                if cand["kind"] == "final" and cand["text"].strip():
-                    final_answer = cand["text"].strip()
-                    break
-                salvaged = salvage_answer_prose(full_raw)
-                if salvaged:
-                    final_answer = salvaged
-                    break
+                for close_idx, close_note in enumerate(
+                    (ONE_STAGE_ANSWER_INSTRUCTION, ANSWER_STAGE_REASK)
+                ):
+                    try_think = use_thinking and close_idx == 0
+                    prefill = (
+                        ""
+                        if try_think
+                        else ("根据上面的工具结果，" if _HAN_RE.search(question) else "Based on the tool results above,")
+                    )
+                    close_entries = [*entries, {"role": "user", "text": close_note}]
+                    prompt = render_dsh_prompt(
+                        close_entries,
+                        thinking=try_think,
+                        prefill=prefill,
+                        generation=True,
+                    )
+                    close_streamer = _DshAnswerDeltaStreamer(
+                        thinking=try_think,
+                        prefill=prefill,
+                        on_delta=on_delta if not streamed_answer else None,
+                        on_answer_start=notify_answering,
+                    )
+                    raw, reason, matched_stop, _ = pinned_client.raw_continuation(
+                        prompt,
+                        max_tokens=self.settings.rwkv_max_tokens,
+                        stop=("<EOD>", "✿", "\nUser:", "\nSystem:"),
+                        thinking=try_think,
+                        has_tools=False,
+                        stage="finalize",
+                        on_raw_delta=close_streamer.feed,
+                    )
+                    if close_streamer.emitted_text and not streamed_answer:
+                        streamed_answer = close_streamer.emitted_text
+                    full_raw = f"{prefill}{raw}" if prefill else raw
+                    cand = parse_dsh_output(
+                        full_raw,
+                        thinking=try_think,
+                        finish_reason=reason,
+                        matched_stop=matched_stop,
+                    )
+                    if cand["kind"] == "final" and cand["text"].strip():
+                        final_answer = cand["text"].strip()
+                        break
+                    salvaged = salvage_answer_prose(full_raw)
+                    if salvaged:
+                        final_answer = salvaged
+                        break
+        finally:
+            _release_dsh_endpoint(pinned_url)
 
         if not final_answer:
             salvaged_last = salvage_answer_prose(last_raw_output)
@@ -1016,7 +1173,12 @@ class DshWebAgent:
                 raise SearchReaderError("dsh_agent", "RWKV dsh_agent produced an empty final answer")
 
         if on_delta is not None:
-            on_delta(final_answer)
+            if streamed_answer and final_answer.startswith(streamed_answer):
+                remainder = final_answer[len(streamed_answer) :]
+                if remainder:
+                    on_delta(remainder)
+            elif not streamed_answer:
+                on_delta(final_answer)
 
         evidence = [
             Evidence(

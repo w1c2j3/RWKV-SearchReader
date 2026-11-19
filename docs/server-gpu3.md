@@ -2,26 +2,43 @@
 
 更新时间：2026-11-19。
 
-当前默认生产架构采用 **4× NVIDIA RTX 4090 上的 RWKV-7 G1L (`rwkv7-g1l-7.2b-20261031-ctx34304`) 纯续写服务（`rwkv_lighting_cuda`）+ DSH 原生 NoRA 适配器（`dsh-searchreader-g1l-r32`）** 配合 **DeepSeek Search & Fetch API**。既支持在推理机本机运行 SearchReader，也支持通过内置 SSH 端口转发守护进程连接远端内网推理机，并支持通过 Cloudflare Quick Tunnel 一键暴露 HTTPS 公网测试入口。
+当前默认生产架构采用 **4× NVIDIA RTX 4090 上的 RWKV-7 G1L + DSH 原生 NoRA 离线合并权重（`rwkv7-g1l-7.2b-dsh-r32-merged.pth`）纯续写服务（`rwkv_lighting_cuda`）** 配合 **DeepSeek Search & Fetch API**。既支持在推理机本机运行 SearchReader，也支持通过内置 SSH 端口转发守护进程连接远端内网推理机，并支持通过 Cloudflare Quick Tunnel 一键暴露 HTTPS 公网测试入口。
 
 ## 进程与端口拓扑
 
 | 进程 | 监听/转发地址 | 用途 |
 | --- | --- | --- |
 | `forward_ssh.py`（可选） | 本机 `127.0.0.1:18430..18433` → 远端 `172.17.0.1:18430..18433` | 标准库 PTY SSH 端口转发，带文件锁与断线自动重连 |
-| G1L GPU 0..3（`rwkv_lighting_cuda`） | `18430`、`18431`、`18432`、`18433` | `rwkv7-g1l-7.2b-20261031-ctx34304` + `dsh-searchreader-g1l-r32` 纯续写推理（`RWKV_ADAPTER_STAGING_MIB=512`） |
-| `rwkv-search-reader-api`（`uvicorn`） | `0.0.0.0:8790`（或异步队列版 `job_api` `0.0.0.0:8791`） | 网页聊天 UI、同步/流式问答、联网路由判断与异步任务 |
+| G1L GPU 0..3（`rwkv_lighting_cuda`） | `18430`、`18431`、`18432`、`18433` | 直接加载合并权重 `rwkv7-g1l-7.2b-dsh-r32-merged.pth`（`--cmix-sparse off --decode-batch-size 64`） |
+| `rwkv-search-reader-api`（`uvicorn`） | `0.0.0.0:8790`（或异步队列版 `job_api` `0.0.0.0:8791`） | 网页聊天 UI、实时 `delta` 流式问答、联网路由判断与异步任务 |
 | `cloudflared`（可选公网联调） | `https://*.trycloudflare.com` → `http://127.0.0.1:8790` | Cloudflare 免费免域名 HTTPS 公网隧道转发（自动支持 SSE 流式输出） |
 | `worker`（异步队列可选） | 无监听端口 | 领取并执行 SQLite 任务队列（多卡推荐 `SEARCH_READER_JOB_CONCURRENCY=2`） |
 
-## 推理服务、NoRA 热注册与训练说明
+## 直接加载离线合并权重（推荐）vs 动态 NoRA 挂载
 
-远端或本机每张 GPU 运行一个 `rwkv_lighting_cuda` 实例（见 `deploy/launch_answer.sh`）：
-- 参数：`RWKV_ADAPTER_STAGING_MIB=512`（确保容纳 `rank=32` 约 145 MB 的 NoRA 适配器固定显存缓冲区）与 `--chunk-size 256 --wkv32 --chunk-load --cmix-sparse off --state-db-path .../states-1843x.db`。
-- NoRA 适配器注册：在各端口调用 `POST /v1/adapters`（传入 `{"adapter_id": "dsh-searchreader-g1l-r32", "path": ".../adapter-final.pth"}`），返回的 `version` 填入 `SEARCH_READER_RWKV_ADAPTER_VERSION`。
-- 原生 DSH 数据构建与训练：运行 `scripts/build_dsh_nora_dataset.py` 生成零格式转换损耗的 `rwkv-lightning-segments-eos-target-v2` 数据集，再通过 `rwkv_nora_tune_dp`（`--devices 0,1,2,3 --rank 32 --alpha 32 --targets all --gemm-mode auto`）执行多卡数据并行训练。
-- 接口：纯续写路由为 `POST /v1/batch/completions`（在 `dsh_agent` 模式下停止词包含 `"</tool_call>"`、`"✿"`、`"<EOD>"`、`"\nUser:"`、`"\nSystem:"`）。
-- 负载均衡：`SEARCH_READER_RWKV_BASE_URL` 与 `SEARCH_READER_ROUTER_BASE_URL` 支持逗号分隔的 4 个端点，自动轮询/最少在途调度并共享 `System:` Prefix Cache。
+### 1. 离线合并直接加载（推荐生产模式，单流速度翻倍 `79.1 tok/s`）
+训练完成的 NoRA 适配器可通过 `rwkv_peft_weight_merge`（纯 CPU 无损合并 `W' = W + scale * B @ A`，自动校验基座 SHA256 与张量数）直接合入基座 `.pth` 后由 `--model-path` 直接加载，无需运行时 `adapter_id`：
+
+```bash
+/home/rwkv/g1l-harbor-eval/tools/rwkv_peft_weight_merge \
+  --method nora \
+  --model /home/rwkv/g1l-harbor-eval/weights/rwkv7-g1l-7.2b-20261031-ctx34304.pth \
+  --adapter /home/rwkv/g1l-harbor-eval/adapters/dsh-searchreader-g1l-r32/adapter-final.pth \
+  --output /dev/shm/rwkv7-g1l-7.2b-dsh-r32-merged.pth \
+  --threads 16
+```
+
+直接加载合并 `.pth` 的优势：
+- **零运行时旁路开销**：消除每步 192 个 `rank=32` 旁路矩阵投影与 PCIe H2D 暂存开销，在保持 G1L 精确模式 `--cmix-sparse off` 的前提下，单请求解码速度从动态挂载的 **`39.4 tok/s`（`25.39 ms/tok`）** 提升至 **`78.1 tok/s`（`12.80 ms/tok`）**（提速 **1.98×**）。
+- **高并发连续批处理（Continuous Batching）**：4 张 RTX 4090 开启 `--decode-batch-size 64` 后，4 并发总吞吐达 **`295.7 tok/s`**（单用户仍维持 `74.7 tok/s`），16 并发总吞吐达 **`1,040.3 tok/s`**。
+- **会话亲和 Prefix Cache**：`dsh_agent` 自动将同一请求的多步续写固定在同一空闲 GPU 并携带 `x-rwkv-session-id`，命中增量状态缓存，避免每轮重复重算历史前缀。
+- **磁盘空间友好**：当根分区余量紧张时，可直接将合并后的 `.pth` 输出到内存盘 `/dev/shm/`（注意主机重启后需重新执行上面约 15 秒的 CPU 合并命令，或清理磁盘后落盘保存）。
+
+### 2. 动态 NoRA 热挂载（适合多适配器 A/B 实验）
+若需在同一基座上同时挂载多个适配器切换测试，设置 `RWKV_ADAPTER_STAGING_MIB=512` 并在各端口调用 `POST /v1/adapters` 注册 `adapter-final.pth`，再配置 `SEARCH_READER_RWKV_ADAPTER_ID` 与 `SEARCH_READER_RWKV_ADAPTER_VERSION`。
+
+### 3. 原生 DSH 数据构建与训练
+运行 `scripts/build_dsh_nora_dataset.py` 生成零格式转换损耗的 `rwkv-lightning-segments-eos-target-v2` 数据集，再通过 `rwkv_nora_tune_dp`（`--devices 0,1,2,3 --rank 32 --alpha 32 --targets all --gemm-mode auto`）执行多卡数据并行训练。
 
 ## 配置文件与启动维护
 

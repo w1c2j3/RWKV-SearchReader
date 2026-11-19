@@ -8,6 +8,9 @@ from rwkv_search_reader.config import Settings
 from rwkv_search_reader.dsh_agent import (
     DSH_WIRE_VERSION,
     DshWebAgent,
+    _DshAnswerDeltaStreamer,
+    _acquire_dsh_endpoint,
+    _release_dsh_endpoint,
     dsh_tool_response,
     fold_dsh_history_epoch,
     format_dsh_fetch_output,
@@ -203,3 +206,51 @@ def test_dsh_web_agent_multi_step_search_fetch_and_answer(tmp_path: Path) -> Non
     assert len(res.sources) == 1
     trace_files = list(tmp_path.glob("dsh-trajectories-*.jsonl"))
     assert len(trace_files) == 1
+
+
+def test_dsh_answer_delta_streamer_suppresses_think_and_tool_call() -> None:
+    emitted: list[str] = []
+    started = 0
+
+    def on_start() -> None:
+        nonlocal started
+        started += 1
+
+    # Tool-call turn: should emit zero answer deltas
+    s_tool = _DshAnswerDeltaStreamer(thinking=True, on_delta=emitted.append, on_answer_start=on_start)
+    for tok in [">Need to search.", "</think>", '<tool_call>{"name":"web_search","arguments":{"queries":["x"]}}']:
+        s_tool.feed(tok)
+    assert emitted == []
+    assert started == 0
+
+    # Final prose turn: should suppress <think> and stream answer chunks incrementally
+    s_ans = _DshAnswerDeltaStreamer(thinking=True, on_delta=emitted.append, on_answer_start=on_start)
+    for tok in [
+        ">Verified version 3.4.",
+        "</think>",
+        "《绝区零》最新版本是 **3.4 版本「长日终尽」**，",
+        "将于 **2026-11-20** 正式上线，参考官方前瞻特别节目公告。",
+    ]:
+        s_ans.feed(tok)
+    assert started == 1
+    assert len(emitted) >= 1
+    assert "3.4 版本" in "".join(emitted)
+    assert "Verified" not in "".join(emitted)
+
+
+def test_dsh_endpoint_affinity_and_least_inflight() -> None:
+    urls = ("http://127.0.0.1:18430/v1", "http://127.0.0.1:18431/v1")
+    u1 = _acquire_dsh_endpoint(urls, "sess_a")
+    u2 = _acquire_dsh_endpoint(urls, "sess_b")
+    try:
+        # Second concurrent session picks the idle GPU
+        assert u1 != u2
+    finally:
+        _release_dsh_endpoint(u1)
+        _release_dsh_endpoint(u2)
+    # Subsequent turn on sess_a reuses its sticky GPU for Prefix Cache hit
+    u1_again = _acquire_dsh_endpoint(urls, "sess_a")
+    try:
+        assert u1_again == u1
+    finally:
+        _release_dsh_endpoint(u1_again)

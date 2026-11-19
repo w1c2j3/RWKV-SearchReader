@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -129,7 +130,7 @@ def _lightning_wire_payload(
         "max_tokens": max_tokens,
         "force_reasoning": False,
         "stop": stop_list,
-        "chunk_size": 2,
+        "chunk_size": 6,
         "metrics": True,
     }
     if has_tools:
@@ -564,20 +565,30 @@ class OpenAICompatibleClient:
         thinking: bool = True,
         has_tools: bool = True,
         stage: str = "pi_agent",
+        on_raw_delta: Callable[[str], None] | None = None,
     ) -> tuple[str, str, str | None, int | None]:
         """Execute a raw rwkv-pi / DSH continuation over SSE, returning (raw_text, reason, matched_stop, prompt_tokens)."""
 
-        prompt_tokens = self.count_tokens(prompt)
-        if self.context_window is not None and prompt_tokens is not None:
-            available = self.context_window - prompt_tokens
-            if available < 1:
-                raise SearchReaderError(
-                    stage,
-                    f"RWKV context exhausted ({prompt_tokens} >= {self.context_window}); input truncation is disabled",
-                )
-            bounded_max = min(max_tokens, available)
-        else:
+        prompt_utf8_len = len(prompt.encode("utf-8"))
+        if (
+            self.context_window is not None
+            and prompt_utf8_len + max_tokens < self.context_window - 512
+        ):
+            # 1 UTF-8 byte is an upper bound on RWKV BPE token count; skip synchronous /tokens/count RTT.
+            prompt_tokens = max(1, prompt_utf8_len // 3)
             bounded_max = max_tokens
+        else:
+            prompt_tokens = self.count_tokens(prompt)
+            if self.context_window is not None and prompt_tokens is not None:
+                available = self.context_window - prompt_tokens
+                if available < 1:
+                    raise SearchReaderError(
+                        stage,
+                        f"RWKV context exhausted ({prompt_tokens} >= {self.context_window}); input truncation is disabled",
+                    )
+                bounded_max = min(max_tokens, available)
+            else:
+                bounded_max = max_tokens
         payload = _lightning_wire_payload(
             model=self.model,
             prompt=prompt,
@@ -615,6 +626,8 @@ class OpenAICompatibleClient:
                     ms = choice.get("matched_stop")
                     matched_stop = ms if isinstance(ms, str) else None
                     finished = True
+                    if raw_text and on_raw_delta is not None:
+                        on_raw_delta(raw_text)
                     return raw_text, finish_reason, matched_stop, prompt_tokens
                 for raw in response.iter_lines(chunk_size=65536):
                     if not raw or not raw.startswith(b"data:"):
@@ -634,7 +647,10 @@ class OpenAICompatibleClient:
                         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
                         piece = delta.get("content")
                         if piece:
-                            parts.append(str(piece))
+                            piece_str = str(piece)
+                            parts.append(piece_str)
+                            if on_raw_delta is not None:
+                                on_raw_delta(piece_str)
                         if choice.get("finish_reason"):
                             finish_reason = str(choice["finish_reason"])
                 if not finished:
