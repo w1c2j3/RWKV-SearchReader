@@ -182,12 +182,17 @@ class DeepSeekSearchProvider(SearchProvider):
         api_key = self.settings.deepseek_api_key.strip()
         if not api_key:
             raise SearchReaderError(stage, "DEEPSEEK_API_KEY is not configured")
+        req_timeout = (
+            (4, 8)
+            if stage == "fetch"
+            else (5, min(12, self.settings.request_timeout_seconds))
+        )
         try:
             response = self._thread_session().post(
                 f"{self._endpoint}/{path.lstrip('/')}",
                 headers=self._headers(api_key),
                 json=payload,
-                timeout=(8, self.settings.request_timeout_seconds),
+                timeout=req_timeout,
             )
         except requests.RequestException as exc:
             raise SearchReaderError(

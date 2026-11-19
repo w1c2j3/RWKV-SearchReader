@@ -549,8 +549,10 @@ class PiWebAgent:
         conversation_history: list[dict[str, Any]] | None = None,
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
         on_sources: Callable[[list[SearchHit]], None] | None = None,
     ) -> PipelineResult:
+        del on_reasoning_delta
         started = time.perf_counter()
         request_id = uuid.uuid4().hex
         trace: list[dict[str, object]] = []

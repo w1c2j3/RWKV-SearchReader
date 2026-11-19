@@ -199,6 +199,7 @@
       .message-meta { display: flex; gap: 12px; align-items: center; }
       .copy-answer { padding: 5px 8px; border: 0; border-radius: 7px; background: transparent; color: #757b6d; font-size: 11px; }
       .copy-answer:hover { background: #eeeee8; }
+      .trace-thinking { margin: 8px 0 4px; padding: 8px 10px; max-height: 150px; overflow-y: auto; border-left: 2px solid #d5dacd; border-radius: 0 8px 8px 0; background: rgba(240, 241, 236, 0.72); color: #5f6558; font-family: inherit; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
       @media (min-width: 781px) {
         .app.sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
         .app.sidebar-collapsed .sidebar { padding: 0; visibility: hidden; }
@@ -604,8 +605,26 @@
         progress.appendChild(progressBar);
         const list = document.createElement('ol');
         list.className = 'trace-list';
-        body.append(progress, list);
+        const thinkingBox = document.createElement('pre');
+        thinkingBox.className = 'trace-thinking';
+        thinkingBox.hidden = true;
+        body.append(progress, list, thinkingBox);
         details.append(summary, body);
+        let reasoningBuf = '';
+        let reasoningRaf = false;
+        const appendReasoning = (piece) => {
+          if (!piece) return;
+          reasoningBuf += piece;
+          thinkingBox.hidden = false;
+          if (!reasoningRaf) {
+            reasoningRaf = true;
+            requestAnimationFrame(() => {
+              reasoningRaf = false;
+              thinkingBox.textContent = reasoningBuf.trimStart();
+              thinkingBox.scrollTop = thinkingBox.scrollHeight;
+            });
+          }
+        };
 
         const update = (stage, detail = {}) => {
           const [label, note] = eventCopy(stage, detail);
@@ -661,7 +680,7 @@
           title.textContent = '已保存的回答';
           sub.textContent = '此记录创建于详细过程启用前';
         }
-        return { details, update, isTerminal: () => terminal };
+        return { details, update, appendReasoning, isTerminal: () => terminal };
       };
 
       const appendSources = (body, sources) => {
@@ -866,7 +885,7 @@
         return error;
       };
 
-      const requestAnswer = async (question, requestConversationId, onProgress, signal, onDelta = null) => {
+      const requestAnswer = async (question, requestConversationId, onProgress, signal, onDelta = null, onReasoningDelta = null) => {
         const response = await fetch('/v1/answer/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -879,7 +898,7 @@
         });
         if (!response.ok) {
           const error = await response.json().catch(() => null);
-          const detail = typeof error?.detail === 'string' ? error.detail : error?.detail?.message;
+          const detail = typeof error?.detail === 'string' ? error?.detail : error?.detail?.message;
           if (detail) throw serverError(detail);
           throw new Error(`连接服务失败（${response.status}）`);
         }
@@ -893,6 +912,7 @@
           if (!line) return;
           const event = JSON.parse(line.slice(6));
           if (event.type === 'progress') onProgress(event.stage, event.detail || {});
+          if (event.type === 'reasoning_delta' && onReasoningDelta) onReasoningDelta(event.content || '');
           if (event.type === 'delta' && onDelta) onDelta(event.content || '');
           if (event.type === 'result') result = event.result;
           if (event.type === 'error') throw serverError(event.error?.message || '请求失败');
@@ -1385,7 +1405,7 @@
         };
         scrollToBottom();
         try {
-          const data = await requestAnswer(question, requestConversationId, handleProgress, controller.signal, handleDelta);
+          const data = await requestAnswer(question, requestConversationId, handleProgress, controller.signal, handleDelta, trace.appendReasoning);
           if (generation !== requestGeneration) return;
           finishAssistant(body, data);
           clearPendingAnswer(pendingDescriptor);

@@ -51,22 +51,21 @@ SEARCH_READER_ROUTER_MODEL=rwkv7-g1l-7.2b-dsh-r32-merged
 SEARCH_READER_ROUTER_PROTOCOL=completions
 ```
 
-### 外部开发者准备权重与复现 DSH 原生 NoRA（3 步开箱即用）
+### 外部开发者准备权重（Hugging Face 一键下载合并，无需重新训练）
 
-我们训练好的 DSH 原生 NoRA 适配器（`dsh-searchreader-g1l-r32-adapter.pth`，`144.1 MiB`，因超过 GitHub 普通 Git 仓库 100 MiB 单文件限制，已直接发布在本仓库 **GitHub Releases `v0.2.0-dsh-nora`** 中，免费不限带宽下载）：
+我们训练好的 DSH 原生 NoRA 适配器已托管在 **Hugging Face [`chase-jay/rwkv7-g1l-dsh-searchreader-nora`](https://huggingface.co/chase-jay/rwkv7-g1l-dsh-searchreader-nora)**（同时在本仓库 GitHub Releases `v0.2.0-dsh-nora` 提供备份），无需自行训练：
 
 1. 准备原始未量化基座模型 `rwkv7-g1l-7.2b-20261031-ctx34304.pth`（SHA256: `ce81c2d5...`）。
-2. 运行内置一键合并与量化脚本（自动从 GitHub Releases 下载适配器、校验 SHA256，调用 `rwkv_peft_weight_merge` 或自动回退 PyTorch 完成 192 层合并，并可选调用 `rwkv_quantize` 生成 7.2 GB W8A16 `.rwkvq`）：
+2. 运行内置一键准备脚本（自动从 Hugging Face / `hf-mirror.com` 下载适配器、校验 SHA256，调用 `rwkv_peft_weight_merge` 或自动回退 PyTorch 完成 192 层无损合并）：
    ```bash
    uv run python scripts/merge_dsh_nora.py \
      --base-model /path/to/rwkv7-g1l-7.2b-20261031-ctx34304.pth \
-     --output /path/to/rwkv7-g1l-7.2b-dsh-r32-merged.pth \
-     --quantize-w8a16 /path/to/rwkv7-g1l-7.2b-dsh-r32-merged-w8a16.rwkvq
+     --output /path/to/rwkv7-g1l-7.2b-dsh-r32-merged.pth
    ```
-3. 启动 `rwkv_lighting_cuda` 直接加载合并模型（24GB 显卡推荐 `RWKV_DECODE_BATCH_SIZE=256`）：
+3. 启动 `rwkv_lighting_cuda` 直接加载无损合并模型（24GB 显卡默认 `RWKV_DECODE_BATCH_SIZE=160`、`RWKV_CMIX_SPARSE=off`）：
    ```bash
-   RWKV_MODEL_PATH=/path/to/rwkv7-g1l-7.2b-dsh-r32-merged-w8a16.rwkvq \
-   RWKV_DECODE_BATCH_SIZE=256 \
+   RWKV_MODEL_PATH=/path/to/rwkv7-g1l-7.2b-dsh-r32-merged.pth \
+   RWKV_DECODE_BATCH_SIZE=160 \
    bash deploy/launch_answer.sh
    ```
    完整说明见 [adapters/dsh-searchreader-g1l-r32/README.md](adapters/dsh-searchreader-g1l-r32/README.md)。

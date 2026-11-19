@@ -325,10 +325,16 @@ def fold_dsh_history_epoch(
     max_result_chars: int = 12000,
     budget_tokens: int = DEFAULT_EPOCH_BUDGET_TOKENS,
     keep_recent_pairs: int = 2,
+    date_anchor: str = "",
 ) -> tuple[list[dict[str, str]], bool]:
     """Build DSH transcript entries with 9.6K sweet-spot Epoch compaction."""
 
-    reminder = POST_TOOL_REMINDER_THINK if thinking else POST_TOOL_REMINDER
+    base_reminder = POST_TOOL_REMINDER_THINK if thinking else POST_TOOL_REMINDER
+    reminder = (
+        f"{base_reminder}\n{date_anchor}"
+        if date_anchor.strip()
+        else base_reminder
+    )
 
     def build_entries(items: list[dict[str, Any]]) -> list[dict[str, str]]:
         start = 0
@@ -631,8 +637,115 @@ def _release_dsh_endpoint(url: str) -> None:
             _DSH_INFLIGHT[url] = cur - 1
 
 
+_FRESHNESS_QUERY_RE = re.compile(
+    r"最新|新版本|下一版本|下个版本|当前版本|目前版本|什么时候(?:发布|上线|更新|出)|几号(?:发布|上线|更新)|"
+    r"\b(?:latest|newest|upcoming|next\s+version|new\s+version|current\s+version|when\s+(?:is|will|does))\b",
+    re.IGNORECASE,
+)
+_YEAR_TOKEN_RE = re.compile(r"\b(20[0-3]\d)\b")
+_VERSION_TOKEN_RE = re.compile(r"(?<![\d.])(\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)(?![\d.])")
+
+
+def _hit_year(hit: SearchHit) -> int | None:
+    for text in (hit.published_date or "", hit.title or "", hit.snippet or ""):
+        m = _YEAR_TOKEN_RE.search(text)
+        if m:
+            y = int(m.group(1))
+            if 2000 <= y <= 2035:
+                return y
+    return None
+
+
+def _is_freshness_question(question: str, now_year: int) -> bool:
+    if not _FRESHNESS_QUERY_RE.search(question):
+        return False
+    for m in _YEAR_TOKEN_RE.finditer(question):
+        if int(m.group(1)) < now_year:
+            return False
+    if _VERSION_TOKEN_RE.search(question):
+        return False
+    return True
+
+
+def _sanitize_freshness_queries(
+    q_list: list[str],
+    question: str,
+    sources: list[SearchHit],
+    now_year: int,
+) -> list[str]:
+    verified_versions: set[str] = set(_VERSION_TOKEN_RE.findall(question))
+    for src in sources:
+        sy = _hit_year(src)
+        if sy is None or sy >= now_year - 1:
+            verified_versions.update(_VERSION_TOKEN_RE.findall(f"{src.title} {src.snippet}"))
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw_q in q_list:
+        q = _YEAR_TOKEN_RE.sub(
+            lambda m: str(now_year) if int(m.group(1)) < now_year else m.group(1),
+            raw_q,
+        )
+        unverified = [v for v in _VERSION_TOKEN_RE.findall(q) if v not in verified_versions]
+        if unverified:
+            # Strip hallucinated pretraining version numbers (e.g. "2.9", "1.0", "3.0")
+            q = re.sub(
+                r"(?<![\d.])(?:"
+                + "|".join(re.escape(v) for v in unverified)
+                + r")(?![\d.])\s*(?:版本|version|update|patch|卡池)?",
+                " ",
+                q,
+                flags=re.IGNORECASE,
+            )
+            q = " ".join(q.split()).strip()
+        if q and len(q) >= 2 and q.casefold() not in seen:
+            seen.add(q.casefold())
+            cleaned.append(q)
+
+    anchor_q = f"{question} {now_year}"
+    if anchor_q.casefold() not in seen:
+        cleaned.insert(0, anchor_q)
+        seen.add(anchor_q.casefold())
+
+    if re.search(r"新版本|下一|什么时候|几号|upcoming|next", question, re.IGNORECASE):
+        preview_q = f"{question} 前瞻 公告 {now_year}" if _HAN_RE.search(question) else f"{question} preview official {now_year}"
+        if preview_q.casefold() not in seen and len(cleaned) < 4:
+            cleaned.append(preview_q)
+            seen.add(preview_q.casefold())
+
+    return cleaned[:4]
+
+
+def _prioritize_fresh_hits(hits: list[SearchHit], now_year: int) -> list[SearchHit]:
+    if not hits:
+        return hits
+    recent_count = sum(1 for h in hits if (_hit_year(h) or 0) >= now_year - 1)
+    filtered = (
+        [h for h in hits if (_hit_year(h) is None or (_hit_year(h) or 0) >= now_year - 1)]
+        if recent_count >= 2
+        else list(hits)
+    )
+    if not filtered:
+        filtered = list(hits)
+
+    def sort_key(idx_hit: tuple[int, SearchHit]) -> tuple[int, int]:
+        idx, h = idx_hit
+        hy = _hit_year(h)
+        if hy is not None and hy >= now_year:
+            bucket = 0
+        elif hy == now_year - 1:
+            bucket = 1
+        elif hy is None:
+            bucket = 2
+        else:
+            bucket = 3
+        return (bucket, idx)
+
+    return [h for _, h in sorted(enumerate(filtered), key=sort_key)]
+
+
 class _DshAnswerDeltaStreamer:
-    """Streams prose deltas after `</think>` while suppressing `<think>` and `<tool_call>`."""
+    """Streams live `<think>` deltas via `on_reasoning_delta` and prose deltas after `</think>` via `on_delta`."""
 
     def __init__(
         self,
@@ -640,14 +753,18 @@ class _DshAnswerDeltaStreamer:
         thinking: bool,
         prefill: str = "",
         on_delta: Callable[[str], None] | None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
         on_answer_start: Callable[[], None] | None = None,
     ) -> None:
         self.thinking = thinking
         self.prefill = prefill
         self.on_delta = on_delta
+        self.on_reasoning_delta = on_reasoning_delta
         self.on_answer_start = on_answer_start
         self._buf = ""
         self._emitted = ""
+        self._emitted_think_len = 0
+        self._think_flushed = False
         self._aborted = False
         self._started_notice = False
 
@@ -655,16 +772,43 @@ class _DshAnswerDeltaStreamer:
     def emitted_text(self) -> str:
         return self._emitted
 
+    @staticmethod
+    def _clean_think_prefix(raw_think: str) -> str:
+        if raw_think.startswith(">"):
+            return raw_think[1:].lstrip("\n")
+        return raw_think
+
     def feed(self, piece: str) -> None:
-        if self._aborted or not piece:
+        if not piece:
             return
         self._buf += piece
         if self.thinking:
             idx = self._buf.find("</think>")
             if idx < 0:
+                if self.on_reasoning_delta is not None and not self._think_flushed:
+                    think_body = self._clean_think_prefix(self._buf)
+                    safe_think = len(think_body) - 10
+                    if safe_think > self._emitted_think_len:
+                        r_delta = think_body[self._emitted_think_len : safe_think]
+                        self._emitted_think_len = safe_think
+                        if r_delta:
+                            self.on_reasoning_delta(r_delta)
+                return
+            if not self._think_flushed:
+                self._think_flushed = True
+                if self.on_reasoning_delta is not None:
+                    think_body = self._clean_think_prefix(self._buf[:idx])
+                    if len(think_body) > self._emitted_think_len:
+                        r_tail = think_body[self._emitted_think_len :]
+                        self._emitted_think_len = len(think_body)
+                        if r_tail:
+                            self.on_reasoning_delta(r_tail)
+            if self._aborted:
                 return
             after = self._buf[idx + len("</think>") :]
         else:
+            if self._aborted:
+                return
             after = f"{self.prefill}{self._buf}" if self.prefill else self._buf
 
         lstripped = after.lstrip()
@@ -736,6 +880,7 @@ class DshWebAgent:
         conversation_history: list[dict[str, Any]] | None = None,
         on_progress: Callable[[str, dict[str, object]], None] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
         on_sources: Callable[[list[SearchHit]], None] | None = None,
     ) -> PipelineResult:
         started = time.perf_counter()
@@ -757,10 +902,26 @@ class DshWebAgent:
             if on_progress is not None:
                 on_progress(stage, detail)
 
+        now_dt = datetime.now().astimezone()
+        now_year = now_dt.year
+        date_line = current_date_line(now_dt)
+        freshness_mode = _is_freshness_question(question, now_year)
+        task_contract = (
+            f"Today is {now_dt.strftime('%Y-%m-%d')}. Never guess old version numbers or past years in web_search queries. "
+            f"Check each source's publication date against {now_dt.strftime('%Y-%m-%d')}: clearly distinguish between the latest version already released (<= {now_dt.strftime('%Y-%m-%d')}) and the upcoming next version (> {now_dt.strftime('%Y-%m-%d')}), and never use outdated archive articles from earlier years as current facts."
+            if freshness_mode
+            else ""
+        )
+        date_reminder_anchor = (
+            f"{date_line} Use only recent {now_year} sources for current/upcoming version facts; ignore outdated earlier-year archives."
+            if freshness_mode
+            else date_line
+        )
         use_thinking = self.settings.rwkv_thinking_mode != "off"
         sys_text = render_dsh_system_prompt(
             thinking=use_thinking,
-            date_line=current_date_line(),
+            task_contract=task_contract,
+            date_line=date_line,
         )
         system_entry = {"role": "system", "text": sys_text}
 
@@ -794,6 +955,8 @@ class DshWebAgent:
                 q_list = [str(x).strip() for x in (args.get("queries") or []) if str(x).strip()]
                 if not q_list:
                     return "queries must contain at least one query", False
+                if freshness_mode:
+                    q_list = _sanitize_freshness_queries(q_list, question, sources, now_year)
                 max_results = min(8, max(1, self.settings.search_max_results))
                 emit(
                     "searching",
@@ -815,7 +978,7 @@ class DshWebAgent:
                         ]
                     else:
                         per_q = max(4, max_results)
-                        with ThreadPoolExecutor(max_workers=min(4, len(q_list))) as pool:
+                        with ThreadPoolExecutor(max_workers=min(8, len(q_list))) as pool:
                             futs = [
                                 pool.submit(
                                     self.provider.search_with_context,
@@ -831,6 +994,7 @@ class DshWebAgent:
 
                 queries.extend(q_list)
                 merged_cap = min(12, max(max_results, len(q_list) * 4))
+                raw_candidates: list[SearchHit] = []
                 max_len = max((len(bl) for bl in batch_lists), default=0)
                 for rank_idx in range(max_len):
                     for bl in batch_lists:
@@ -840,13 +1004,15 @@ class DshWebAgent:
                         norm_u = (normalize_url(h.url) or h.url).split("#", 1)[0].casefold()
                         if not norm_u or norm_u in seen_urls:
                             continue
-                        if len(merged_hits) >= merged_cap:
-                            truncated = True
-                            break
                         seen_urls.add(norm_u)
-                        merged_hits.append(register_hit(h))
-                    if truncated:
-                        break
+                        raw_candidates.append(h)
+                if freshness_mode:
+                    raw_candidates = _prioritize_fresh_hits(raw_candidates, now_year)
+                if len(raw_candidates) > merged_cap:
+                    truncated = True
+                    raw_candidates = raw_candidates[:merged_cap]
+                for h in raw_candidates:
+                    merged_hits.append(register_hit(h))
                 if merged_hits:
                     emit(
                         "sources_found",
@@ -874,10 +1040,25 @@ class DshWebAgent:
                 if not url:
                     return "url must be a non-empty HTTP(S) URL", False
                 emit("reading", {"url": url, "message": f"正在读取网页：{urlsplit(url).hostname or url}"})
+                cache_key = url.split("#", 1)[0].casefold()
+                cached_hit = source_by_url.get(cache_key)
+                cached_body = (
+                    (cached_hit.content_markdown or cached_hit.content or "").strip()
+                    if cached_hit is not None
+                    else ""
+                )
+                if len(cached_body) >= 500 and "数据加载中" not in cached_body:
+                    return format_dsh_fetch_output(url, cached_body, status_code=200), True
                 fetched = self.provider.fetch_url(url)
                 if not fetched or not fetched[1].strip():
                     return f"HTTP fetch failed or returned empty body for {url}", False
                 title, content = fetched
+                if len(content.strip()) < 260 or "数据加载中" in content or "訂閱最新資訊" in content:
+                    content = (
+                        f"{content.strip()}\n\n"
+                        "[Note: This URL returned a dynamic SPA index shell without full article text. "
+                        "Use the specific dated article URLs already returned by web_search, or run web_search with specific keywords.]"
+                    )
                 register_hit(
                     SearchHit(
                         title=title or url,
@@ -927,12 +1108,15 @@ class DshWebAgent:
                         ),
                     },
                 )
+                if on_reasoning_delta is not None and step_idx > 1:
+                    on_reasoning_delta("\n\n")
                 entries, epoch_folded = fold_dsh_history_epoch(
                     system_entry,
                     history_items,
                     thinking=use_thinking,
                     max_result_chars=self.settings.max_evidence_chars,
                     budget_tokens=self.settings.pi_epoch_budget_tokens,
+                    date_anchor=date_reminder_anchor,
                 )
 
                 parsed: dict[str, Any] | None = None
@@ -947,6 +1131,7 @@ class DshWebAgent:
                     streamer = _DshAnswerDeltaStreamer(
                         thinking=use_thinking,
                         on_delta=on_delta if not streamed_answer else None,
+                        on_reasoning_delta=on_reasoning_delta,
                         on_answer_start=notify_answering,
                     )
                     t0 = time.perf_counter()
@@ -1135,6 +1320,7 @@ class DshWebAgent:
                         thinking=try_think,
                         prefill=prefill,
                         on_delta=on_delta if not streamed_answer else None,
+                        on_reasoning_delta=on_reasoning_delta,
                         on_answer_start=notify_answering,
                     )
                     raw, reason, matched_stop, _ = pinned_client.raw_continuation(

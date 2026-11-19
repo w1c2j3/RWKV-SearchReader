@@ -10,7 +10,9 @@ from rwkv_search_reader.dsh_agent import (
     DshWebAgent,
     _DshAnswerDeltaStreamer,
     _acquire_dsh_endpoint,
+    _prioritize_fresh_hits,
     _release_dsh_endpoint,
+    _sanitize_freshness_queries,
     dsh_tool_response,
     fold_dsh_history_epoch,
     format_dsh_fetch_output,
@@ -254,3 +256,58 @@ def test_dsh_endpoint_affinity_and_least_inflight() -> None:
         assert u1_again == u1
     finally:
         _release_dsh_endpoint(u1_again)
+
+
+def test_dsh_freshness_query_sanitization_and_recency_ranking() -> None:
+    cleaned = _sanitize_freshness_queries(
+        [
+            "原神 新版本 发布时间",
+            "原神 2.9 版本 发布时间",
+            "Genshin Impact 2.9 update release date 2022",
+        ],
+        "原神的新版本什么时候发布",
+        [],
+        2026,
+    )
+    joined = " | ".join(cleaned)
+    assert "2.9" not in joined
+    assert "2022" not in joined
+    assert "2026" in joined
+
+    hits = [
+        SearchHit(
+            title="原神3.0版本8月24日上线",
+            url="https://www.9game.cn/old",
+            snippet="2022年8月24日更新3.0版本",
+            published_date="2022-08-12T16:00:00+00:00",
+        ),
+        SearchHit(
+            title="「坏灭肇始之时」7.2版本更新说明",
+            url="https://ys.mihoyo.com/main/news/detail/167205",
+            snippet="发布时间 2026/11/04",
+            published_date="2026-11-03T16:00:00+00:00",
+        ),
+        SearchHit(
+            title="「往冥府的安魂歌」7.1版本更新说明",
+            url="https://genshin.hoyoverse.com/m/zh-tw/news/detail/166383",
+            snippet="2026/09/23 开始更新",
+            published_date="2026-09-22T16:00:00+00:00",
+        ),
+    ]
+    ranked = _prioritize_fresh_hits(hits, 2026)
+    assert all("2022" not in h.published_date for h in ranked)
+    assert ranked[0].url == "https://ys.mihoyo.com/main/news/detail/167205"
+
+
+def test_dsh_streamer_emits_live_reasoning_deltas() -> None:
+    r_chunks: list[str] = []
+    a_chunks: list[str] = []
+    streamer = _DshAnswerDeltaStreamer(
+        thinking=True,
+        on_delta=a_chunks.append,
+        on_reasoning_delta=r_chunks.append,
+    )
+    for tok in [">先核对 2026 年官方版本公告时间戳。", "确认 7.2 已于 11月4日上线。", "</think>", "目前已上线 7.2 版本，下一版本预计于 2026年12月中旬开启。"]:
+        streamer.feed(tok)
+    assert "2026 年官方版本公告" in "".join(r_chunks)
+    assert "</think>" not in "".join(r_chunks)

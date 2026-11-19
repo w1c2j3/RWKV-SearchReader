@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import queue
@@ -20,7 +21,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from starlette.middleware.gzip import GZipMiddleware
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 
 from . import __version__
 from .agent_demo import agent_events
@@ -103,7 +104,11 @@ app = FastAPI(
     description="Deterministic small-talk bypass plus retrieve-then-read answers.",
     lifespan=_app_lifespan,
 )
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=1000,
+    exclude_content_types=(*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/x-ndjson"),
+)
 
 app.include_router(jobs_router)
 
@@ -274,19 +279,22 @@ def _answer_events(
 ) -> Iterator[str]:
     events: queue.Queue[dict[str, Any]] = queue.Queue()
     stream_closed = threading.Event()
-    # The stream is only a view of the job. A browser refresh or a proxy-side
-    # SSE disconnect must not cancel an answer that has already consumed search
-    # credits and model time; the completed turn is persisted and can be
-    # recovered from the conversation endpoint.
     del cancel_event
 
-    def progress(stage: str, detail: dict[str, object]) -> None:
+    def push(payload_obj: dict[str, Any]) -> None:
         if not stream_closed.is_set():
-            events.put({"type": "progress", "stage": stage, "detail": detail})
+            events.put(payload_obj)
+
+    def progress(stage: str, detail: dict[str, object]) -> None:
+        push({"type": "progress", "stage": stage, "detail": detail})
 
     def delta(piece: str) -> None:
-        if piece and not stream_closed.is_set():
-            events.put({"type": "delta", "content": piece})
+        if piece:
+            push({"type": "delta", "content": piece})
+
+    def reasoning_delta(piece: str) -> None:
+        if piece:
+            push({"type": "reasoning_delta", "content": piece})
 
     def work() -> None:
         try:
@@ -312,6 +320,7 @@ def _answer_events(
                 question,
                 on_progress=progress,
                 on_delta=delta,
+                on_reasoning_delta=reasoning_delta,
                 session_id=identity,
                 conversation_history=history,
                 document_passages=document_passages,
@@ -319,27 +328,22 @@ def _answer_events(
             payload = result.to_dict()
             payload["conversation_id"] = identity
             store.append_turn(identity, owner, question, payload)
-            if not stream_closed.is_set():
-                events.put({"type": "result", "result": payload})
+            push({"type": "result", "result": payload})
         except SearchReaderError as exc:
-            if not stream_closed.is_set():
-                events.put(
-                    {
-                        "type": "error",
-                        "error": {"stage": exc.stage, "message": str(exc)},
-                    }
-                )
+            push(
+                {
+                    "type": "error",
+                    "error": {"stage": exc.stage, "message": str(exc)},
+                }
+            )
         except Exception:  # noqa: BLE001 - preserve the stream response contract
-            if not stream_closed.is_set():
-                events.put(
-                    {
-                        "type": "error",
-                        "error": {"stage": "unexpected", "message": "服务暂时不可用"},
-                    }
-                )
+            push(
+                {
+                    "type": "error",
+                    "error": {"stage": "unexpected", "message": "服务暂时不可用"},
+                }
+            )
         finally:
-            # The worker owns the concurrency slot, not the HTTP connection.
-            # This also releases the slot when the client has disconnected.
             _release_request_slot()
 
     threading.Thread(target=work, daemon=True).start()
@@ -348,6 +352,103 @@ def _answer_events(
             try:
                 event = events.get(timeout=1.0)
             except queue.Empty:
+                yield ": keep-alive\n\n"
+                continue
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if event["type"] in {"result", "error"}:
+                break
+    finally:
+        stream_closed.set()
+
+
+async def _answer_events_async(
+    question: str,
+    session_id: str = "",
+    conversation_id: str = "",
+    client_id: str = "",
+    cancel_event: threading.Event | None = None,
+) -> AsyncIterator[str]:
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    stream_closed = threading.Event()
+    del cancel_event
+
+    def push(payload_obj: dict[str, Any]) -> None:
+        if not stream_closed.is_set():
+            try:
+                loop.call_soon_threadsafe(events.put_nowait, payload_obj)
+            except RuntimeError:
+                pass
+
+    def progress(stage: str, detail: dict[str, object]) -> None:
+        push({"type": "progress", "stage": stage, "detail": detail})
+
+    def delta(piece: str) -> None:
+        if piece:
+            push({"type": "delta", "content": piece})
+
+    def reasoning_delta(piece: str) -> None:
+        if piece:
+            push({"type": "reasoning_delta", "content": piece})
+
+    def work() -> None:
+        try:
+            settings = get_settings()
+            identity = conversation_id or session_id or new_conversation_id()
+            owner = client_id or "client_api_anonymous"
+            store = _conversation_store()
+            store.ensure(
+                identity,
+                owner,
+                legacy_records=session_records(settings.trace_directory, identity, 200),
+            )
+            history = store.history(
+                identity,
+                owner,
+                settings.conversation_turns,
+                query=question,
+            )
+            document_passages = _select_document_passages(
+                store, identity, owner, question, history
+            )
+            result = _new_pipeline().answer(
+                question,
+                on_progress=progress,
+                on_delta=delta,
+                on_reasoning_delta=reasoning_delta,
+                session_id=identity,
+                conversation_history=history,
+                document_passages=document_passages,
+            )
+            payload = result.to_dict()
+            payload["conversation_id"] = identity
+            store.append_turn(identity, owner, question, payload)
+            push({"type": "result", "result": payload})
+        except SearchReaderError as exc:
+            push(
+                {
+                    "type": "error",
+                    "error": {"stage": exc.stage, "message": str(exc)},
+                }
+            )
+        except Exception:  # noqa: BLE001 - preserve the stream response contract
+            push(
+                {
+                    "type": "error",
+                    "error": {"stage": "unexpected", "message": "服务暂时不可用"},
+                }
+            )
+        finally:
+            _release_request_slot()
+
+    threading.Thread(target=work, daemon=True).start()
+    try:
+        # 2 KB SSE comment preamble flushes Cloudflare / Nginx / browser stream buffers immediately
+        yield ": " + (" " * 2048) + "\n\n"
+        while True:
+            try:
+                event = await asyncio.wait_for(events.get(), timeout=1.0)
+            except TimeoutError:
                 yield ": keep-alive\n\n"
                 continue
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -459,7 +560,7 @@ async def answer_stream(payload: AnswerRequest, request: Request) -> StreamingRe
     if not acquired:
         raise HTTPException(status_code=503, detail="当前请求较多，请稍后再试")
     return StreamingResponse(
-        _answer_events(
+        _answer_events_async(
             payload.question,
             payload.session_id,
             payload.conversation_id,
@@ -468,7 +569,8 @@ async def answer_stream(payload: AnswerRequest, request: Request) -> StreamingRe
         ),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
+            "Content-Encoding": "identity",
             "X-Accel-Buffering": "no",
         },
     )
@@ -656,6 +758,7 @@ def upload_document_stream(request: DocumentUploadRequest) -> StreamingResponse:
         media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache, no-transform",
+            "Content-Encoding": "identity",
             "X-Accel-Buffering": "no",
         },
     )

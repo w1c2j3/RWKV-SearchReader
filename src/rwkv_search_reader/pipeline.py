@@ -614,6 +614,7 @@ class SearchReaderPipeline:
         *,
         locale: str = "",
         on_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
         on_sources: Callable | None = None,
     ) -> PipelineResult:
         self.reader.output_locale = locale
@@ -793,6 +794,7 @@ class SearchReaderPipeline:
                         conversation_history=history,
                         on_progress=on_progress,
                         on_delta=on_delta,
+                        on_reasoning_delta=on_reasoning_delta,
                         on_sources=on_sources,
                     )
                 if self.settings.execution_mode == "pi_agent":
@@ -805,6 +807,7 @@ class SearchReaderPipeline:
                         conversation_history=history,
                         on_progress=on_progress,
                         on_delta=on_delta,
+                        on_reasoning_delta=on_reasoning_delta,
                         on_sources=on_sources,
                     )
             research_plan = None

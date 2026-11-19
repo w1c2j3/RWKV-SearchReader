@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -20,10 +21,27 @@ import sys
 import urllib.request
 import zipfile
 
-DEFAULT_RELEASE_URL = (
+HF_REPO_ID = "chase-jay/rwkv7-g1l-dsh-searchreader-nora"
+ADAPTER_FILENAME = "dsh-searchreader-g1l-r32-adapter.pth"
+GITHUB_RELEASE_URL = (
     "https://github.com/w1c2j3/RWKV-SearchReader/releases/download/"
-    "v0.2.0-dsh-nora/dsh-searchreader-g1l-r32-adapter.pth"
+    f"v0.2.0-dsh-nora/{ADAPTER_FILENAME}"
 )
+
+
+def _default_candidate_urls(override_url: str = "") -> list[str]:
+    if override_url:
+        return [override_url]
+    hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+    urls = [
+        f"{hf_endpoint}/{HF_REPO_ID}/resolve/main/{ADAPTER_FILENAME}",
+    ]
+    if hf_endpoint == "https://huggingface.co":
+        urls.append(f"https://hf-mirror.com/{HF_REPO_ID}/resolve/main/{ADAPTER_FILENAME}")
+    urls.append(GITHUB_RELEASE_URL)
+    return urls
+
+
 EXPECTED_ADAPTER_SHA256 = (
     "212e08c4abd2ddea24f6281b2e1ad9af3e4dc04cdfd5045e285e8be943312934"
 )
@@ -40,7 +58,7 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def download_adapter(url: str, dest: Path, expected_sha256: str) -> Path:
+def download_adapter(urls: list[str], dest: Path, expected_sha256: str) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         actual = sha256_file(dest)
@@ -51,28 +69,37 @@ def download_adapter(url: str, dest: Path, expected_sha256: str) -> Path:
         dest.unlink()
 
     tmp = dest.with_suffix(dest.suffix + ".part")
-    print(f"[download] {url} -> {dest}")
-    with urllib.request.urlopen(url, timeout=300) as resp, tmp.open("wb") as out:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        while True:
-            buf = resp.read(1 << 20)
-            if not buf:
-                break
-            out.write(buf)
-            done += len(buf)
-            if total > 0 and (done % (16 << 20) == 0 or done == total):
-                pct = done * 100.0 / total
-                print(f"  {done / (1 << 20):.1f} / {total / (1 << 20):.1f} MiB ({pct:.1f}%)")
-    actual = sha256_file(tmp)
-    if expected_sha256 and actual != expected_sha256:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Downloaded adapter SHA256 mismatch: expected {expected_sha256}, got {actual}"
-        )
-    tmp.replace(dest)
-    print(f"[ok] Adapter verified: sha256={actual}")
-    return dest
+    last_err: Exception | None = None
+    for url in urls:
+        try:
+            tmp.unlink(missing_ok=True)
+            print(f"[download] {url} -> {dest}")
+            req = urllib.request.Request(url, headers={"User-Agent": "rwkv-search-reader/0.2"})
+            with urllib.request.urlopen(req, timeout=300) as resp, tmp.open("wb") as out:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                while True:
+                    buf = resp.read(1 << 20)
+                    if not buf:
+                        break
+                    out.write(buf)
+                    done += len(buf)
+                    if total > 0 and (done % (16 << 20) == 0 or done == total):
+                        pct = done * 100.0 / total
+                        print(f"  {done / (1 << 20):.1f} / {total / (1 << 20):.1f} MiB ({pct:.1f}%)")
+            actual = sha256_file(tmp)
+            if expected_sha256 and actual != expected_sha256:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"Downloaded adapter SHA256 mismatch: expected {expected_sha256}, got {actual}"
+                )
+            tmp.replace(dest)
+            print(f"[ok] Adapter verified: sha256={actual}")
+            return dest
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            print(f"[warn] Mirror failed ({url}): {exc}", file=sys.stderr)
+    raise RuntimeError(f"Failed to download NoRA adapter from all mirrors; last error: {last_err}")
 
 
 def merge_with_torch(base_path: Path, adapter_path: Path, output_path: Path, scale_override: float | None) -> None:
@@ -145,12 +172,12 @@ def main() -> int:
         "--adapter",
         type=Path,
         default=None,
-        help="Local path to dsh-searchreader-g1l-r32-adapter.pth (auto-downloaded from GitHub Releases if omitted)",
+        help="Local path to dsh-searchreader-g1l-r32-adapter.pth (auto-downloaded from Hugging Face if omitted)",
     )
     parser.add_argument(
         "--adapter-url",
-        default=DEFAULT_RELEASE_URL,
-        help="Release asset URL when --adapter is omitted",
+        default="",
+        help="Optional explicit adapter download URL (defaults to Hugging Face chase-jay/rwkv7-g1l-dsh-searchreader-nora with hf-mirror & GitHub Releases fallback)",
     )
     parser.add_argument(
         "--skip-sha256",
@@ -195,8 +222,8 @@ def main() -> int:
     if adapter_path is None:
         cache_dir = Path("adapters/dsh-searchreader-g1l-r32")
         adapter_path = download_adapter(
-            args.adapter_url,
-            cache_dir / "dsh-searchreader-g1l-r32-adapter.pth",
+            _default_candidate_urls(args.adapter_url),
+            cache_dir / ADAPTER_FILENAME,
             "" if args.skip_sha256 else EXPECTED_ADAPTER_SHA256,
         )
     elif not args.skip_sha256:

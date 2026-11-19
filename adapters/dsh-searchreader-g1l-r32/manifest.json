@@ -1,7 +1,8 @@
 {
   "adapter_id": "dsh-searchreader-g1l-r32",
-  "release_tag": "v0.2.0-dsh-nora",
-  "download_url": "https://github.com/w1c2j3/RWKV-SearchReader/releases/download/v0.2.0-dsh-nora/dsh-searchreader-g1l-r32-adapter.pth",
+  "huggingface_repo": "chase-jay/rwkv7-g1l-dsh-searchreader-nora",
+  "huggingface_url": "https://huggingface.co/chase-jay/rwkv7-g1l-dsh-searchreader-nora/resolve/main/dsh-searchreader-g1l-r32-adapter.pth",
+  "github_release_url": "https://github.com/w1c2j3/RWKV-SearchReader/releases/download/v0.2.0-dsh-nora/dsh-searchreader-g1l-r32-adapter.pth",
   "file": "dsh-searchreader-g1l-r32-adapter.pth",
   "size_bytes": 151126688,
   "sha256": "212e08c4abd2ddea24f6281b2e1ad9af3e4dc04cdfd5045e285e8be943312934",

@@ -105,6 +105,60 @@ def _docling_converter(do_ocr: bool = True):
     )
 
 
+def _convert_pdf_with_pymupdf(
+    content: bytes,
+    *,
+    max_pages: int,
+) -> str:
+    """Fast native PDF -> Markdown extractor using PyMuPDF / pymupdf4llm (fallback pypdfium2)."""
+
+    try:
+        import pymupdf  # type: ignore[import-not-found]
+
+        doc = pymupdf.open(stream=content, filetype="pdf")
+        try:
+            page_count = len(doc)
+            if page_count > max_pages:
+                raise ValueError(f"PDF exceeds {max_pages} pages ({page_count} pages)")
+            try:
+                import pymupdf4llm  # type: ignore[import-not-found]
+
+                md = pymupdf4llm.to_markdown(doc, show_progress=False)
+                if md and md.strip():
+                    return str(md)
+            except Exception:  # noqa: BLE001
+                pass
+            parts: list[str] = []
+            for idx, page in enumerate(doc, 1):
+                txt = (page.get_text("text") or "").strip()
+                if txt:
+                    parts.append(f"## 第 {idx} 页\n\n{txt}")
+            return "\n\n".join(parts)
+        finally:
+            doc.close()
+    except ImportError:
+        pass
+
+    try:
+        import pypdfium2 as pdfium  # type: ignore[import-not-found]
+
+        document = pdfium.PdfDocument(BytesIO(content))
+        page_count = len(document)
+        if page_count > max_pages:
+            raise ValueError(f"PDF exceeds {max_pages} pages ({page_count} pages)")
+        parts = []
+        for idx in range(page_count):
+            page = document[idx]
+            txt = (page.get_textpage().get_text_range() or "").strip()
+            if txt:
+                parts.append(f"## 第 {idx + 1} 页\n\n{txt}")
+        return "\n\n".join(parts)
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF 解析组件未安装，请执行 `uv sync` 安装 pymupdf4llm / pypdfium2"
+        ) from exc
+
+
 def _convert_pdf_bytes(
     filename: str,
     content: bytes,
@@ -113,15 +167,6 @@ def _convert_pdf_bytes(
     max_bytes: int,
     progress: ProgressCallback | None = None,
 ) -> str:
-    try:
-        from docling.datamodel.base_models import DocumentStream
-    except (
-        ImportError
-    ) as exc:  # pragma: no cover - depends on optional deployment extra
-        raise RuntimeError(
-            "PDF support is unavailable; install the project with the pdf extra"
-        ) from exc
-
     needs_ocr = _pdf_needs_ocr(content)
     if progress:
         progress(
@@ -131,23 +176,45 @@ def _convert_pdf_bytes(
                 "message": (
                     "正在识别扫描页文字"
                     if needs_ocr
-                    else "已检测到文本层，跳过 OCR"
+                    else "已检测到文本层，正在快速解析章节与表格"
                 ),
             },
         )
-    stream = DocumentStream(name=filename, stream=BytesIO(content))
-    with _PDF_CONVERSION_LOCK:
+
+    if not needs_ocr:
         if progress:
             progress(
                 "pdf_converting",
-                {"ocr": needs_ocr, "message": "正在还原标题、段落和表格"},
+                {"ocr": False, "message": "正在快速还原标题、段落和表格"},
             )
-        result = _docling_converter(needs_ocr).convert(
-            stream,
-            max_num_pages=max_pages,
-            max_file_size=max_bytes,
-        )
-    return str(result.document.export_to_markdown() or "")
+        md = _convert_pdf_with_pymupdf(content, max_pages=max_pages)
+        if md.strip():
+            return md
+
+    # Try Docling when OCR is needed (or if embedded text extraction was empty)
+    try:
+        from docling.datamodel.base_models import DocumentStream
+
+        stream = DocumentStream(name=filename, stream=BytesIO(content))
+        with _PDF_CONVERSION_LOCK:
+            if progress:
+                progress(
+                    "pdf_converting",
+                    {"ocr": needs_ocr, "message": "正在使用 OCR 还原标题、段落和表格"},
+                )
+            result = _docling_converter(needs_ocr).convert(
+                stream,
+                max_num_pages=max_pages,
+                max_file_size=max_bytes,
+            )
+        return str(result.document.export_to_markdown() or "")
+    except ImportError:
+        md = _convert_pdf_with_pymupdf(content, max_pages=max_pages)
+        if md.strip():
+            return md
+        raise ValueError(
+            "该 PDF 为纯图片扫描件（未检测到文字层），如需扫描件 OCR 请安装 `uv sync --extra pdf`"
+        ) from None
 
 
 def _pdf_needs_ocr(content: bytes) -> bool:
