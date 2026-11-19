@@ -687,7 +687,7 @@ def _document_upload_events(request: DocumentUploadRequest) -> Iterator[str]:
                 "stage": stage,
                 "detail": {
                     **detail,
-                    "elapsed_seconds": round(time.monotonic() - started),
+                    "elapsed_seconds": round(time.monotonic() - started, 1),
                 },
             }
         )
@@ -745,7 +745,7 @@ def _document_upload_events(request: DocumentUploadRequest) -> Iterator[str]:
                 "stage": current_stage,
                 "detail": {
                     "message": current_message,
-                    "elapsed_seconds": round(time.monotonic() - started),
+                    "elapsed_seconds": round(time.monotonic() - started, 1),
                 },
             }
         yield json.dumps(event, ensure_ascii=False) + "\n"

@@ -138,14 +138,32 @@
       .assistant-answer th, .assistant-answer td { padding: 8px 11px; border: 1px solid var(--soft-line); text-align: left; vertical-align: top; }
       .assistant-answer th { background: #f2f4ef; color: #34413e; font-weight: 650; }
       .answer-citation { margin: 0 2px; color: var(--mint); font-size: .88em; text-decoration: underline; text-underline-offset: 2px; }
+      .answer-citation-pill { display: inline-flex; align-items: center; margin: 0 2px; padding: 1px 6px; border: 1px solid #cdd8d3; border-radius: 6px; background: #eef5f2; color: var(--mint); font-size: .78em; font-weight: 650; line-height: 1.45; text-decoration: none; cursor: pointer; vertical-align: baseline; transition: background .15s ease, color .15s ease, border-color .15s ease; }
+      .answer-citation-pill:hover { border-color: var(--mint); background: var(--mint); color: #fff; }
       .answer-label { margin-bottom: 7px; color: var(--mint); font-size: 10px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
       .source-details { margin-top: 16px; }
-      .source-details summary { width: fit-content; color: var(--muted); font-size: 11px; cursor: pointer; user-select: none; }
-      .source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
-      .source-link { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 9px 10px; border: 1px solid var(--soft-line); border-radius: 11px; background: rgb(255 255 255 / 55%); color: #596562; font-size: 10px; text-decoration: none; }
-      .source-link:hover { border-color: #c8d3cf; background: var(--card); color: var(--ink); }
-      .source-number { display: grid; place-items: center; flex: 0 0 auto; width: 21px; height: 21px; border-radius: 7px; background: var(--mint-soft); color: var(--mint); font-size: 9px; font-weight: 750; }
-      .source-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .source-details > summary { display: inline-flex; align-items: center; gap: 6px; width: fit-content; padding: 4px 0; list-style: none; color: var(--muted); font-size: 11.5px; font-weight: 560; cursor: pointer; user-select: none; }
+      .source-details > summary::-webkit-details-marker { display: none; }
+      .source-details > summary::before { content: "▸"; font-size: 11px; transition: transform .16s ease; }
+      .source-details[open] > summary::before { transform: rotate(90deg); }
+      .source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+      .source-card { min-width: 0; border: 1px solid var(--soft-line); border-radius: 11px; background: rgb(255 255 255 / 68%); overflow: hidden; transition: border-color .18s ease, box-shadow .18s ease, background .18s ease; }
+      .source-card:hover { border-color: #c8d3cf; background: var(--card); }
+      .source-card[open] { grid-column: 1 / -1; border-color: #b8c8c2; background: var(--card); box-shadow: 0 6px 20px rgb(31 42 39 / 6%); }
+      .source-card.flash { border-color: var(--mint); box-shadow: 0 0 0 3px rgb(99 117 106 / 26%); }
+      .source-card > summary { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 9px 11px; list-style: none; color: #4b5754; font-size: 11px; cursor: pointer; user-select: none; }
+      .source-card > summary::-webkit-details-marker { display: none; }
+      .source-head-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+      .source-number { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 7px; background: var(--mint-soft); color: var(--mint); font-size: 9.5px; font-weight: 760; }
+      .source-name { overflow: hidden; color: #374340; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+      .source-card[open] .source-name { white-space: normal; }
+      .source-submeta { overflow: hidden; color: #8c9693; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+      .source-ext-link { flex: 0 0 auto; padding: 3px 7px; border: 1px solid #d5dfdc; border-radius: 6px; background: #f4f7f5; color: var(--mint); font-size: 10px; text-decoration: none; white-space: nowrap; }
+      .source-ext-link:hover { border-color: var(--mint); background: var(--mint); color: #fff; }
+      .source-chevron { flex: 0 0 auto; color: #9aa5a1; font-size: 11px; transition: transform .16s ease; }
+      .source-card[open] .source-chevron { transform: rotate(180deg); }
+      .source-excerpt { max-height: 240px; padding: 10px 13px 12px; overflow-y: auto; border-top: 1px solid var(--soft-line); background: #fafaf7; color: #3b423f; font-size: 12.5px; line-height: 1.68; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .trace-source-btn { width: 100%; border: 1px solid var(--soft-line); text-align: left; cursor: pointer; }
       .message-meta { margin-top: 12px; color: var(--faint); font-size: 10px; }
 
       .composer-wrap { position: relative; flex-shrink: 0; z-index: 7; padding: 12px 32px max(18px, env(safe-area-inset-bottom)); background: var(--paper); }
@@ -454,6 +472,32 @@
         conversation.appendChild(row);
       };
 
+      const formatDurationMs = (value) => {
+        const ms = Number(value || 0);
+        if (!Number.isFinite(ms) || ms <= 0) return '';
+        if (ms < 100) return `${Math.max(1, Math.round(ms))}ms`;
+        if (ms < 1000) return `${(ms / 1000).toFixed(2)}s`;
+        return `${(ms / 1000).toFixed(1)}s`;
+      };
+
+      const focusSourceCard = (originNode, rawId) => {
+        const sid = String(rawId || '').trim().toUpperCase();
+        if (!sid) return false;
+        const body = originNode?.closest?.('.assistant-body');
+        if (!body) return false;
+        const detailsWrap = body.querySelector('.source-details');
+        if (detailsWrap) detailsWrap.open = true;
+        const card = body.querySelector(`.source-card[data-source-id="${CSS.escape(sid)}"]`);
+        if (!card) return false;
+        card.open = true;
+        card.classList.remove('flash');
+        void card.offsetWidth;
+        card.classList.add('flash');
+        card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        setTimeout(() => card.classList.remove('flash'), 2200);
+        return true;
+      };
+
       const eventCopy = (stage, detail = {}) => {
         if (stage === 'preparing') return ['已收到问题', '正在开始处理'];
         if (stage === 'responding') return ['识别为简单对话', '无需查找资料，直接回应'];
@@ -466,7 +510,7 @@
         if (stage === 'thinking') return [`第 ${detail.step || 1} 轮思考与核验`, detail.message || '正在分析问题与已有资料'];
         if (stage === 'answering') return ['正在实时生成回答', detail.message || '思考完成，正文流式输出中'];
         if (stage === 'searching') return ['开始查找相关资料', (detail.queries && detail.queries.length > 1) ? `并发检索 ${detail.queries.length} 个查询词` : (detail.query ? `围绕“${detail.query}”查找` : '正在理解问题并发起检索')];
-        if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, `使用了 ${(detail.queries || []).length || 1} 个检索式`];
+        if (stage === 'sources_found') return [`找到 ${detail.source_count || 0} 个参考来源`, `使用了 ${(detail.queries || []).length || 1} 个检索式${detail.duration_ms ? ` · 检索耗时 ${formatDurationMs(detail.duration_ms)}` : ''}`];
         if (stage === 'search_points_collected') return [`${(detail.queries || []).length || 1} 个检索点均已取得材料`, '每个检索点将先独立归纳，再进入最终总结'];
         if (stage === 'scope_discovering') return ['正在从资料中确定具体对象', `阅读首轮 ${detail.source_count || 0} 份资料后再确定本轮覆盖范围`];
         if (stage === 'scope_discovered') return [detail.success === false ? '未能稳定拆分具体对象' : `已确定 ${(detail.subjects || []).length} 个代表性对象`, detail.success === false ? (detail.message || '将直接使用现有资料回答') : ((detail.subjects || []).join('、') || detail.message || '范围已经确定')];
@@ -475,6 +519,7 @@
         if (stage === 'document_searching') return [`正在阅读 ${detail.document_count || 0} 份文档`, '定位与当前问题相关的章节和段落'];
         if (stage === 'documents_found') return [`选出 ${detail.source_count || 0} 个文档片段`, '下面是本轮实际选中的文档位置'];
         if (stage === 'reading') return [detail.url ? '正在抓取并阅读指定网页' : `开始逐篇阅读 ${detail.source_count || 0} 个来源`, detail.url || '每个来源独立阅读，互不混合'];
+        if (stage === 'read_completed') return ['网页正文读取完成', `${detail.host || detail.url || ''}${detail.cached ? ' · 复用已检索正文' : ''}${detail.duration_ms != null ? ` · 耗时 ${formatDurationMs(Math.max(1, Number(detail.duration_ms)))}` : ''}`];
         if (stage === 'source_read') return [`已读 ${detail.completed || 0}/${detail.total || 0} · ${detail.source_id || '材料'} · ${detail.title || '参考资料'}`, `${detail.retrieval_point ? `检索点：${detail.retrieval_point} · ` : ''}${detail.retrieval_query ? `检索词：${detail.retrieval_query} · ` : ''}${detail.status === 'degraded' ? '读取不完整：' : '提取结果：'}${detail.summary_preview || '关键信息已提取'}`];
         if (stage === 'auditing') return [`第 ${detail.round || 1} 次检查材料完整性`, `逐项检查问题需要的事实；当前共有 ${detail.source_count || 0} 份阅读结果`];
         if (stage === 'audit_completed') return [detail.sufficient ? '材料检查通过' : '发现材料缺口', detail.sufficient ? (detail.message || '检查已经完成') : `${detail.message || '需要补充材料'}${(detail.queries || []).length ? `：${detail.queries.join('；')}` : ''}`];
@@ -545,16 +590,20 @@
           sourceList.className = 'trace-source-list';
           sources.forEach((source, index) => {
             const isWeb = /^https?:\/\//i.test(source.url || '');
-            const item = document.createElement(isWeb ? 'a' : 'span');
-            item.className = 'trace-source';
+            const sid = String(source.source_id || `S${index + 1}`).toUpperCase();
+            const item = document.createElement(isWeb ? 'a' : 'button');
+            item.className = isWeb ? 'trace-source' : 'trace-source trace-source-btn';
             if (isWeb) {
               item.href = source.url;
               item.target = '_blank';
               item.rel = 'noreferrer';
+            } else {
+              item.type = 'button';
+              item.addEventListener('click', () => focusSourceCard(item, sid));
             }
             const id = document.createElement('span');
             id.className = 'trace-source-id';
-            id.textContent = source.source_id || `S${index + 1}`;
+            id.textContent = sid;
             const sourceCopy = document.createElement('span');
             sourceCopy.className = 'trace-source-copy';
             const sourceTitle = document.createElement('span');
@@ -645,8 +694,8 @@
           appendTraceDetails(copy, stage, detail);
           const time = document.createElement('span');
           time.className = 'trace-time';
-          const atMs = Number(detail.at_ms || 0);
-          time.textContent = atMs ? `${(atMs / 1000).toFixed(1)}s` : '';
+          const atMs = Number(detail.at_ms || detail.elapsed_ms || 0);
+          time.textContent = formatDurationMs(atMs);
           row.append(copy, time);
           list.appendChild(row);
           list.scrollTop = list.scrollHeight;
@@ -670,7 +719,10 @@
           }
           scrollToBottom();
         };
-        events.forEach((event) => update(event.stage, { ...(event.detail || {}), at_ms: event.at_ms }));
+        events.forEach((event) => {
+          const d = (event && typeof event.detail === 'object' && event.detail !== null) ? event.detail : (event || {});
+          update(event.stage, { ...d, at_ms: event.at_ms ?? event.elapsed_ms ?? d.at_ms ?? 0 });
+        });
         if (!events.length && open) update('preparing');
         if (!events.length && !open) {
           terminal = true;
@@ -683,38 +735,107 @@
         return { details, update, appendReasoning, isTerminal: () => terminal };
       };
 
-      const appendSources = (body, sources) => {
+      const sourceLocationCopy = (source) => {
+        const url = String(source.url || '');
+        if (url.startsWith('document://')) {
+          const chunkMatch = url.match(/#chunk-(\d+)/i);
+          return chunkMatch ? `本地文档原文 · 第 ${chunkMatch[1]} 段` : '本地文档原文片段';
+        }
+        const parts = [];
+        if (/^https?:\/\//i.test(url)) {
+          try { parts.push(new URL(url).hostname.replace(/^www\./, '')); } catch (_) {}
+        }
+        if (source.published_date) parts.push(String(source.published_date).slice(0, 10));
+        return parts.join(' · ') || '点击展开已抓取的原文摘录';
+      };
+
+      const appendSources = (body, sources, evidence = [], sourceExcerpts = {}) => {
         if (!sources?.length) return;
+        const quoteBySourceId = new Map();
+        Object.entries(sourceExcerpts || {}).forEach(([k, v]) => {
+          const sid = String(k || '').toUpperCase();
+          const txt = String(v || '').trim();
+          if (sid && txt) quoteBySourceId.set(sid, txt);
+        });
+        (evidence || []).forEach((item) => {
+          const sid = String(item?.source_id || '').toUpperCase();
+          const quote = String(item?.quote || item?.claim || '').trim();
+          if (sid && quote && !quoteBySourceId.has(sid)) quoteBySourceId.set(sid, quote);
+        });
         const details = document.createElement('details');
         details.className = 'source-details';
+        details.open = true;
         const summary = document.createElement('summary');
-        summary.textContent = `查看 ${sources.length} 个参考来源`;
+        summary.textContent = `参考来源 · ${sources.length} 个（点击卡片定位原文内容）`;
         const grid = document.createElement('div');
         grid.className = 'source-grid';
         sources.forEach((source, index) => {
+          const sid = String(source.source_id || `S${index + 1}`).toUpperCase();
           const isWeb = /^https?:\/\//i.test(source.url || '');
-          const link = document.createElement(isWeb ? 'a' : 'div');
-          link.className = 'source-link';
-          if (isWeb) {
-            link.href = source.url;
-            link.target = '_blank';
-            link.rel = 'noreferrer';
-          }
+          const card = document.createElement('details');
+          card.className = 'source-card';
+          card.dataset.sourceId = sid;
+          const cardSummary = document.createElement('summary');
           const number = document.createElement('span');
           number.className = 'source-number';
-          number.textContent = source.source_id || `S${index + 1}`;
+          number.textContent = sid;
+          const headCopy = document.createElement('span');
+          headCopy.className = 'source-head-copy';
           const name = document.createElement('span');
           name.className = 'source-name';
-          name.textContent = source.title || source.url;
-          link.append(number, name);
-          grid.appendChild(link);
+          name.textContent = source.title || source.url || `来源 ${sid}`;
+          const submeta = document.createElement('span');
+          submeta.className = 'source-submeta';
+          submeta.textContent = sourceLocationCopy(source);
+          headCopy.append(name, submeta);
+          cardSummary.append(number, headCopy);
+          if (isWeb) {
+            const ext = document.createElement('a');
+            ext.className = 'source-ext-link';
+            ext.href = source.url;
+            ext.target = '_blank';
+            ext.rel = 'noreferrer noopener';
+            ext.textContent = '原网页 ↗';
+            ext.addEventListener('click', (e) => e.stopPropagation());
+            cardSummary.appendChild(ext);
+          }
+          const chevron = document.createElement('span');
+          chevron.className = 'source-chevron';
+          chevron.textContent = '⌄';
+          cardSummary.appendChild(chevron);
+          const excerpt = document.createElement('div');
+          excerpt.className = 'source-excerpt';
+          const rawExcerpt = String(
+            source.content || source.snippet || quoteBySourceId.get(sid) || ''
+          ).trim();
+          excerpt.textContent = rawExcerpt || (isWeb ? `来源链接：${source.url}` : '（该段落无额外摘录文本）');
+          card.append(cardSummary, excerpt);
+          grid.appendChild(card);
         });
         details.append(summary, grid);
         body.appendChild(details);
       };
 
+      const expandCitationGroup = (inner) => {
+        const out = [];
+        inner.split(/[,，、;；/]+/).forEach((part) => {
+          const range = part.trim().match(/^S(\d+)\s*[-~～–—]\s*S?(\d+)$/i);
+          if (range) {
+            const start = Number(range[1]);
+            const end = Number(range[2]);
+            if (end >= start && end - start <= 12) {
+              for (let n = start; n <= end; n += 1) out.push(`S${n}`);
+              return;
+            }
+          }
+          const single = part.trim().match(/^S(\d+)$/i);
+          if (single) out.push(`S${single[1]}`);
+        });
+        return out;
+      };
+
       const appendInlineMarkdown = (parent, text, sourcesById) => {
-        const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|\[S\d+\])/gi;
+        const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(?:\[|【)\s*(S\d+(?:\s*(?:[,，、;；/]|[-~～–—]\s*S?)\s*S?\d+)*)\s*(?:\]|】))/gi;
         let offset = 0;
         for (const match of text.matchAll(pattern)) {
           if (match.index > offset) parent.appendChild(document.createTextNode(text.slice(offset, match.index)));
@@ -728,18 +849,37 @@
             link.textContent = match[2];
             link.title = match[3];
             parent.appendChild(link);
-          } else {
-            const source = token.startsWith('[') ? sourcesById.get(token.slice(1, -1).toUpperCase()) : null;
-            const sourceUrl = source && /^https?:\/\//i.test(source.url || '') ? source.url : '';
-            const node = document.createElement(sourceUrl ? 'a' : token.startsWith('[') ? 'span' : token.startsWith('`') ? 'code' : 'strong');
-            node.textContent = token.startsWith('[') ? token.toUpperCase() : token.startsWith('`') ? token.slice(1, -1) : token.slice(2, -2);
-            if (sourceUrl) node.className = 'answer-citation';
-            if (sourceUrl) {
-              node.href = sourceUrl;
-              node.target = '_blank';
-              node.rel = 'noreferrer noopener';
-              node.title = source.title || sourceUrl;
+          } else if (match[4]) {
+            const sids = expandCitationGroup(match[4]);
+            if (!sids.length) {
+              parent.appendChild(document.createTextNode(token));
+            } else {
+              sids.forEach((sid) => {
+                const source = sourcesById.get(sid.toUpperCase()) || null;
+                const isWeb = Boolean(source && /^https?:\/\//i.test(source.url || ''));
+                const pill = document.createElement('a');
+                pill.className = 'answer-citation-pill';
+                pill.href = isWeb ? source.url : `#source-${sid}`;
+                if (isWeb) {
+                  pill.target = '_blank';
+                  pill.rel = 'noreferrer noopener';
+                }
+                pill.textContent = sid;
+                pill.title = source?.title ? `${sid} · ${source.title}（点击定位原文片段）` : `定位来源 ${sid}`;
+                pill.addEventListener('click', (event) => {
+                  if (event.metaKey || event.ctrlKey) return;
+                  if (focusSourceCard(parent, sid)) {
+                    event.preventDefault();
+                  } else if (!isWeb) {
+                    event.preventDefault();
+                  }
+                });
+                parent.appendChild(pill);
+              });
             }
+          } else {
+            const node = document.createElement(token.startsWith('`') ? 'code' : 'strong');
+            node.textContent = token.startsWith('`') ? token.slice(1, -1) : token.slice(2, -2);
             parent.appendChild(node);
           }
           offset = match.index + token.length;
@@ -851,7 +991,7 @@
         answer.className = 'assistant-answer';
         renderAnswer(answer, data.answer, data.sources || []);
         body.append(label, answer);
-        appendSources(body, data.sources || []);
+        appendSources(body, data.sources || [], data.evidence || [], data.source_excerpts || {});
         const meta = document.createElement('div');
         meta.className = 'message-meta';
         const seconds = Number(data.timings_ms?.total || 0) / 1000;
@@ -944,6 +1084,7 @@
               created_at: item.created_at || '',
               request_id: item.request_id || '',
               sources: payload.sources || [],
+              source_excerpts: payload.source_excerpts || {},
               trace: payload.trace || [],
               timings_ms: payload.timings_ms || {},
               degraded: Boolean(payload.degraded),

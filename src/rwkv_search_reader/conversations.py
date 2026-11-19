@@ -112,6 +112,16 @@ def _compact_answer_payload(payload: object) -> dict[str, Any]:
         for source in payload.get("sources") or []
         if (compact_source := _compact_source(source))
     ]
+    excerpts: dict[str, str] = {}
+    for source in payload.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        sid = str(source.get("source_id") or "").strip().upper()
+        text = str(source.get("snippet") or source.get("content") or "").strip()
+        if sid and text:
+            excerpts[sid] = text[:1600]
+    if excerpts:
+        compact["source_excerpts"] = excerpts
     compact["trace"] = _compact_trace(payload.get("trace"))
     return compact
 
@@ -450,11 +460,34 @@ class ConversationStore:
                 (identity,),
             ).fetchall()
             conversation = self._conversation(row, len(message_rows))
-            conversation["items"] = [self._message(item) for item in message_rows]
+            items = [self._message(item) for item in message_rows]
             document_rows = connection.execute(
                 "SELECT * FROM documents WHERE conversation_id = ? ORDER BY created_at",
                 (identity,),
             ).fetchall()
+            if document_rows:
+                chunk_rows = connection.execute(
+                    "SELECT document_id, ordinal, content FROM document_chunks WHERE conversation_id = ?",
+                    (identity,),
+                ).fetchall()
+                chunk_map = {
+                    (str(cr["document_id"]), int(cr["ordinal"])): str(cr["content"])
+                    for cr in chunk_rows
+                }
+                for msg in items:
+                    sources = (msg.get("payload") or {}).get("sources")
+                    if not isinstance(sources, list):
+                        continue
+                    for src in sources:
+                        if not isinstance(src, dict) or src.get("content"):
+                            continue
+                        url = str(src.get("url") or "")
+                        m = re.match(r"^document://([^#]+)#chunk-(\d+)$", url, re.IGNORECASE)
+                        if m:
+                            text = chunk_map.get((m.group(1), int(m.group(2)) - 1), "")
+                            if text:
+                                src["content"] = text[:3600]
+            conversation["items"] = items
             conversation["documents"] = [self._document(item) for item in document_rows]
             conversation["document_count"] = len(document_rows)
             return conversation

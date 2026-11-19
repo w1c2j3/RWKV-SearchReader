@@ -893,14 +893,15 @@ class DshWebAgent:
         model_calls: list[dict[str, object]] = []
 
         def emit(stage: str, detail: dict[str, object]) -> None:
+            at_ms = round((time.perf_counter() - started) * 1000, 1)
             event = {
                 "stage": stage,
-                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
-                **detail,
+                "at_ms": at_ms,
+                "detail": detail,
             }
             trace.append(event)
             if on_progress is not None:
-                on_progress(stage, detail)
+                on_progress(stage, {**detail, "at_ms": at_ms})
 
         now_dt = datetime.now().astimezone()
         now_year = now_dt.year
@@ -969,6 +970,7 @@ class DshWebAgent:
                 merged_hits: list[SearchHit] = []
                 seen_urls: set[str] = set()
                 truncated = False
+                search_t0 = time.perf_counter()
                 try:
                     if len(q_list) == 1:
                         batch_lists = [
@@ -991,6 +993,7 @@ class DshWebAgent:
                             batch_lists = [f.result() for f in futs]
                 except SearchReaderError as exc:
                     return f"web_search failed: {exc}", False
+                search_ms = round((time.perf_counter() - search_t0) * 1000, 1)
 
                 queries.extend(q_list)
                 merged_cap = min(12, max(max_results, len(q_list) * 4))
@@ -1019,6 +1022,7 @@ class DshWebAgent:
                         {
                             "queries": q_list,
                             "source_count": len(merged_hits),
+                            "duration_ms": search_ms,
                             "sources": [
                                 {
                                     "source_id": h.source_id,
@@ -1039,7 +1043,9 @@ class DshWebAgent:
                 url = normalize_url(str(args.get("url") or "").strip())
                 if not url:
                     return "url must be a non-empty HTTP(S) URL", False
-                emit("reading", {"url": url, "message": f"正在读取网页：{urlsplit(url).hostname or url}"})
+                host = urlsplit(url).hostname or url
+                emit("reading", {"url": url, "message": f"正在读取网页：{host}"})
+                fetch_t0 = time.perf_counter()
                 cache_key = url.split("#", 1)[0].casefold()
                 cached_hit = source_by_url.get(cache_key)
                 cached_body = (
@@ -1048,11 +1054,32 @@ class DshWebAgent:
                     else ""
                 )
                 if len(cached_body) >= 500 and "数据加载中" not in cached_body:
+                    emit(
+                        "read_completed",
+                        {
+                            "url": url,
+                            "host": host,
+                            "cached": True,
+                            "duration_ms": round((time.perf_counter() - fetch_t0) * 1000, 1),
+                            "char_count": len(cached_body),
+                        },
+                    )
                     return format_dsh_fetch_output(url, cached_body, status_code=200), True
                 fetched = self.provider.fetch_url(url)
+                fetch_ms = round((time.perf_counter() - fetch_t0) * 1000, 1)
                 if not fetched or not fetched[1].strip():
                     return f"HTTP fetch failed or returned empty body for {url}", False
                 title, content = fetched
+                emit(
+                    "read_completed",
+                    {
+                        "url": url,
+                        "host": host,
+                        "cached": False,
+                        "duration_ms": fetch_ms,
+                        "char_count": len(content),
+                    },
+                )
                 if len(content.strip()) < 260 or "数据加载中" in content or "訂閱最新資訊" in content:
                     content = (
                         f"{content.strip()}\n\n"
